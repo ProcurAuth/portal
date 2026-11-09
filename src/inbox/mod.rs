@@ -85,6 +85,7 @@ pub use items::{approval_key_hash, Clock};
 pub use items_ops::Consumed;
 /// What the web pages of the items take from the engine.
 pub(crate) mod page_items {
+    pub(crate) use super::agents_ops::{AgentOp, OpDone, OpError};
     pub(crate) use super::frames::{AgentTurn, OwnerAnswer};
     #[cfg(test)]
     pub(crate) use super::items::{ApprovalRow, ItemRow};

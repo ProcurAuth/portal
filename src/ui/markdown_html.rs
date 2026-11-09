@@ -132,6 +132,13 @@ pub fn escape(text: &str) -> String {
     escape_marked(text, false)
 }
 
+/// A text that a client sent about itself (what an agent says, its client, its address): escaped, with the mark of a
+/// hidden character and the mark of a look-alike letter. The owner then sees a Cyrillic letter in a name that copies
+/// the name of a known agent.
+pub fn escape_untrusted(text: &str) -> String {
+    escape_marked(text, true)
+}
+
 /// A text for the value of an attribute: escaped, and a hidden character is the text `<U+XXXX>`, with no markup.
 pub fn escape_attr(text: &str) -> String {
     let mut out = String::with_capacity(text.len());

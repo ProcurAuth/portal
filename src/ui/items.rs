@@ -1,5 +1,5 @@
-//! The pages of the items in the tab "Inbox": the panel "Open items", the page "History", the page of one request and
-//! the page "Inbox limits".
+//! The pages of the items in the tab "Inbox": the panel "Open items" (one group for each agent), the page "History", the
+//! page of one request and the page "Inbox limits". The pages of the agents are in `agents.rs`.
 //!
 //! Every page is HTML from the server and works without script. A form is a POST with the token `csrf`. The script of
 //! `settings.js` only shows the copy buttons: a button that needs it has the attribute `hidden`.
@@ -12,9 +12,14 @@ use std::fmt::Write as _;
 
 use inbox_core::proto::{Action, ExplanationFormat, ItemState, Kind, Language};
 
+use super::agents::{
+    about_sender, first_use, hints_line, key_chip, sender_box, state_pill, AgentView, FirstUse,
+    Sender,
+};
 use super::components::{chips_stable, icon, Chip};
 use super::markdown_html as html;
 use super::settings::{fill_page, notice_html, Frame, Notice, Tab};
+use crate::inbox::agents::AgentState;
 use crate::inbox::page_items::Loaded;
 use crate::util::{html_escape, time_tag};
 
@@ -66,7 +71,7 @@ pub fn notice_for(code: &str) -> Option<Notice> {
         "gone" => ("That request does not exist.", false),
         "phone_only" => ("This server takes answers on the phone only.", false),
         "failed" => ("The inbox could not do this. Try again.", false),
-        _ => return None,
+        _ => return super::agents::notice_for(code),
     };
     Some(Notice { text, ok })
 }
@@ -85,7 +90,7 @@ fn span(ms: i64) -> String {
 }
 
 /// The same in words: `6 days`, `3 hours`.
-fn long_span(ms: i64) -> String {
+pub(super) fn long_span(ms: i64) -> String {
     let secs = ms.max(0) / 1000;
     let (n, unit) = match secs {
         0..=59 => (secs, "second"),
@@ -96,15 +101,15 @@ fn long_span(ms: i64) -> String {
     format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
 }
 
-fn ago(now: i64, then: i64) -> String {
+pub(super) fn ago(now: i64, then: i64) -> String {
     format!("{} ago", span(now - then))
 }
 
-fn when(ms: i64) -> String {
+pub(super) fn when(ms: i64) -> String {
     time_tag(ms / 1000, false).replacen("<time ", r#"<time data-short="1" "#, 1)
 }
 
-fn b(text: &str) -> String {
+pub(super) fn b(text: &str) -> String {
     format!("<b>{text}</b>")
 }
 
@@ -200,6 +205,15 @@ pub enum Title {
     Purged,
 }
 
+/// The agent of a row of the History: its id for the filter, and its name for the cell.
+pub struct AgentTag {
+    pub agent_id: String,
+    /// Text of the server: the name of the owner, else "<key name> #<number>".
+    pub label: String,
+    /// The group has the name of the key: the cell shows the name once.
+    pub plain: bool,
+}
+
 /// One request in a list. `first_line` is the start of the command.
 pub struct Line<'a> {
     pub loaded: &'a Loaded,
@@ -207,6 +221,8 @@ pub struct Line<'a> {
     pub first_line: Option<String>,
     /// The name of the key of the agent.
     pub key_name: String,
+    /// The agent of the request, for the History. The panel shows it in the header of the group.
+    pub agent: Option<AgentTag>,
 }
 
 fn kind_chip(kind: Kind) -> &'static str {
@@ -216,7 +232,7 @@ fn kind_chip(kind: Kind) -> &'static str {
     }
 }
 
-fn title_html(t: &Title, code: &str) -> String {
+pub(super) fn title_html(t: &Title, code: &str) -> String {
     match t {
         Title::Text(text) => html::escape(text),
         Title::Hidden => format!(r#"<span class="muted">Request {code}: content hidden</span>"#),
@@ -224,7 +240,7 @@ fn title_html(t: &Title, code: &str) -> String {
     }
 }
 
-fn code_of(l: &Loaded) -> String {
+pub(super) fn code_of(l: &Loaded) -> String {
     l.approval.as_ref().map_or_else(
         || {
             l.item
@@ -238,46 +254,157 @@ fn code_of(l: &Loaded) -> String {
     )
 }
 
-fn detail_href(l: &Loaded) -> String {
+pub(super) fn detail_href(l: &Loaded) -> String {
     format!("{ITEMS}/{}", l.item.request_id)
+}
+
+/// The requests of one agent, in the panel "Open items".
+pub struct Group<'a> {
+    pub agent: AgentView,
+    pub lines: Vec<Line<'a>>,
+}
+
+impl Group<'_> {
+    /// The time of the oldest request of the group.
+    fn oldest(&self) -> i64 {
+        self.lines
+            .iter()
+            .map(|l| l.loaded.item.created_at)
+            .min()
+            .unwrap_or(i64::MAX)
+    }
 }
 
 /// The data of the panel "Open items".
 pub struct OpenItems<'a> {
-    pub lines: Vec<Line<'a>>,
+    pub groups: Vec<Group<'a>>,
+    /// One notice for each `new` agent, even when the agent has no open request.
+    pub notices: Vec<FirstUse<'a>>,
+    /// `inbox.agents.lock_new`.
+    pub lock: bool,
+    /// The block `inbox.agents` is on: the segmented control has the link "Agents".
+    pub agents_link: bool,
     pub stale_after_ms: i64,
     pub now_ms: i64,
 }
 
-/// The panel "Open items": one row for each request that waits. The panel is absent when nothing waits.
+/// The groups in the order of the page: the `new` agents first, then the others by the time of their oldest request, and
+/// the bucket of a key last.
+fn ordered<'g, 'a>(groups: &'g [Group<'a>]) -> Vec<&'g Group<'a>> {
+    let mut list: Vec<&Group> = groups.iter().collect();
+    list.sort_by(|a, b| {
+        let key = |g: &Group| {
+            (
+                g.agent.is_bucket(),
+                g.agent.state != AgentState::New,
+                g.oldest(),
+            )
+        };
+        key(a)
+            .cmp(&key(b))
+            .then_with(|| a.agent.agent_id.cmp(&b.agent.agent_id))
+    });
+    list
+}
+
+/// The panel "Open items": the first-use notices, then one group for each agent that has a request that waits. The panel is
+/// absent when nothing waits and no agent is new.
 pub fn open_items(p: &OpenItems) -> String {
-    if p.lines.is_empty() {
+    if p.groups.is_empty() && p.notices.is_empty() {
         return String::new();
     }
-    let mut rows = String::new();
-    for line in &p.lines {
-        rows.push_str(&open_row(line, p));
+    let mut out = String::new();
+    let mut notices: Vec<&FirstUse> = p.notices.iter().collect();
+    notices.sort_by_key(|n| (n.agent.created_at, n.agent.agent_id.clone()));
+    for n in notices {
+        out.push_str(&first_use(n));
     }
-    format!(
-        r#"<section class="zone zone--items" aria-labelledby="oi-t"><div class="zone__head"><h2 class="title" id="oi-t">Open items</h2><span class="count">{}</span><span class="grow"></span>{}</div><div class="panel"><ul class="oiList">{rows}</ul></div></section>"#,
-        p.lines.len(),
-        segmented(true)
-    )
+    if p.groups.is_empty() {
+        return out;
+    }
+    let total: usize = p.groups.iter().map(|g| g.lines.len()).sum();
+    let mut body = String::new();
+    for g in ordered(&p.groups) {
+        body.push_str(&group(g, p));
+    }
+    let note = if p.groups.iter().any(|g| !g.agent.plain) {
+        r#"<p class="note agNote">Groups are by agent. The names are yours. The lines &quot;Observed, not verified&quot; come from the agent or from its connection. They can be wrong or copied.</p>"#
+    } else {
+        ""
+    };
+    let _ = write!(
+        out,
+        r#"<section class="zone zone--items" aria-labelledby="oi-t"><div class="zone__head"><h2 class="title" id="oi-t">Open items</h2><span class="count">{total}</span><span class="grow"></span>{}</div><div class="agGroups">{body}</div>{note}</section>"#,
+        segmented(View::Open, p.agents_link)
+    );
+    out
 }
 
-fn segmented(open: bool) -> String {
-    let (a, b) = if open {
-        (" is-active", "")
+/// The three views of the Inbox, for the control at the top of each page.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Open,
+    History,
+    Agents,
+}
+
+pub(super) fn segmented(active: View, agents: bool) -> String {
+    let on = |v: View| if active == v { " is-active" } else { "" };
+    let agents = if agents {
+        format!(
+            r#"<a class="segmented__option{}" href="{}">Agents</a>"#,
+            on(View::Agents),
+            super::agents::AGENTS
+        )
     } else {
-        ("", " is-active")
+        String::new()
     };
     format!(
-        r#"<span class="segmented" role="group" aria-label="View"><a class="segmented__option{a}" href="{}">Open items</a><a class="segmented__option{b}" href="{ITEMS}">History</a></span>"#,
-        super::inbox::PAGE
+        r#"<span class="segmented" role="group" aria-label="View"><a class="segmented__option{}" href="{}">Open items</a><a class="segmented__option{}" href="{ITEMS}">History</a>{agents}</span>"#,
+        on(View::Open),
+        super::inbox::PAGE,
+        on(View::History),
     )
 }
 
-fn open_row(line: &Line, p: &OpenItems) -> String {
+/// One group: the header with the name, the key, the state and the count, the line of the hints, and the rows.
+fn group(g: &Group, p: &OpenItems) -> String {
+    let a = &g.agent;
+    let locked = a.locked(p.lock);
+    let mut rows = String::new();
+    for line in &g.lines {
+        rows.push_str(&open_row(line, p, locked));
+    }
+    let class = match (a.is_bucket(), a.state) {
+        (true, _) if !a.plain => " agrp--bucket",
+        (false, AgentState::New) => " agrp--new",
+        _ => "",
+    };
+    let chip = if a.plain {
+        String::new()
+    } else {
+        key_chip(&a.key_name)
+    };
+    // A new agent has its actions in the notice above. A bucket cannot be managed.
+    let manage = if a.is_bucket() || a.state == AgentState::New {
+        String::new()
+    } else {
+        format!(
+            r#"<a class="button button--small" href="{}">Manage</a>"#,
+            html_escape(&a.href())
+        )
+    };
+    format!(
+        r#"<details class="agrp{class}" open><summary><span class="agrp__chev">{}</span><span class="agrp__name">{}</span>{chip}{}<span class="agrp__sum"><b>{}</b> open</span><span class="grow"></span>{manage}</summary>{}<ul class="oiList">{rows}</ul></details>"#,
+        icon("chevron-right"),
+        html_escape(&a.label),
+        state_pill(a, false),
+        g.lines.len(),
+        hints_line(a, p.now_ms),
+    )
+}
+
+fn open_row(line: &Line, p: &OpenItems, locked: bool) -> String {
     let l = line.loaded;
     let i = &l.item;
     let stale = p.now_ms - i.created_at > p.stale_after_ms;
@@ -287,10 +414,17 @@ fn open_row(line: &Line, p: &OpenItems) -> String {
     } else {
         "help-circle"
     };
-    let service = l
+    // The key and the agent are in the header of the group: the row shows the service and the action.
+    let who = l
         .approval
         .as_ref()
-        .map(|a| format!(" · {}", html_escape(&a.service)))
+        .map(|a| {
+            format!(
+                "{} · <code>{}</code>",
+                html_escape(&a.service),
+                html_escape(&a.action)
+            )
+        })
         .unwrap_or_default();
     let mut meta = format!(
         r#"<span class="lease{}">Asked {}</span><span class="dot lease">Agent active {}</span>"#,
@@ -325,6 +459,14 @@ fn open_row(line: &Line, p: &OpenItems) -> String {
             )
         })
         .unwrap_or_default();
+    let lock = if locked && i.kind == Kind::Approval {
+        format!(
+            r#"<div class="lockline">{}<span>Approve is locked until you allow this agent. You can decline now.</span></div>"#,
+            icon("lock")
+        )
+    } else {
+        String::new()
+    };
     let (pill, action) = match i.state {
         ItemState::Replied => (r#"<span class="pill">Question sent</span>"#, "Open"),
         _ => (
@@ -338,14 +480,12 @@ fn open_row(line: &Line, p: &OpenItems) -> String {
         ""
     };
     format!(
-        r#"<li class="oi"><span class="oi__icon">{}</span><div class="oi__line1">{}<span class="code">{}</span><a class="oi__title" href="{}">{}</a></div><div class="oi__who">Agent {} · key of {}{service}</div><div class="oi__meta">{meta}</div>{cmd}<div class="oi__side">{old}{pill}<a class="button button--small" href="{}">{action}</a></div></li>"#,
+        r#"<li class="oi"><span class="oi__icon">{}</span><div class="oi__line1">{}<span class="code">{}</span><a class="oi__title" href="{}">{}</a></div><div class="oi__who">{who}</div><div class="oi__meta">{meta}</div>{cmd}{lock}<div class="oi__side">{old}{pill}<a class="button button--small" href="{}">{action}</a></div></li>"#,
         icon(icon_name),
         kind_chip(i.kind),
         html_escape(&code),
         html_escape(&detail_href(l)),
         title_html(&line.title, &code),
-        b(&html::escape(&line.key_name)),
-        b(&html_escape(&i.requester_owner)),
         html_escape(&detail_href(l)),
     )
 }
@@ -420,6 +560,8 @@ pub struct HistoryQuery {
     pub service: String,
     /// The period, in days: 7, 30 or 90.
     pub days: u32,
+    /// The id of one agent: 32 hexadecimal characters.
+    pub agent: Option<String>,
 }
 
 impl Default for HistoryQuery {
@@ -429,6 +571,7 @@ impl Default for HistoryQuery {
             key: String::new(),
             service: String::new(),
             days: 30,
+            agent: None,
         }
     }
 }
@@ -452,6 +595,12 @@ impl HistoryQuery {
                 "st" => q.state = Some(StateFilter::parse(value)?),
                 "k" => q.key = text(value)?,
                 "svc" => q.service = text(value)?,
+                "agent" => {
+                    if value.len() != 32 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        return None;
+                    }
+                    q.agent = Some(value.to_ascii_lowercase());
+                }
                 "p" => {
                     q.days = match value.as_str() {
                         "7" => 7,
@@ -486,6 +635,9 @@ impl HistoryQuery {
                 crate::util::percent_encode_query_component(&q.service)
             ));
         }
+        if let Some(agent) = &q.agent {
+            parts.push(format!("agent={agent}"));
+        }
         if q.days != 30 {
             parts.push(format!("p={}", q.days));
         }
@@ -510,6 +662,10 @@ pub struct History<'a> {
     pub all_accounts: bool,
     pub truncated: bool,
     pub limits_link: bool,
+    /// The block `inbox.agents` is on: the segmented control has the link "Agents".
+    pub agents_link: bool,
+    /// The agent of the filter `agent=`: its name (text of the server), or `None` when the viewer does not know it.
+    pub agent_filter: Option<Option<String>>,
 }
 
 pub fn history_page(frame: &Frame, h: &History, notice: Option<Notice>) -> String {
@@ -556,8 +712,27 @@ pub fn history_page(frame: &Frame, h: &History, notice: Option<Notice>) -> Strin
     } else {
         String::new()
     };
+    let agent_field = q
+        .agent
+        .as_ref()
+        .map(|a| {
+            format!(
+                r#"<input type="hidden" name="agent" value="{}">"#,
+                html_escape(a)
+            )
+        })
+        .unwrap_or_default();
+    let agent_chip = match &h.agent_filter {
+        Some(name) => format!(
+            r#"<a class="pill pill--wait histAgent" href="{}" title="Show the requests of all agents">Agent <b>{}</b> {}</a>"#,
+            html_escape(&q.href(|q| q.agent = None)),
+            name.as_deref().map_or("unknown".to_string(), html_escape),
+            icon("x").replace(r#"class="icon""#, r#"class="icon icon--sm""#)
+        ),
+        None => String::new(),
+    };
     let filter = format!(
-        r#"<form class="inline histFilter" method="get" action="{ITEMS}" role="search">{state_field}{period_field}<input class="uiInput" type="search" name="k" value="{}" placeholder="Key" aria-label="Key" maxlength="64"><input class="uiInput" type="search" name="svc" value="{}" placeholder="Service" aria-label="Service" maxlength="64"><button class="visually-hidden" type="submit">Filter</button></form>"#,
+        r#"<form class="inline histFilter" method="get" action="{ITEMS}" role="search">{state_field}{period_field}{agent_field}<input class="uiInput" type="search" name="k" value="{}" placeholder="Key" aria-label="Key" maxlength="64"><input class="uiInput" type="search" name="svc" value="{}" placeholder="Service" aria-label="Service" maxlength="64"><button class="visually-hidden" type="submit">Filter</button></form>"#,
         html_escape(&q.key),
         html_escape(&q.service)
     );
@@ -589,9 +764,9 @@ pub fn history_page(frame: &Frame, h: &History, notice: Option<Notice>) -> Strin
     };
     let _ = write!(
         out,
-        r#"<div class="page"><section class="zone" aria-labelledby="hi-t"><div class="zone__head"><h2 class="title" id="hi-t">History</h2><span class="count">{}</span><span class="grow"></span>{limits}{}</div><div class="tbar tbar--hist">{}<span class="grow"></span>{filter}{days}</div><div class="scroll">{table}</div></section>{note}</div>"#,
+        r#"<div class="page"><section class="zone" aria-labelledby="hi-t"><div class="zone__head"><h2 class="title" id="hi-t">History</h2><span class="count">{}</span><span class="grow"></span>{limits}{}</div><div class="tbar tbar--hist">{}{agent_chip}<span class="grow"></span>{filter}{days}</div><div class="scroll">{table}</div></section>{note}</div>"#,
         html_escape(&count),
-        segmented(false),
+        segmented(View::History, h.agents_link),
         chips_stable(&chips),
     );
     fill_page(Tab::Inbox, frame, "Inbox: history", &out)
@@ -602,15 +777,27 @@ fn history_row(line: &Line, chained: bool, h: &History) -> String {
     let i = &l.item;
     let code = code_of(l);
     let at = i.final_at.unwrap_or(i.created_at);
-    let who = if h.all_accounts {
-        format!(
-            "{} ({})",
-            html::escape(&line.key_name),
-            html_escape(&i.requester_owner)
-        )
-    } else {
-        html::escape(&line.key_name)
+    let mut who = match &line.agent {
+        Some(a) => {
+            let name = format!(
+                r#"<a href="{ITEMS}?agent={}">{}</a>"#,
+                html_escape(&a.agent_id),
+                html_escape(&a.label)
+            );
+            if a.plain {
+                name
+            } else {
+                format!(
+                    r#"{name} <span class="muted">· {}</span>"#,
+                    html::escape(&line.key_name)
+                )
+            }
+        }
+        None => html::escape(&line.key_name),
     };
+    if h.all_accounts {
+        let _ = write!(who, " ({})", html_escape(&i.requester_owner));
+    }
     let service = l
         .approval
         .as_ref()
@@ -618,7 +805,7 @@ fn history_row(line: &Line, chained: bool, h: &History) -> String {
         .map(|a| format!(" · {}", html_escape(&a.service)))
         .unwrap_or_default();
     format!(
-        r#"<tr{}><td>{}</td><td class="muted">{}</td><td><a href="{}">{}</a></td><td class="code">{}</td><td>{who}</td><td class="out">{}{service}</td></tr>"#,
+        r#"<tr{}><td>{}</td><td class="muted">{}</td><td><a href="{}">{}</a></td><td class="code">{}</td><td class="who">{who}</td><td class="out">{}{service}</td></tr>"#,
         if chained { r#" class="chain""# } else { "" },
         state_icon(l),
         when(at),
@@ -687,7 +874,8 @@ pub enum Mode {
 pub struct Detail<'a> {
     pub loaded: &'a Loaded,
     pub body: Body,
-    pub key_name: String,
+    /// The agent that sent the request: the box "From agent" and the lock of the approval.
+    pub sender: Sender,
     pub turns: Vec<Turn>,
     /// The time of the newest earlier approval of the same effect and whether the service used it.
     pub previous: Option<(i64, bool)>,
@@ -952,10 +1140,30 @@ fn decision(d: &Detail) -> String {
         } else {
             String::new()
         };
+        // The server decides the lock. The page shows it, so the owner knows why the button is off.
+        let (lock_line, approve) = if d.sender.locked() {
+            (
+                format!(
+                    r#"<div class="lockline">{}<span>Approve is locked. This agent is new. Name it or allow it first. You can decline now.</span></div>"#,
+                    icon("lock")
+                ),
+                format!(
+                    r#"<button class="button button--approve button--off" type="button" disabled>{}Approve</button>"#,
+                    icon("lock")
+                ),
+            )
+        } else {
+            (
+                String::new(),
+                format!(
+                    r#"<button class="button button--approve" type="submit" name="action" value="accept">{}Approve</button>"#,
+                    icon("check")
+                ),
+            )
+        };
         let _ = write!(
             out,
-            r#"<form class="decide" method="post" action="{ANSWER}" aria-label="Decision"><div class="sec2__head"><h2 class="title">Your decision</h2><span class="sec2__note">Approve sends no text.</span></div><div class="decide__body">{hidden}{stale}<div class="decide__row"><button class="button button--approve" type="submit" name="action" value="accept">{}Approve</button><button class="button" type="submit" name="action" value="decline" formnovalidate>{}Decline</button><span class="grow"></span><span class="note">The agent must run the command within the time of the file after you approve.</span></div><p class="note">{}This page cannot check that you read the whole command. The phone can. Read the command to the end before you approve.</p>{comment}</div></form>"#,
-            icon("check"),
+            r#"<form class="decide" method="post" action="{ANSWER}" aria-label="Decision"><div class="sec2__head"><h2 class="title">Your decision</h2><span class="sec2__note">Approve sends no text.</span></div><div class="decide__body">{hidden}{stale}{lock_line}<div class="decide__row">{approve}<button class="button" type="submit" name="action" value="decline" formnovalidate>{}Decline</button><span class="grow"></span><span class="note">The agent must run the command within the time of the file after you approve.</span></div><p class="note">{}This page cannot check that you read the whole command. The phone can. Read the command to the end before you approve.</p>{comment}</div></form>"#,
             icon("x"),
             icon("alert-triangle").replace("class=\"icon\"", "class=\"icon icon--sm\""),
         );
@@ -1029,10 +1237,8 @@ fn side(d: &Detail) -> String {
     let l = d.loaded;
     let i = &l.item;
     let mut req = format!(
-        "<dl class=\"facts\"><div><dt>Code</dt><dd><code>{}</code></dd></div><div><dt>Key</dt><dd>{}</dd></div><div><dt>Owner</dt><dd>{}</dd></div><div><dt>Interaction</dt><dd>{}</dd></div></dl>",
+        "<dl class=\"facts\"><div><dt>Code</dt><dd><code>{}</code></dd></div><div><dt>Interaction</dt><dd>{}</dd></div></dl>",
         html_escape(&code_of(l)),
-        html::escape(&d.key_name),
-        html_escape(&i.requester_owner),
         match i.interaction {
             inbox_core::proto::Interaction::Conversational => "Conversational",
             _ => "One shot",
@@ -1085,8 +1291,13 @@ fn side(d: &Detail) -> String {
         Mode::Owner => "The service sees only the verdict. Your comment and your questions go to the agent, never to the service.",
         _ => "The service sees only the verdict. The content is for the owner. An administrator reads metadata only.",
     };
+    let about = about_sender(
+        &d.sender,
+        &i.requester_owner,
+        &ago(d.now_ms, i.agent_seen_at),
+    );
     format!(
-        r#"<aside class="detail__side"><div class="sidebox"><h3>Request</h3>{req}</div><div class="sidebox"><h3>Time line</h3><ul class="timeline">{tl}</ul></div><div class="sidebox"><h3>Who sees what</h3><p>{who}</p></div></aside>"#
+        r#"<aside class="detail__side">{about}<div class="sidebox"><h3>Request</h3>{req}</div><div class="sidebox"><h3>Time line</h3><ul class="timeline">{tl}</ul></div><div class="sidebox"><h3>Who sees what</h3><p>{who}</p></div></aside>"#
     )
 }
 
@@ -1128,13 +1339,12 @@ pub fn detail_page(frame: &Frame, d: &Detail, notice: Option<Notice>) -> String 
         _ => String::new(),
     };
     let head = format!(
-        r#"<div class="head"><div class="chipStack">{}<span class="code">{}</span>{old}{state_pill}</div><h2>{title}</h2><div class="head__row"><span>Agent {} <span class="muted">(key of {})</span></span><span class="lease">Asked {}</span><span class="lease">Agent active {}</span>{lease}</div></div>"#,
+        r#"<div class="head"><div class="chipStack">{}<span class="code">{}</span>{old}{state_pill}</div><h2>{title}</h2><div class="head__row"><span class="lease">Asked {}</span><span class="lease">Agent active {}</span>{lease}</div></div>{}"#,
         kind_chip(i.kind),
         html_escape(&code),
-        b(&html::escape(&d.key_name)),
-        b(&html_escape(&i.requester_owner)),
         b(&ago(d.now_ms, i.created_at)),
         b(&ago(d.now_ms, i.agent_seen_at)),
+        sender_box(&d.sender, &i.requester_owner),
     );
     let stale_banner = if stale && d.mode == Mode::Owner {
         format!(
@@ -1256,6 +1466,7 @@ pub fn limits_page(frame: &Frame, rows: &[LimitRow], admin_body_read: bool) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inbox::agents::AgentKind;
     use crate::inbox::page_items::{ApprovalRow, ItemRow, Loaded};
     use inbox_core::proto::{Interaction, Urgency, Via};
 
@@ -1345,11 +1556,71 @@ mod tests {
         }
     }
 
+    /// The agent view that the tests use: a known agent of the key `ops-agent`.
+    fn agent(id: &str, label: &str, state: AgentState) -> AgentView {
+        AgentView {
+            agent_id: id.into(),
+            label: label.into(),
+            key_name: "ops-agent".into(),
+            kind: AgentKind::Agent,
+            state,
+            named: !label.contains('#'),
+            created_at: NOW - 86_400_000,
+            last_seen_at: NOW - 60_000,
+            observed: None,
+            plain: false,
+        }
+    }
+
+    fn bucket(plain: bool) -> AgentView {
+        AgentView {
+            kind: AgentKind::Bucket,
+            state: AgentState::Known,
+            label: if plain {
+                "ops-agent".into()
+            } else {
+                "Unattributed · ops-agent".into()
+            },
+            plain,
+            ..agent("b1", "", AgentState::Known)
+        }
+    }
+
+    fn sender(a: AgentView) -> Sender {
+        Sender {
+            agent: a,
+            lookalike: None,
+            owner: true,
+            lock: false,
+        }
+    }
+
+    fn line(l: &Loaded) -> Line<'_> {
+        Line {
+            loaded: l,
+            title: Title::Text("Run <script>".into()),
+            first_line: Some("DELETE FROM t".into()),
+            key_name: "ops-agent".into(),
+            agent: None,
+        }
+    }
+
+    fn panel<'a>(groups: Vec<Group<'a>>, notices: Vec<FirstUse<'a>>) -> OpenItems<'a> {
+        OpenItems {
+            groups,
+            notices,
+            lock: false,
+            agents_link: true,
+            stale_after_ms: 86_400_000,
+            now_ms: NOW,
+        }
+    }
+
     fn detail<'a>(l: &'a Loaded, body: Body, mode: Mode) -> Detail<'a> {
         Detail {
             loaded: l,
             body,
-            key_name: "ops-agent".into(),
+            sender: sender(bucket(true)),
             turns: Vec::new(),
             previous: None,
             now_ms: NOW,
@@ -1366,30 +1637,203 @@ mod tests {
 
     #[test]
     fn the_panel_is_absent_when_nothing_waits_and_shows_the_old_mark_when_it_is_old() {
-        let empty = OpenItems {
-            lines: vec![],
-            stale_after_ms: 1000,
-            now_ms: NOW,
-        };
-        assert_eq!(open_items(&empty), "");
+        assert_eq!(open_items(&panel(vec![], vec![])), "");
         let l = approval("K7QF", NOW - 3 * 86_400_000);
-        let lines = vec![Line {
-            loaded: &l,
-            title: Title::Text("Run <script>".into()),
-            first_line: Some("DELETE FROM t".into()),
-            key_name: "ops-agent".into(),
-        }];
-        let html = open_items(&OpenItems {
-            lines,
-            stale_after_ms: 86_400_000,
-            now_ms: NOW,
-        });
+        let html = open_items(&panel(
+            vec![Group {
+                agent: bucket(true),
+                lines: vec![line(&l)],
+            }],
+            vec![],
+        ));
         assert!(html.contains("Open items") && html.contains("K7QF"));
         assert!(html.contains("Old request") && html.contains("Waiting for you"));
         assert!(html.contains("Run &lt;script&gt;") && !html.contains("<script"));
         assert!(html.contains("DELETE FROM t"));
         // A link, not a script, opens the request.
         assert!(html.contains(r#"href="/auth/settings/inbox/items/"#));
+        // The row shows the service and the action, not the key: the header of the group has the key.
+        assert!(html.contains("db · <code>data.write</code>") && !html.contains("key of"));
+    }
+
+    #[test]
+    fn groups_order_new_first_then_oldest_bucket_last() {
+        let (a, b, c, d) = (
+            approval("AAAA", NOW - 60_000),
+            approval("BBBB", NOW - 3_600_000),
+            approval("CCCC", NOW - 600_000),
+            approval("DDDD", NOW - 7_200_000),
+        );
+        fn group(agent: AgentView, l: &Loaded) -> Group<'_> {
+            Group {
+                agent,
+                lines: vec![line(l)],
+            }
+        }
+        let html = open_items(&panel(
+            vec![
+                group(bucket(false), &d),
+                group(agent("g1", "Billing bot", AgentState::Known), &a),
+                group(agent("g2", "Night ETL", AgentState::Known), &b),
+                group(agent("g3", "ops-agent #4", AgentState::New), &c),
+            ],
+            vec![],
+        ));
+        let at = |name: &str| {
+            html.find(&format!(r#"<span class="agrp__name">{name}</span>"#))
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+        // The new agent first, then the oldest request, the bucket last.
+        let order = [
+            at("ops-agent #4"),
+            at("Night ETL"),
+            at("Billing bot"),
+            at("Unattributed · ops-agent"),
+        ];
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
+        // One group for each agent, each one open, and the count of the panel is the count of the rows.
+        assert_eq!(html.matches("<details class=\"agrp").count(), 4);
+        assert_eq!(
+            html.matches("<details class=\"agrp").count(),
+            html.matches(" open><summary>").count()
+        );
+        assert!(html.contains(r#"<span class="count">4</span>"#));
+        // The new group and the bucket have their marks, and the bucket has no button.
+        assert!(html.contains("agrp agrp--new") && html.contains("New, not named"));
+        assert!(html.contains("agrp agrp--bucket") && html.contains("pill--un"));
+        assert_eq!(html.matches("Manage").count(), 2);
+        // A key that is the only agent has a group with the name of the key and nothing else.
+        let l = approval("EEEE", NOW - 60_000);
+        let one = open_items(&panel(
+            vec![Group {
+                agent: bucket(true),
+                lines: vec![line(&l)],
+            }],
+            vec![],
+        ));
+        assert!(one.contains(r#"<span class="agrp__name">ops-agent</span>"#));
+        assert!(
+            !one.contains("keychip")
+                && !one.contains("pill--un")
+                && !one.contains("Observed, not verified")
+        );
+        assert!(
+            !one.contains("agrp--bucket")
+                && !one.contains("Manage")
+                && !one.contains("Groups are by agent")
+        );
+    }
+
+    #[test]
+    fn group_html_escapes_name_and_says_and_marks_hidden_characters() {
+        let l = approval("K7QF", NOW - 60_000);
+        let mut a = agent("g1", "Bot <img src=x onerror=alert(1)>", AgentState::Known);
+        a.observed = Some(crate::inbox::agents::Observed {
+            says: Some("billing\u{202E}tob <script>alert(2)</script> p\u{430}ypal".into()),
+            client: Some("claude\u{200B}-code\"><b>".into()),
+            net: Some("203.0.113.0/24".into()),
+            ..Default::default()
+        });
+        a.key_name = "key<i>".into();
+        let html = open_items(&panel(
+            vec![Group {
+                agent: a,
+                lines: vec![line(&l)],
+            }],
+            vec![],
+        ));
+        assert!(html.contains("Bot &lt;img src=x onerror=alert(1)&gt;"));
+        assert!(
+            !html.contains("<img") && !html.contains("<script") && !html.contains("-code\"><b>")
+        );
+        assert!(html.contains("-code&quot;&gt;&lt;b&gt;"));
+        assert!(html.contains("key&lt;i&gt;"));
+        // The raw hidden characters never reach the page. The marks do, and the Cyrillic letter has its code.
+        assert!(!html.contains('\u{202E}') && !html.contains('\u{200B}'));
+        assert!(html.contains("U+202E") && html.contains("U+200B") && html.contains("U+0430"));
+        assert!(html.contains("Observed, not verified") && html.contains("From 203.0.113.0/24"));
+        // The line of the hints holds the text of the agent in a quote, never in the title.
+        assert!(html.contains("<q>billing"));
+    }
+
+    #[test]
+    fn a_locked_new_agent_shows_the_lock_in_its_rows_and_a_free_one_does_not() {
+        let l = approval("K7QF", NOW - 60_000);
+        let mut p = panel(
+            vec![Group {
+                agent: agent("g3", "ops-agent #4", AgentState::New),
+                lines: vec![line(&l)],
+            }],
+            vec![],
+        );
+        assert!(!open_items(&p).contains("Approve is locked"));
+        p.lock = true;
+        let html = open_items(&p);
+        assert!(html.contains("Approve is locked until you allow this agent. You can decline now."));
+        assert!(html.contains(r#"class="lockline""#));
+        // A known agent and the bucket are never locked.
+        p.groups[0].agent.state = AgentState::Known;
+        assert!(!open_items(&p).contains("lockline"));
+    }
+
+    #[test]
+    fn the_approval_page_has_the_box_from_agent_and_the_lock_only_with_the_switch() {
+        let l = approval("V5HC", NOW - 60_000);
+        let mut a = agent("g3", "ops-agent #4", AgentState::New);
+        a.observed = Some(crate::inbox::agents::Observed {
+            says: Some("billing-bot".into()),
+            client: Some("claude-code 2.1".into()),
+            net: Some("203.0.113.0/24".into()),
+            ..Default::default()
+        });
+        let mut d = detail(&l, Body::Shown(text("SELECT 1")), Mode::Owner);
+        d.sender = Sender {
+            lookalike: Some(crate::ui::agents::Lookalike {
+                label: "Billing bot".into(),
+                same_client: true,
+                same_net: false,
+            }),
+            ..sender(a)
+        };
+        let free = detail_page(&frame(), &d, None);
+        // The name is portal text. The says text is in the dashed box, with the label "Not verified".
+        assert!(free.contains(r#"<span class="sender__name">ops-agent #4</span>"#));
+        assert!(
+            free.contains("From agent")
+                && free.contains("New, not named")
+                && free.contains("Name it")
+        );
+        assert!(free.contains("Not verified") && free.contains("Says it is: <q>billing-bot</q>"));
+        assert!(
+            free.contains("Same text as the name of your agent Billing bot. This can be a copy.")
+        );
+        assert!(free.contains("About the sender") && free.contains("written by the server"));
+        // Without the lock, Approve works.
+        assert!(free.contains(r#"name="action" value="accept""#) && !free.contains("lockline"));
+        d.sender.lock = true;
+        let locked = detail_page(&frame(), &d, None);
+        assert!(locked.contains("Approve is locked. This agent is new."));
+        assert!(
+            !locked.contains(r#"name="action" value="accept""#),
+            "no accept button"
+        );
+        assert!(
+            locked.contains("button--off") && locked.contains(r#"name="action" value="decline""#)
+        );
+        // An administrator reads the name of the agent and nothing that the agent said.
+        let mut d = detail(&l, Body::Hidden, Mode::Admin);
+        let mut a = agent("g3", "Billing bot", AgentState::Known);
+        a.observed = None;
+        d.sender = Sender {
+            owner: false,
+            ..sender(a)
+        };
+        let page = detail_page(&frame(), &d, None);
+        assert!(
+            page.contains("Billing bot")
+                && !page.contains("Says it is")
+                && !page.contains("Agent page")
+        );
     }
 
     #[test]
@@ -1527,12 +1971,23 @@ mod tests {
             "/auth/settings/inbox/items?st=abandoned&k=ops"
         );
         assert_eq!(HistoryQuery::default().href(|_| {}), ITEMS);
+        let id = "0123456789abcdef0123456789ABCDEF";
+        let q = HistoryQuery::parse(&pairs(&format!("agent={id}&p=7"))).unwrap();
+        assert_eq!(q.agent.as_deref(), Some(id.to_lowercase().as_str()));
+        assert_eq!(
+            q.href(|q| q.days = 30),
+            format!("/auth/settings/inbox/items?agent={}", id.to_lowercase())
+        );
+        assert_eq!(q.href(|q| q.agent = None), "/auth/settings/inbox/items?p=7");
         for bad in [
             "x=1",
             "st=open",
             "p=8",
             "st=approved&st=declined",
             "k=a\u{0}b",
+            "agent=abc",
+            "agent=0123456789abcdef0123456789abcdeg",
+            "agent=%27",
         ] {
             assert!(HistoryQuery::parse(&pairs(bad)).is_none(), "{bad}");
         }
@@ -1561,9 +2016,95 @@ mod tests {
     }
 
     #[test]
+    fn the_history_names_the_agent_with_a_link_and_the_filter_has_a_chip() {
+        let l = approval("K7QF", NOW - 60_000);
+        let mut done = l.clone();
+        done.item.state = ItemState::Cancelled;
+        done.item.settle_reason = Some("agent_blocked".into());
+        done.item.final_at = Some(NOW - 1000);
+        let mut line = line(&done);
+        line.agent = Some(AgentTag {
+            agent_id: "0123456789abcdef0123456789abcdef".into(),
+            label: "Bill <b>".into(),
+            plain: false,
+        });
+        fn h(
+            lines: Vec<(Line<'_>, bool)>,
+            filter: Option<Option<String>>,
+            agent: Option<String>,
+        ) -> History<'_> {
+            History {
+                lines,
+                counts: vec![],
+                total: 1,
+                query: HistoryQuery {
+                    agent,
+                    ..HistoryQuery::default()
+                },
+                now_ms: NOW,
+                all_accounts: false,
+                truncated: false,
+                limits_link: false,
+                agents_link: true,
+                agent_filter: filter,
+            }
+        }
+        let page = history_page(&frame(), &h(vec![(line, false)], None, None), None);
+        assert!(page.contains(r#"<a href="/auth/settings/inbox/items?agent=0123456789abcdef0123456789abcdef">Bill &lt;b&gt;</a>"#));
+        assert!(page.contains("· ops-agent") && !page.contains("<b>"));
+        assert!(page.contains("Cancelled: the owner blocked the agent."));
+        assert!(!page.contains("histAgent"));
+        // With the filter the page shows the chip, and a cross removes it. An agent that the viewer does not know has no name.
+        let id = "0123456789abcdef0123456789abcdef".to_string();
+        let page = history_page(
+            &frame(),
+            &h(vec![], Some(Some("Bill".into())), Some(id.clone())),
+            None,
+        );
+        assert!(page.contains("histAgent") && page.contains("Agent <b>Bill</b>"));
+        assert!(page.contains(r#"name="agent" value="0123456789abcdef0123456789abcdef""#));
+        let page = history_page(&frame(), &h(vec![], Some(None), Some(id)), None);
+        assert!(page.contains("Agent <b>unknown</b>"));
+    }
+
+    #[test]
     fn no_page_of_the_items_names_the_product() {
         let l = approval("K7QF", NOW - 60_000);
+        let mut new = agent("g3", "ops-agent #4", AgentState::New);
+        new.observed = Some(crate::inbox::agents::Observed {
+            says: Some("billing-bot".into()),
+            ..Default::default()
+        });
+        let notice = FirstUse {
+            agent: new.clone(),
+            open: 1,
+            lock: true,
+            lookalike: None,
+            targets: vec![("g1".into(), "Billing bot".into())],
+            csrf: "tok",
+            typed: "",
+            now_ms: NOW,
+        };
+        let mut locked = detail(&l, Body::Shown(text("SELECT 1")), Mode::Owner);
+        locked.sender = Sender {
+            lock: true,
+            ..sender(new.clone())
+        };
         let pages = [
+            open_items(&panel(
+                vec![
+                    Group {
+                        agent: new,
+                        lines: vec![line(&l)],
+                    },
+                    Group {
+                        agent: bucket(false),
+                        lines: vec![line(&l)],
+                    },
+                ],
+                vec![notice],
+            )),
+            detail_page(&frame(), &locked, None),
             detail_page(
                 &frame(),
                 &detail(&l, Body::Shown(text("SELECT 1")), Mode::Owner),
@@ -1574,7 +2115,7 @@ mod tests {
         for page in pages {
             let body = page.to_lowercase();
             // The page has the sprite and the stylesheet links: only the text that a person reads is checked.
-            let text = body.split("<main").nth(1).unwrap();
+            let text = body.split("<main").nth(1).unwrap_or(&body);
             for word in ["portal", "inbox", "inbox", "circular"] {
                 assert!(!text.contains(word), "{word}");
             }

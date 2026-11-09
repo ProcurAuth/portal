@@ -31,7 +31,7 @@ const OPEN_ROWS: u32 = 100;
 const DAY_MS: i64 = 86_400_000;
 const CONSUME_WITHIN: Duration = Duration::from_secs(300);
 
-fn no_store(mut response: HttpResponse) -> HttpResponse {
+pub(super) fn no_store(mut response: HttpResponse) -> HttpResponse {
     response.headers_mut().insert(
         HeaderName::from_static("cache-control"),
         HeaderValue::from_static("no-store"),
@@ -49,7 +49,7 @@ pub(super) fn allowed(ctx: &Context<'_>) -> bool {
     ctx.held.ui.items && !ctx.viewer.session.impersonated && engine(ctx)
 }
 
-fn id_ok(id: &str) -> bool {
+pub(super) fn id_ok(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
@@ -85,7 +85,7 @@ fn parse_text(plain: &[u8]) -> Option<Text> {
 }
 
 /// The body of a request for its owner.
-async fn body_of(items: &Items<'_>, l: &Loaded) -> Result<Body, ItemError> {
+pub(super) async fn body_of(items: &Items<'_>, l: &Loaded) -> Result<Body, ItemError> {
     Ok(match items.serve_body(l).await? {
         Served::Body(plain) => parse_text(&plain).map_or(Body::Mismatch, Body::Shown),
         Served::Purged => Body::Purged,
@@ -94,17 +94,22 @@ async fn body_of(items: &Items<'_>, l: &Loaded) -> Result<Body, ItemError> {
     })
 }
 
-fn key_label(state: &AppState, l: &Loaded) -> String {
-    key_name(state, &l.item.requester_key_id).unwrap_or_else(|| {
-        let short: String = l.item.requester_key_id.chars().take(8).collect();
+/// The name of a key for a page. A key that does not exist any more has its short id.
+pub(super) fn key_text(state: &AppState, key_id: &str) -> String {
+    key_name(state, key_id).unwrap_or_else(|| {
+        let short: String = key_id.chars().take(8).collect();
         format!("key {short}")
     })
 }
 
+fn key_label(state: &AppState, l: &Loaded) -> String {
+    key_text(state, &l.item.requester_key_id)
+}
+
 // The panel -----------------------------------------------------------------------------------------
 
-/// The panel "Open items" for the main page: the HTML, or an empty text when nothing waits. The count is for the badge
-/// of the tab.
+/// The panel "Open items" for the main page: the HTML, or an empty text when nothing waits and no agent is new. The count is
+/// for the badge of the tab. The requests are in one group for each agent.
 pub(super) async fn open_panel(state: &AppState, ctx: &Context<'_>, now_ms: i64) -> (String, u32) {
     let (Some(items), true) = (ctx.app.items(), allowed(ctx)) else {
         return (String::new(), 0);
@@ -125,7 +130,10 @@ pub(super) async fn open_panel(state: &AppState, ctx: &Context<'_>, now_ms: i64)
         .filter(|l| l.item.kind == Kind::Approval)
         .collect();
     let count = rows.len() as u32;
-    let mut lines = Vec::new();
+    let Some(roster) = super::agents::Roster::of(&items, &ctx.viewer.login, None).await else {
+        return (String::new(), 0);
+    };
+    let mut groups: Vec<ui_items::Group> = Vec::new();
     for l in &rows {
         let (title, first_line) = match body_of(&items, l).await {
             Ok(Body::Shown(t)) => {
@@ -142,13 +150,31 @@ pub(super) async fn open_panel(state: &AppState, ctx: &Context<'_>, now_ms: i64)
             Ok(Body::Purged) => (Title::Purged, None),
             _ => (Title::Hidden, None),
         };
-        lines.push(Line {
+        let line = Line {
             loaded: l,
             title,
             first_line,
             key_name: key_label(state, l),
-        });
+            agent: None,
+        };
+        match groups
+            .iter_mut()
+            .find(|g| g.agent.agent_id == l.item.agent_id)
+        {
+            Some(g) => g.lines.push(line),
+            None => {
+                let agent = match roster.find(&l.item.agent_id) {
+                    Some(s) => roster.view(state, &items, &s.agent, true),
+                    None => roster.fallback(state, l),
+                };
+                groups.push(ui_items::Group {
+                    agent,
+                    lines: vec![line],
+                });
+            }
+        }
     }
+    let notices = super::agents::notices(state, ctx, &items, &roster, now_ms).await;
     let stale_after_ms = ctx
         .app
         .config
@@ -156,7 +182,10 @@ pub(super) async fn open_panel(state: &AppState, ctx: &Context<'_>, now_ms: i64)
         .as_ref()
         .map_or(i64::MAX, |c| c.stale_after.as_millis() as i64);
     let html = ui_items::open_items(&OpenItems {
-        lines,
+        groups,
+        notices,
+        lock: super::agents::lock_new(ctx),
+        agents_link: super::agents::agents_on(ctx),
         stale_after_ms,
         now_ms,
     });
@@ -183,11 +212,19 @@ pub(super) async fn history(state: &Arc<AppState>, ctx: &Context<'_>) -> HttpRes
         .find(|(n, _)| n == "s")
         .and_then(|(_, c)| ui_items::notice_for(c));
     let all = ctx.held.approval_read;
+    // The filter `agent=` names an agent. A merged agent gives its target.
+    let (agent_id, agent_filter) = match &query.agent {
+        Some(id) => {
+            let (id, name) = super::agents::history_filter(state, ctx, &items, id, all).await;
+            (Some(id), Some(name))
+        }
+        None => (None, None),
+    };
     let filter = ListFilter {
         owner: (!all).then(|| ctx.viewer.login.clone()),
         open: Some(false),
         limit: HISTORY_ROWS,
-        agent_id: None,
+        agent_id,
         ..ListFilter::default()
     };
     let Ok(rows) = items.list(filter).await else {
@@ -225,6 +262,7 @@ pub(super) async fn history(state: &Arc<AppState>, ctx: &Context<'_>) -> HttpRes
         .iter()
         .filter(|l| query.state.is_none() || StateFilter::of(l) == query.state)
         .collect();
+    let tags = super::agents::tags(state, &items, &rows).await;
     let mut lines: Vec<(Line, bool)> = Vec::new();
     for (l, chained) in chain(&shown) {
         let title = if l.item.requester_owner != ctx.viewer.login {
@@ -242,6 +280,11 @@ pub(super) async fn history(state: &Arc<AppState>, ctx: &Context<'_>) -> HttpRes
                 title,
                 first_line: None,
                 key_name: key_label(state, l),
+                agent: tags.get(&l.item.agent_id).map(|t| ui_items::AgentTag {
+                    agent_id: t.agent_id.clone(),
+                    label: t.label.clone(),
+                    plain: t.plain,
+                }),
             },
             chained,
         ));
@@ -255,6 +298,8 @@ pub(super) async fn history(state: &Arc<AppState>, ctx: &Context<'_>) -> HttpRes
         all_accounts: all,
         truncated,
         limits_link: ctx.held.approval_read,
+        agents_link: super::agents::agents_on(ctx),
+        agent_filter,
     };
     let header = header_for(&ctx.app, &ctx.held, &ctx.viewer.login).await;
     let mut frame = ctx.frame(state);
@@ -456,10 +501,11 @@ pub(super) async fn detail(
         (Vec::new(), None)
     };
     let approvals = ctx.app.config.approvals.as_ref();
+    let sender = super::agents::sender(state, ctx, &items, &loaded, mode == Mode::Owner).await;
     let d = Detail {
         loaded: &loaded,
         body,
-        key_name: key_label(state, &loaded),
+        sender,
         turns,
         previous,
         now_ms: unix_now() * 1000,
@@ -604,11 +650,11 @@ pub(super) async fn answer(
         .items
         .as_ref()
         .map_or(i64::MAX, |c| c.stale_after.as_millis() as i64);
-    let refused = |code: &'static str| {
-        let status = StatusCode::UNPROCESSABLE_ENTITY;
+    let refused_with = |code: &'static str, status: StatusCode| {
         let notice = ui_items::notice_for(code);
         detail(state, ctx, &id, false, notice, status)
     };
+    let refused = |code: &'static str| refused_with(code, StatusCode::UNPROCESSABLE_ENTITY);
     if action == Action::Accept {
         if !text.is_empty() {
             return refused("no_text").await;
@@ -695,8 +741,9 @@ pub(super) async fn answer(
                 },
             )
         }
-        // The agent is new and `lock_new` is true. Lot G3 gives this refusal its own status and its own screen.
-        Ok(Answered::AgentLocked(_)) => back(&id, "locked"),
+        // The agent is new and `lock_new` is true. The server refuses `accept`: the page of the request shows why, with the
+        // status 409. A decline, a question and a name stay open.
+        Ok(Answered::AgentLocked(_)) => refused_with("locked", StatusCode::CONFLICT).await,
         Ok(Answered::NotFound) => back(&id, "gone"),
         Err(_) => back(&id, "failed"),
     }
