@@ -3,6 +3,7 @@
 
 mod common;
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use common::approvals::{
@@ -15,6 +16,7 @@ use inbox_core::proto::{
     AgentResultStatus, AgentState, AnswerMsg, AnswerStatus, ClientMsg, Decision, ItemState,
     OpenRef, ReplyMsg, RequestMsg, ServerMsg, SessionHello, SettledMsg,
 };
+use serde_json::json;
 use tokio_tungstenite::tungstenite::Message;
 
 const ITEMS_AND_AT_REST: &str = r#"
@@ -935,20 +937,28 @@ struct Read {
 /// Reads until nothing comes for `quiet`.
 async fn gather(c: &mut Conn, quiet: Duration) -> Read {
     let mut read = Read::default();
+    // The server sends a frame again until it gets the receipt. A copy has the id of the first delivery: it is one frame.
+    let mut seen = HashSet::new();
     loop {
         match c.recv(quiet).await {
             Recv::Msg(ServerMsg::Agent(a)) => {
                 c.receipt(&a.id).await;
-                read.agents.push(*a);
+                if seen.insert(a.id.clone()) {
+                    read.agents.push(*a);
+                }
             }
             Recv::Msg(ServerMsg::AgentResult(r)) => read.results.push(r),
             Recv::Msg(ServerMsg::Request(r)) => {
                 c.receipt(&r.id).await;
-                read.requests.push(*r);
+                if seen.insert(r.id.clone()) {
+                    read.requests.push(*r);
+                }
             }
             Recv::Msg(ServerMsg::Settled(s)) => {
                 c.receipt(&s.id).await;
-                read.settled.push(s);
+                if seen.insert(s.id.clone()) {
+                    read.settled.push(s);
+                }
             }
             Recv::Msg(ServerMsg::AnswerResult(r)) => read.answers.push(r),
             Recv::Msg(_) => {}
@@ -1723,4 +1733,331 @@ async fn a_phone_of_another_account_learns_nothing_of_the_lock() {
         .await;
     let result = next_result(&mut eve, WAIT).await;
     assert_eq!((result.status, result.state), (AnswerStatus::Closed, None));
+}
+
+// ---------------------------------------------------------------------------------------------
+// The agents through the real channel (lot G5). No SQL writes an agent here: two agents of one key call `/mcp` with the
+// token that the portal gave them, and the Rust phones of the owner read the frames and act with `agent_do`.
+
+/// The `User-Agent` of the first agent and of the second agent: the client that the owner reads.
+const UA_X: &str = "agent-x/1.0";
+const UA_Y: &str = "agent-y/2.0";
+
+/// The id of the agent of a request, as the engine wrote it.
+fn agent_of(pep: &Pep, request: &str) -> String {
+    pep.s
+        .scalar(&format!(
+            "SELECT agent_id FROM items WHERE request_id = '{request}'"
+        ))
+        .expect("the request has an agent")
+}
+
+fn row_of(read: &Read, request: &str) -> RequestMsg {
+    read.requests
+        .iter()
+        .find(|r| r.request_id == request)
+        .unwrap_or_else(|| panic!("no request frame for {request}"))
+        .clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_agents_of_one_key_with_real_tokens_reach_the_phones_and_agent_do_changes_them() {
+    let pep = with_agents(true);
+    let phone_a = pep.phone("pixel").await;
+    let phone_b = pep.phone("second").await;
+    let mut a = connect(&pep, &phone_a).await;
+    let mut b = connect(&pep, &phone_b).await;
+
+    // Two agents of one key make a request with no token: the portal makes two agents and gives each one its token.
+    let x = pep.agent_request(
+        None,
+        UA_X,
+        &command(61),
+        json!({"agent_label": "billing-bot"}),
+    );
+    let y = pep.agent_request(
+        None,
+        UA_Y,
+        &command(62),
+        json!({"agent_label": "night-etl"}),
+    );
+    assert_eq!((x.status.as_str(), y.status.as_str()), ("new", "new"));
+    let (tok_x, tok_y) = (
+        x.token.clone().expect("token"),
+        y.token.clone().expect("token"),
+    );
+    assert_ne!(tok_x, tok_y);
+    let (ax, ay) = (agent_of(&pep, &x.request_id), agent_of(&pep, &y.request_id));
+    assert_ne!(ax, ay);
+
+    // Each phone gets the two requests and the two frames `agent`, with the same ids and the same text of the portal.
+    let mut ids = Vec::new();
+    for conn in [&mut a, &mut b] {
+        let read = gather(conn, QUIET).await;
+        assert_eq!(
+            read.requests.len(),
+            2,
+            "two requests: {:?}",
+            read.requests
+                .iter()
+                .map(|r| (r.id.clone(), r.request_id.clone(), r.seq))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(read.agents.len(), 2, "two frames of agents");
+        let (rx, ry) = (row_of(&read, &x.request_id), row_of(&read, &y.request_id));
+        assert_eq!(
+            (rx.from.agent_id.as_str(), ry.from.agent_id.as_str()),
+            (ax.as_str(), ay.as_str())
+        );
+        assert_eq!(
+            (rx.from.label.as_str(), ry.from.label.as_str()),
+            ("agent-laptop #1", "agent-laptop #2"),
+            "the label is portal text: the number, never what the agent says"
+        );
+        assert_eq!(
+            (rx.from.agent_state, ry.from.agent_state),
+            (AgentState::New, AgentState::New)
+        );
+        // What the agent says is outside `from`, and it is the text that the channel got.
+        assert_eq!(rx.agent_label.as_deref(), Some("billing-bot"));
+        assert_eq!(ry.agent_label.as_deref(), Some("night-etl"));
+        let (fx, fy) = (by_id(&read.agents, &ax), by_id(&read.agents, &ay));
+        assert_eq!(
+            (fx.state, fx.lock_accept, fx.named),
+            (AgentState::New, true, false)
+        );
+        let seen = fx.observed.as_ref().expect("the hints of the agent");
+        assert_eq!(
+            (seen.says.as_deref(), seen.client.as_deref(), seen.nets_seen),
+            (Some("billing-bot"), Some(UA_X), 1)
+        );
+        assert_eq!(
+            fy.observed.as_ref().and_then(|o| o.says.as_deref()),
+            Some("night-etl")
+        );
+        assert!(
+            fx.similar.is_none() && fy.similar.is_none(),
+            "no known agent yet"
+        );
+        ids.push((fx.id.clone(), fx.rev));
+    }
+
+    // The agent X asks again with its token: the same agent. No new agent and no new frame of an agent.
+    let again = pep.agent_request(
+        Some(&tok_x),
+        UA_X,
+        &command(63),
+        json!({"agent_label": "billing-bot"}),
+    );
+    assert_eq!(
+        (again.status.as_str(), again.token.is_none()),
+        ("new", true)
+    );
+    assert_eq!(agent_of(&pep, &again.request_id), ax);
+    for conn in [&mut a, &mut b] {
+        let read = gather(conn, QUIET).await;
+        assert_eq!(read.requests.len(), 1);
+        assert_eq!(row_of(&read, &again.request_id).from.agent_id, ax);
+        assert!(
+            read.agents.is_empty(),
+            "a call of a known token changes no agent"
+        );
+    }
+    assert_eq!(
+        pep.s
+            .scalar("SELECT COUNT(*) FROM agents WHERE kind = 'agent'")
+            .as_deref(),
+        Some("2")
+    );
+
+    // The agent Y asks for the effect that X asked: the same request comes back (the PEP rule) and the item keeps X.
+    let also = pep.agent_request(Some(&tok_y), UA_Y, &command(61), json!({}));
+    assert_eq!(
+        also.request_id, x.request_id,
+        "the same effect gives the open request"
+    );
+    assert_eq!(
+        agent_of(&pep, &x.request_id),
+        ax,
+        "the item keeps its first agent"
+    );
+    assert_eq!(
+        pep.s
+            .scalar(&format!(
+                "SELECT COUNT(*) FROM item_events WHERE request_id = '{}' AND event = 'also_requested'",
+                x.request_id
+            ))
+            .as_deref(),
+        Some("1")
+    );
+    for conn in [&mut a, &mut b] {
+        let read = gather(conn, QUIET).await;
+        assert!(
+            read.requests.is_empty(),
+            "no second request frame for the same effect"
+        );
+    }
+
+    // The lock: a new agent cannot get an approval. The phone gets `agent_locked`, and the item stays open.
+    let rx = {
+        let read = gather(&mut a, QUIET).await;
+        assert!(read.requests.is_empty());
+        // The phone holds the request frames of the first step: ask the server again with `sync`.
+        a.send(&ClientMsg::Sync {
+            open: vec![],
+            agents: Some(vec![]),
+        })
+        .await;
+        row_of(&gather(&mut a, QUIET).await, &x.request_id)
+    };
+    a.send(&answer(&rx, "m-lock", Action::Accept, Some(shown(&rx))))
+        .await;
+    assert_eq!(
+        next_result(&mut a, WAIT).await.status,
+        AnswerStatus::AgentLocked
+    );
+    assert_eq!(pep.verdict(&x.request_id)["verdict"], "pending");
+
+    // `agent_do` allow, with a name, from the first phone: both phones get the frame, with the same delivery id.
+    let (status, read) = act(
+        &mut a,
+        &ax,
+        "m-1",
+        AgentOpKind::Allow,
+        Some("Billing bot"),
+        None,
+    )
+    .await;
+    assert_eq!(status, AgentResultStatus::Ok);
+    let on_a = by_id(&read.agents, &ax).clone();
+    assert_eq!(
+        (
+            on_a.state,
+            on_a.named,
+            on_a.label.as_str(),
+            on_a.lock_accept
+        ),
+        (AgentState::Known, true, "Billing bot", false)
+    );
+    assert!(on_a.rev > ids[0].1);
+    let on_b = gather(&mut b, QUIET).await;
+    assert_eq!(by_id(&on_b.agents, &ax).rev, on_a.rev);
+    // The unlocked agent gets its approval. The phone has the answer, and the service reads `approved`.
+    a.send(&answer(&rx, "m-ok", Action::Accept, Some(shown(&rx))))
+        .await;
+    assert_eq!(
+        next_result(&mut a, WAIT).await.status,
+        AnswerStatus::Accepted
+    );
+    assert_eq!(pep.verdict(&x.request_id)["verdict"], "approved");
+
+    // Rename of Y from the second phone: both phones see the new name. The label of the frame is portal text.
+    let (status, read) = act(
+        &mut b,
+        &ay,
+        "m-2",
+        AgentOpKind::Rename,
+        Some("Night ETL"),
+        None,
+    )
+    .await;
+    assert_eq!(status, AgentResultStatus::Ok);
+    assert_eq!(by_id(&read.agents, &ay).label, "Night ETL");
+    let read = gather(&mut a, QUIET).await;
+    assert_eq!(
+        (
+            by_id(&read.agents, &ay).label.as_str(),
+            by_id(&read.agents, &ay).state
+        ),
+        ("Night ETL", AgentState::New)
+    );
+
+    // Block Y from the first phone: its open request is cancelled, and its token is refused at the channel.
+    let (status, read) = act(&mut a, &ay, "m-3", AgentOpKind::Block, None, None).await;
+    assert_eq!(status, AgentResultStatus::Ok);
+    assert_eq!(by_id(&read.agents, &ay).state, AgentState::Blocked);
+    assert!(
+        read.settled.iter().any(|s| s.request_id == y.request_id
+            && s.state == ItemState::Cancelled
+            && s.reason == "agent_blocked"),
+        "{:?}",
+        read.settled
+    );
+    let (is_error, e) = pep.tool_as(
+        Some(&tok_y),
+        UA_Y,
+        "get_answer",
+        json!({"request_id": y.request_id}),
+    );
+    assert!(is_error, "{e}");
+    assert_eq!(e["error"]["code"], "agent_blocked", "{e}");
+    assert_eq!(pep.verdict(&y.request_id)["verdict"], "void");
+    let read = gather(&mut b, QUIET).await;
+    assert_eq!(by_id(&read.agents, &ay).state, AgentState::Blocked);
+
+    // Unblock: a known agent again. Its token works, and it makes a new request.
+    let (status, _) = act(&mut b, &ay, "m-4", AgentOpKind::Unblock, None, None).await;
+    assert_eq!(status, AgentResultStatus::Ok);
+    gather(&mut a, QUIET).await;
+    let back = pep.agent_request(Some(&tok_y), UA_Y, &command(64), json!({}));
+    assert_eq!(
+        (back.status.as_str(), agent_of(&pep, &back.request_id)),
+        ("known", ay.clone())
+    );
+    for conn in [&mut a, &mut b] {
+        let read = gather(conn, QUIET).await;
+        assert_eq!(row_of(&read, &back.request_id).from.agent_id, ay);
+    }
+
+    // Merge: an agent that lost its token makes a new agent Z. The owner merges Z into Y from a phone. The request of Z
+    // moves, and the old token of Z gives Y.
+    let z = pep.agent_request(
+        None,
+        "agent-z/3.0",
+        &command(65),
+        json!({"agent_label": "night-etl"}),
+    );
+    let (tok_z, az) = (
+        z.token.clone().expect("token"),
+        agent_of(&pep, &z.request_id),
+    );
+    let read = gather(&mut a, QUIET).await;
+    let on_z = by_id(&read.agents, &az);
+    assert_eq!(on_z.state, AgentState::New);
+    assert_eq!(
+        on_z.similar
+            .as_ref()
+            .map(|s| (s.agent_id.as_str(), s.label.as_str())),
+        Some((ay.as_str(), "Night ETL")),
+        "the new agent says the same text as the agent Y: the frame names it"
+    );
+    assert_eq!(on_z.state, AgentState::New, "the hint never merges");
+    gather(&mut b, QUIET).await;
+    let (status, read) = act(&mut b, &az, "m-5", AgentOpKind::Merge, None, Some(&ay)).await;
+    assert_eq!(status, AgentResultStatus::Ok);
+    let merged = by_id(&read.agents, &az);
+    assert_eq!(
+        (merged.state, merged.merged_into.as_deref()),
+        (AgentState::Merged, Some(ay.as_str()))
+    );
+    assert!(
+        by_id(&read.agents, &ay).open >= 2,
+        "the target holds the items that moved"
+    );
+    assert_eq!(
+        agent_of(&pep, &z.request_id),
+        ay,
+        "the request of Z is a request of Y now"
+    );
+    let read = gather(&mut a, QUIET).await;
+    assert_eq!(by_id(&read.agents, &az).state, AgentState::Merged);
+    let alias = pep.agent_request(Some(&tok_z), "agent-z/3.0", &command(66), json!({}));
+    assert_eq!(
+        (alias.status.as_str(), agent_of(&pep, &alias.request_id)),
+        ("known", ay.clone()),
+        "the token of the merged agent gives the target"
+    );
+    // The agent X was not touched by any of it.
+    assert_eq!(agent_of(&pep, &x.request_id), ax);
+    let _ = (z.request_id, ids);
 }
