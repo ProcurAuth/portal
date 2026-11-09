@@ -29,7 +29,7 @@ class TalkBackLabelTest {
     fun anApprovalRowSaysKindCodeSenderServiceAgesAndState() {
         val label = TalkBackLabels.itemRow(approval { it.put("agent_seen_at_ms", created + 6 * day - 3 * 60_000) }, created + 6 * day)
         assertEquals(
-            "Approval K7QF from claude-laptop, datastore, asked 6 days ago, agent active 3 minutes ago, waiting for you",
+            "Approval K7QF from Billing bot, datastore, asked 6 days ago, agent active 3 minutes ago, waiting for you",
             label,
         )
     }
@@ -37,7 +37,7 @@ class TalkBackLabelTest {
     @Test
     fun aRowNamesThePortalFirstAndSaysWhyAPortalIsDown() {
         val label = TalkBackLabels.itemRow(approval(), created + 3 * 3_600_000, "Production", "Offline 3 h. answer waits")
-        assertTrue(label.startsWith("Portal Production. Approval K7QF from claude-laptop"))
+        assertTrue(label.startsWith("Portal Production. Approval K7QF from Billing bot"))
         assertTrue(label.endsWith(". Offline 3 h. answer waits"))
         assertFalse(TalkBackLabels.itemRow(approval(), created).startsWith("Portal"))
     }
@@ -53,7 +53,7 @@ class TalkBackLabelTest {
         engine.onRequest(server, Make.question(rid, Make.hex(2), createdAtMs = created) { it.put("agent_seen_at_ms", created + 6 * day - 180_000) })
         val label = TalkBackLabels.itemRow(repo.item(server, rid)!!, created + 6 * day)
         assertEquals(
-            "Question from the agent claude-laptop, Purge the staging data of November?, asked 6 days ago, " +
+            "Question from the agent Billing bot, Purge the staging data of November?, asked 6 days ago, " +
                 "agent active 3 minutes ago, waiting for you, 2 options",
             label,
         )
@@ -115,7 +115,7 @@ class TalkBackLabelTest {
         approval { it.put("agent_seen_at_ms", created + 60_000) }
         val s = screen()
         val text = TalkBackLabels.threadHeader(s)
-        assertTrue(text, text.startsWith("ClickHouse write. claude-laptop · key of alice · datastore. agent active 3 minutes ago, your turn"))
+        assertTrue(text, text.startsWith("ClickHouse write. Billing bot · key of alice · datastore. agent active 3 minutes ago, your turn"))
         assertEquals("claude-laptop is writing its answer", TalkBackLabels.writing("claude-laptop"))
     }
 

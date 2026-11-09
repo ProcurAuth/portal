@@ -1953,6 +1953,9 @@ mod prefs;
 #[path = "agent_binding_tests.rs"]
 mod agent_binding;
 
+#[path = "agent_frames_tests.rs"]
+mod agent_frames;
+
 // ---------------------------------------------------------------- the phone side of the thread (lot L8)
 //
 // These two tests run in the process: a comment of the owner and a question of the owner exist only for an item that

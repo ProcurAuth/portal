@@ -4582,3 +4582,100 @@ textarea.uiInput { height: auto; min-height: 64px; padding: 6px 8px; resize: ver
 .inlineFields .uiInput--time { width: 8.5rem; }
 .note--row { padding-top: 4px; }
 .decide__row--form { padding: 10px; }
+
+/* Agents (lot G3) ---------------------------------------------------------------------------------
+   The groups of the panel "Open items", the notice of a new agent, the page of an agent and the box "From agent". The look
+   is the look of the approved mock screens. Every colour, size and radius is a token of portal.css. */
+.agGroups { display: grid; gap: 10px; min-width: 0; }
+.agrp { border: 1px solid var(--border-strong); border-radius: var(--radius-compact); background: var(--panel); min-width: 0; }
+.agrp > summary { list-style: none; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 8px 10px; cursor: pointer; background: var(--raised); border-radius: var(--radius-compact); }
+.agrp > summary::-webkit-details-marker { display: none; }
+.agrp[open] > summary { border-bottom: 1px solid var(--border); border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.agrp__chev { color: var(--muted); display: inline-flex; transition: transform 0.12s; }
+.agrp[open] .agrp__chev { transform: rotate(90deg); }
+.agrp__chev .icon { width: 14px; height: 14px; }
+.agrp__name { font-weight: 700; font-size: var(--fs-l); color: var(--text); min-width: 0; overflow-wrap: anywhere; }
+.agrp__sum { color: var(--muted); font-size: var(--fs-s); }
+.agrp__sum b { color: var(--text); font-weight: 600; }
+.agrp__hints { display: flex; flex-wrap: wrap; gap: 2px 14px; padding: 6px 10px 7px 34px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: var(--fs-s); }
+.agrp__hints > span { min-width: 0; overflow-wrap: anywhere; }
+.agrp__hints .tag { font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--warning); }
+.agrp__hints q, .obs q, .says q { quotes: "\201C" "\201D"; color: var(--text); font-style: italic; }
+.agrp--new { border-color: color-mix(in srgb, var(--warning) 55%, transparent); }
+.agrp--new > summary { background: var(--warning-bg); }
+.agrp--bucket { border-style: dashed; }
+.agrp .oiList .oi:last-child { border-bottom: 0; }
+.agNote { margin: 0; }
+.keychip { display: inline-flex; align-items: center; gap: 4px; height: 18px; padding: 0 6px; border: 1px solid var(--border-strong); border-radius: var(--radius-compact); color: var(--muted); font-family: var(--font-mono); font-size: var(--fs-xs); max-width: 100%; overflow-wrap: anywhere; }
+.keychip .icon { width: 11px; height: 11px; flex: none; }
+.pill--new { border-color: transparent; background: var(--warning-bg); color: var(--warning); font-weight: 700; }
+.pill--un { border-color: var(--border-strong); background: transparent; color: var(--muted); font-weight: 600; }
+.histAgent { text-decoration: none; }
+.histAgent b { font-weight: 700; }
+.hist td.who { white-space: normal; overflow-wrap: anywhere; }
+
+/* The line that says why a button is off. */
+.lockline { grid-column: 2; margin-top: 4px; display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent); border-radius: var(--radius-compact); background: var(--warning-bg); color: var(--text); font-size: var(--fs-s); }
+.decide__body > .lockline { grid-column: auto; margin-top: 0; }
+.lockline .icon { width: 14px; height: 14px; color: var(--warning); flex: none; }
+
+/* The notice of a new agent. */
+.firstuse { border: 1px solid color-mix(in srgb, var(--warning) 55%, transparent); border-radius: var(--radius-compact); background: var(--panel); overflow: hidden; min-width: 0; }
+.firstuse__head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 8px 10px; background: var(--warning-bg); color: var(--warning); font-weight: 700; }
+.firstuse__head .icon { width: 16px; height: 16px; }
+.firstuse__head h3 { margin: 0; font-size: var(--fs-m); font-weight: 700; color: var(--text); }
+.firstuse__head .muted { font-weight: 400; }
+.firstuse__body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; padding: 10px; }
+.obs { border: 1px dashed var(--border-strong); border-radius: var(--radius-compact); background: var(--raised); padding: 0 10px 8px; min-width: 0; }
+.obs h4 { margin: 0; display: flex; align-items: center; gap: 8px; min-height: 30px; font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--warning); }
+.obs h4 .icon { width: 14px; height: 14px; }
+.obs dl { margin: 0; display: grid; gap: 3px; }
+.obs dl > div { display: grid; grid-template-columns: 8rem minmax(0, 1fr); gap: 8px; font-size: var(--fs-s); }
+.obs dt { color: var(--muted); }
+.obs dd { margin: 0; overflow-wrap: anywhere; }
+.obs .warnline { margin: 6px 0 0; color: var(--warning); font-size: var(--fs-s); }
+.obs .warnline .icon { width: 14px; height: 14px; vertical-align: -2px; }
+.obs .warnline b { font-weight: 700; }
+.obs .note { margin: 6px 0 0; }
+.acts { display: grid; gap: 10px; align-content: start; min-width: 0; }
+.acts form { min-width: 0; }
+.acts .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.acts .row .uiInput { flex: 1 1 160px; min-width: 0; }
+.acts__rule { height: 1px; background: var(--border); }
+.acts .field { display: grid; gap: 4px; }
+.sidebox .acts { padding-bottom: 2px; }
+.sidebox .acts p { margin: 0; }
+
+/* The box "From agent" on the page of a request: the name, the key and the state are text of the server. The dashed line is
+   text of the agent. */
+.sender { display: grid; gap: 6px; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-compact); background: var(--panel); min-width: 0; }
+.sender__main { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.sender__label { font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.sender__name { font-weight: 700; font-size: var(--fs-l); overflow-wrap: anywhere; }
+.sender__of { color: var(--muted); font-size: var(--fs-s); }
+.sender__of b { color: var(--text); font-weight: 600; }
+.sender__of a { color: var(--accent-text); }
+.says { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 4px 8px; border: 1px dashed var(--border-strong); border-radius: var(--radius-compact); background: var(--raised); color: var(--muted); font-size: var(--fs-s); min-width: 0; }
+.says > span { min-width: 0; overflow-wrap: anywhere; }
+.says .tag { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--warning); }
+.says .icon { width: 13px; height: 13px; color: var(--warning); }
+.says__warn { color: var(--warning); }
+
+/* The page of an agent and the list of the agents. */
+.agTbl { width: 100%; border-collapse: collapse; font-size: var(--fs-s); }
+.agTbl th { text-align: left; color: var(--muted); font-weight: 700; font-size: var(--fs-xs); letter-spacing: 0.05em; text-transform: uppercase; padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.agTbl td { padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
+.agTbl tr:last-child td { border-bottom: 0; }
+.agTbl a:not(.button) { color: var(--accent-text); }
+.agTbl--list { min-width: 560px; }
+.agFacts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.agEvents { padding: 6px 10px; }
+.danger-zone { border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
+.danger-zone h3 { color: var(--danger); }
+
+@media (max-width: 800px) {
+  .firstuse__body { grid-template-columns: minmax(0, 1fr); }
+  .agrp__hints { padding-left: 10px; }
+  .obs dl > div { grid-template-columns: 6.5rem minmax(0, 1fr); }
+  .agFacts { grid-template-columns: minmax(0, 1fr); }
+}

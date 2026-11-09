@@ -237,6 +237,13 @@ pub trait Authorizer: Send + Sync {
         None
     }
 
+    /// What the key does with the agents: `key`, `discover` or `enrolled` (the attribute `agents` of the key). `None`: the
+    /// key does not exist, or the portal cannot tell. The frames of the phones use it for the label of the bucket of the
+    /// key: the key name in the mode `key`, else "Unattributed". A caller treats `None` as the mode `key`.
+    fn key_agent_mode(&self, _key_id: &str) -> Option<super::agents::AgentMode> {
+        None
+    }
+
     /// The logins that may see the alerts about `service`: each person whose [`Authorizer::services`]
     /// sees it. A person that the portal cannot judge is not in the set. It reads memory only.
     fn audience(&self, service: &str) -> BTreeSet<String>;

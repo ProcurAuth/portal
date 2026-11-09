@@ -19,6 +19,8 @@ import app.portalinbox.data.Reconcile
 import app.portalinbox.data.Store
 import app.portalinbox.net.Http
 import app.portalinbox.net.ServerAddress
+import app.portalinbox.proto.AgentFrame
+import app.portalinbox.proto.AgentResultFrame
 import app.portalinbox.proto.AckFrame
 import app.portalinbox.proto.AnswerResultFrame
 import app.portalinbox.proto.ClientFrame
@@ -343,6 +345,10 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                                 onPrefsError(frame)
                             }
                             is RequestFrame, is MessageFrame, is SettledFrame, is DigestFrame, is AnswerResultFrame -> onItemFrame(frame)
+                            // The agents (lot G4 stores them and shows them). Until then the phone confirms the frame and keeps nothing:
+                            // its `sync` lists no agent, so the server sends them again.
+                            is AgentFrame -> send(AckFrame(frame.id))
+                            is AgentResultFrame -> {}
                         }
                     }
                     is Event.Command -> if (connected) send(e.frame)

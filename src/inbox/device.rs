@@ -782,7 +782,12 @@ async fn handle(
         ClientMsg::Refresh { request_id } => {
             device_items::refresh(app, socket, session, login, &request_id).await
         }
-        ClientMsg::Sync { open } => device_items::sync(app, socket, session, login, open).await,
+        ClientMsg::Sync { open, agents } => {
+            device_items::sync(app, socket, session, login, open, agents).await
+        }
+        ClientMsg::AgentDo(a) => {
+            device_items::agent_do(app, socket, session, device_id, login, a).await
+        }
         ClientMsg::SetPrefs(prefs) => {
             device_items::set_prefs(app, socket, session, login, prefs).await
         }

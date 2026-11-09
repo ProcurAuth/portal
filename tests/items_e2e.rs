@@ -11,8 +11,9 @@ use common::approvals::{
 use common::{close_code, portal, portal_ok, Conn, Phone, Recv, Server};
 use inbox_core::noise::Initiator;
 use inbox_core::proto::{
-    Action, AnswerMsg, AnswerStatus, ClientMsg, Decision, ItemState, OpenRef, ReplyMsg, RequestMsg,
-    ServerMsg, SessionHello,
+    Action, AgentDoMsg, AgentKind, AgentMsg, AgentOpKind, AgentRef, AgentResultMsg,
+    AgentResultStatus, AgentState, AnswerMsg, AnswerStatus, ClientMsg, Decision, ItemState,
+    OpenRef, ReplyMsg, RequestMsg, ServerMsg, SessionHello, SettledMsg,
 };
 use tokio_tungstenite::tungstenite::Message;
 
@@ -536,6 +537,7 @@ async fn sync_reconciles_open_and_closed() {
                 seq: 4,
             },
         ],
+        agents: None,
     })
     .await;
     let mut settled = Vec::new();
@@ -568,7 +570,11 @@ async fn sync_reconciles_open_and_closed() {
     assert!(settled.iter().all(|s| s.request_id != second));
 
     // A phone that holds nothing gets the open item, with a new delivery id.
-    ca.send(&ClientMsg::Sync { open: vec![] }).await;
+    ca.send(&ClientMsg::Sync {
+        open: vec![],
+        agents: None,
+    })
+    .await;
     let again = next_request(&mut ca, WAIT).await;
     assert_eq!(again.request_id, second);
     assert!(
@@ -840,8 +846,877 @@ async fn a_phone_of_another_account_gets_nothing_and_cannot_answer() {
         .await;
     let result = next_result(&mut conn, WAIT).await;
     assert_eq!((result.status, result.state), (AnswerStatus::Closed, None));
-    conn.send(&ClientMsg::Sync { open: vec![] }).await;
+    conn.send(&ClientMsg::Sync {
+        open: vec![],
+        agents: None,
+    })
+    .await;
     nothing_arrives(&mut conn, Duration::from_secs(2)).await;
     assert_eq!(pep.verdict(&id)["verdict"], "pending");
     assert_eq!(pep.resume(&c)["decision"], false);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The agents on the phone (lot G2). The agent channel makes the agents (lot G1b), so these tests write the rows of the
+// agents in the database of the server, as another instance would, and let the server do the rest: the line "from" of a
+// request, the frames `agent`, `sync`, `agent_do` and the lock of a new agent. The in-process tests of the portal run the
+// whole life of an agent from its first call on both databases (`http/agent_frames_tests.rs`).
+
+const A_NEW: &str = "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4";
+const A_KNOWN: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+const A_FOREIGN: &str = "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6";
+const NOBODY: &str = "00000000000000000000000000000000";
+
+/// A server with the block `inbox.agents`. `lock` is the value of `inbox.agents.lock_new`.
+fn with_agents(lock: bool) -> Pep {
+    Pep::with(|s| {
+        s.add_to_inbox(&format!(
+            "agents {{ max_per_key = 8 new_per_hour = 20 lock_new = {lock} }}"
+        ))
+    })
+}
+
+/// Runs SQL in the database of the server, as `revoke_in_database` does.
+fn sql(s: &common::Server, statements: &str) {
+    match &s.pg {
+        Some((admin, database)) => admin.exec(database, statements.to_string()),
+        None => {
+            let c = rusqlite::Connection::open(s.dir.join("portal.db")).unwrap();
+            c.busy_timeout(Duration::from_secs(10)).unwrap();
+            c.execute_batch(statements).unwrap();
+        }
+    }
+}
+
+/// A row of `agents` for `key_id`: its state, the number that the key gave it and the name that the owner gave it.
+fn seed_agent(pep: &Pep, id: &str, key_id: &str, state: &str, ordinal: i64, name: Option<&str>) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let (name_sql, key_sql, named_at) = match name {
+        Some(n) => (
+            format!("'{n}'"),
+            format!("'{}'", n.to_lowercase()),
+            now.to_string(),
+        ),
+        None => ("NULL".into(), "NULL".into(), "NULL".into()),
+    };
+    sql(
+        &pep.s,
+        &format!(
+            "INSERT INTO agents (agent_id, key_id, owner, kind, state, origin, ordinal, name, name_key, token_digest,
+                                 merged_into, rev, created_at, named_at, last_seen_at, hints_kid, hints_ct)
+             VALUES ('{id}', '{key_id}', '{OWNER}', 'agent', '{state}', 'call', {ordinal}, {name_sql}, {key_sql}, '{id}{id}',
+                     NULL, 1, {now}, {named_at}, {now}, NULL, NULL)"
+        ),
+    );
+}
+
+/// The item of `request_id` belongs to `agent` now.
+fn give_item(pep: &Pep, request_id: &str, agent: &str) {
+    sql(
+        &pep.s,
+        &format!("UPDATE items SET agent_id = '{agent}' WHERE request_id = '{request_id}'"),
+    );
+}
+
+/// What a phone reads in a time: the frames of the agents and the frames that come with them. The phone sends the receipt
+/// of each frame that came from the queue.
+#[derive(Default)]
+struct Read {
+    agents: Vec<AgentMsg>,
+    results: Vec<AgentResultMsg>,
+    requests: Vec<RequestMsg>,
+    settled: Vec<SettledMsg>,
+    answers: Vec<inbox_core::proto::AnswerResultMsg>,
+}
+
+/// Reads until nothing comes for `quiet`.
+async fn gather(c: &mut Conn, quiet: Duration) -> Read {
+    let mut read = Read::default();
+    loop {
+        match c.recv(quiet).await {
+            Recv::Msg(ServerMsg::Agent(a)) => {
+                c.receipt(&a.id).await;
+                read.agents.push(*a);
+            }
+            Recv::Msg(ServerMsg::AgentResult(r)) => read.results.push(r),
+            Recv::Msg(ServerMsg::Request(r)) => {
+                c.receipt(&r.id).await;
+                read.requests.push(*r);
+            }
+            Recv::Msg(ServerMsg::Settled(s)) => {
+                c.receipt(&s.id).await;
+                read.settled.push(s);
+            }
+            Recv::Msg(ServerMsg::AnswerResult(r)) => read.answers.push(r),
+            Recv::Msg(_) => {}
+            Recv::Closed(code) => panic!("closed while the phone reads: {code:?}"),
+            Recv::Timeout => return read,
+        }
+    }
+}
+
+const QUIET: Duration = Duration::from_millis(1200);
+
+fn agent_do(
+    agent: &str,
+    id: &str,
+    op: AgentOpKind,
+    name: Option<&str>,
+    into: Option<&str>,
+) -> ClientMsg {
+    ClientMsg::AgentDo(AgentDoMsg {
+        agent_id: agent.into(),
+        client_msg_id: id.into(),
+        op,
+        name: name.map(str::to_string),
+        into: into.map(str::to_string),
+    })
+}
+
+/// The phone sends `agent_do` and reads the result. The other frames that come with it are the result of the change.
+async fn act(
+    c: &mut Conn,
+    agent: &str,
+    id: &str,
+    op: AgentOpKind,
+    name: Option<&str>,
+    into: Option<&str>,
+) -> (AgentResultStatus, Read) {
+    c.send(&agent_do(agent, id, op, name, into)).await;
+    let mut read = gather(c, QUIET).await;
+    assert_eq!(read.results.len(), 1, "one result for one action");
+    let result = read.results.remove(0);
+    assert_eq!(
+        (result.client_msg_id.as_str(), result.agent_id.as_str()),
+        (id, agent)
+    );
+    (result.status, read)
+}
+
+fn by_id<'a>(agents: &'a [AgentMsg], id: &str) -> &'a AgentMsg {
+    agents.iter().find(|a| a.agent_id == id).unwrap_or_else(|| {
+        panic!(
+            "no frame for the agent {id}: {:?}",
+            agents.iter().map(|a| &a.agent_id).collect::<Vec<_>>()
+        )
+    })
+}
+
+/// The line "from" of a request names the agent in portal text, and `sync` brings the agents that the phone lacks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn requests_name_their_agent_and_sync_brings_the_agents_the_phone_lacks() {
+    let pep = with_agents(true);
+    let phone = pep.phone("pixel").await;
+    let (first, _) = pep.submit(&command(21), 60);
+    let (second, _) = pep.submit(&command(22), 60);
+    let (third, _) = pep.submit(&command(23), 60);
+    seed_agent(&pep, A_NEW, &pep.key_id, "new", 1, None);
+    seed_agent(&pep, A_KNOWN, &pep.key_id, "known", 2, Some("Night ETL"));
+    give_item(&pep, &first, A_NEW);
+    give_item(&pep, &second, A_KNOWN);
+
+    let mut conn = connect(&pep, &phone).await;
+    let read = gather(&mut conn, QUIET).await;
+    assert!(
+        read.agents.is_empty(),
+        "the server sends no agent before the sync of the phone"
+    );
+    let from = |id: &str| {
+        &read
+            .requests
+            .iter()
+            .find(|r| r.request_id == id)
+            .expect("a request")
+            .from
+    };
+    let f = from(&first);
+    assert_eq!(
+        (
+            f.label.as_str(),
+            f.agent_id.as_str(),
+            f.agent_kind,
+            f.agent_state
+        ),
+        ("agent-laptop #1", A_NEW, AgentKind::Agent, AgentState::New)
+    );
+    assert_eq!(f.key_name, "agent-laptop");
+    let f = from(&second);
+    assert_eq!(
+        (f.label.as_str(), f.agent_id.as_str(), f.agent_state),
+        ("Night ETL", A_KNOWN, AgentState::Known)
+    );
+    let bucket = from(&third);
+    assert_eq!(
+        (bucket.label.as_str(), bucket.agent_kind, bucket.agent_state),
+        ("agent-laptop", AgentKind::Bucket, AgentState::Known),
+        "the bucket of a key is the key name until the key store gives the mode of the key"
+    );
+    let bucket_id = bucket.agent_id.clone();
+    let open: Vec<OpenRef> = read
+        .requests
+        .iter()
+        .map(|r| OpenRef {
+            request_id: r.request_id.clone(),
+            seq: r.seq,
+        })
+        .collect();
+
+    // A sync from a phone that holds no agent brings the three, and no frame twice.
+    conn.send(&ClientMsg::Sync {
+        open: open.clone(),
+        agents: Some(vec![]),
+    })
+    .await;
+    let read = gather(&mut conn, QUIET).await;
+    assert_eq!(read.agents.len(), 3, "{:?}", read.agents);
+    let new = by_id(&read.agents, A_NEW);
+    assert_eq!(
+        (
+            new.kind,
+            new.state,
+            new.label.as_str(),
+            new.named,
+            new.lock_accept,
+            new.open,
+            new.rev
+        ),
+        (
+            AgentKind::Agent,
+            AgentState::New,
+            "agent-laptop #1",
+            false,
+            true,
+            1,
+            1
+        )
+    );
+    assert_eq!(new.key_name, "agent-laptop");
+    assert!(new.observed.is_none(), "the row holds no hint");
+    let known = by_id(&read.agents, A_KNOWN);
+    assert_eq!(
+        (
+            known.state,
+            known.label.as_str(),
+            known.named,
+            known.lock_accept,
+            known.open
+        ),
+        (AgentState::Known, "Night ETL", true, false, 1)
+    );
+    let b = by_id(&read.agents, &bucket_id);
+    assert_eq!(
+        (
+            b.kind,
+            b.state,
+            b.label.as_str(),
+            b.named,
+            b.lock_accept,
+            b.open
+        ),
+        (
+            AgentKind::Bucket,
+            AgentState::Known,
+            "agent-laptop",
+            false,
+            false,
+            1
+        )
+    );
+
+    // The phone holds two of them in their newest rev: it gets the third one only. With the three: none.
+    let held = |ids: &[&str]| -> Vec<AgentRef> {
+        ids.iter()
+            .map(|id| AgentRef {
+                agent_id: id.to_string(),
+                rev: 1,
+            })
+            .collect()
+    };
+    conn.send(&ClientMsg::Sync {
+        open: open.clone(),
+        agents: Some(held(&[A_NEW, A_KNOWN])),
+    })
+    .await;
+    let read = gather(&mut conn, QUIET).await;
+    assert_eq!(
+        read.agents
+            .iter()
+            .map(|a| a.agent_id.clone())
+            .collect::<Vec<_>>(),
+        vec![bucket_id.clone()]
+    );
+    conn.send(&ClientMsg::Sync {
+        open: open.clone(),
+        agents: Some(held(&[A_NEW, A_KNOWN, &bucket_id])),
+    })
+    .await;
+    assert!(gather(&mut conn, QUIET).await.agents.is_empty());
+    // A phone that holds an older rev than the server's gets the agent: the row moves, the phone converges.
+    sql(
+        &pep.s,
+        &format!("UPDATE agents SET rev = 4 WHERE agent_id = '{A_KNOWN}'"),
+    );
+    conn.send(&ClientMsg::Sync {
+        open,
+        agents: Some(held(&[A_NEW, A_KNOWN, &bucket_id])),
+    })
+    .await;
+    let read = gather(&mut conn, QUIET).await;
+    assert_eq!(read.agents.len(), 1);
+    assert_eq!(
+        (read.agents[0].agent_id.as_str(), read.agents[0].rev),
+        (A_KNOWN, 4)
+    );
+}
+
+/// A server without the block `inbox.agents`: every key is one agent. The request names the bucket, `sync` brings no
+/// agent, and `agent_do` says `not_enabled`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_the_block_agents_the_request_names_the_bucket_and_agent_do_is_not_enabled() {
+    let pep = Pep::new();
+    let phone = pep.phone("pixel").await;
+    let (id, _) = pep.submit(&command(24), 60);
+    let mut conn = connect(&pep, &phone).await;
+    let req = first_request(&mut conn).await;
+    assert_eq!(req.request_id, id);
+    assert_eq!(
+        (
+            req.from.label.as_str(),
+            req.from.agent_kind,
+            req.from.agent_state
+        ),
+        ("agent-laptop", AgentKind::Bucket, AgentState::Known)
+    );
+    assert_eq!(req.agent_label, None);
+    conn.send(&ClientMsg::Sync {
+        open: vec![],
+        agents: Some(vec![]),
+    })
+    .await;
+    assert!(gather(&mut conn, QUIET).await.agents.is_empty());
+    let (status, read) = act(
+        &mut conn,
+        &req.from.agent_id,
+        "m-1",
+        AgentOpKind::Block,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, AgentResultStatus::NotEnabled);
+    assert!(read.agents.is_empty());
+    assert_eq!(
+        pep.verdict(&id)["verdict"],
+        "pending",
+        "nothing was cancelled"
+    );
+}
+
+/// `agent_do`: each action changes the agent, every phone of the owner gets the new frame, a phone of another account
+/// gets nothing and changes nothing, and each refusal is a status of the result that leaves the agent as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_do_changes_the_agent_for_every_phone_of_the_owner_and_each_refusal_changes_nothing()
+{
+    let pep = with_agents(true);
+    let phone_a = pep.phone("pixel").await;
+    let phone_b = pep.phone("second").await;
+    let (first, _) = pep.submit(&command(31), 60);
+    let (third, _) = pep.submit(&command(33), 60);
+    seed_agent(&pep, A_NEW, &pep.key_id, "new", 1, None);
+    seed_agent(&pep, A_KNOWN, &pep.key_id, "known", 2, Some("Night ETL"));
+    seed_agent(&pep, A_FOREIGN, "another-key", "known", 1, None);
+    give_item(&pep, &first, A_NEW);
+    let mut a = connect(&pep, &phone_a).await;
+    let mut b = connect(&pep, &phone_b).await;
+    let eve_phone = common::enroll_as(&pep.s, "eve-phone", "eve")
+        .await
+        .expect("a phone of another account");
+    let mut eve = connect(&pep, &eve_phone).await;
+    let read = gather(&mut a, QUIET).await;
+    let bucket_id = read
+        .requests
+        .iter()
+        .find(|r| r.request_id == third)
+        .unwrap()
+        .from
+        .agent_id
+        .clone();
+    gather(&mut b, QUIET).await;
+    assert!(
+        gather(&mut eve, QUIET).await.requests.is_empty(),
+        "no request for another account"
+    );
+
+    // Allow, with a name. Both phones of the owner get the frame; the phone of another account gets nothing.
+    let (status, read) = act(
+        &mut a,
+        A_NEW,
+        "m-1",
+        AgentOpKind::Allow,
+        Some("Refund cleaner"),
+        None,
+    )
+    .await;
+    assert_eq!(status, AgentResultStatus::Ok);
+    assert_eq!(read.agents.len(), 1, "the acting phone gets the frame too");
+    let on_a = &read.agents[0];
+    assert_eq!(
+        (
+            on_a.agent_id.as_str(),
+            on_a.state,
+            on_a.named,
+            on_a.label.as_str(),
+            on_a.lock_accept,
+            on_a.open
+        ),
+        (A_NEW, AgentState::Known, true, "Refund cleaner", false, 1)
+    );
+    assert!(on_a.rev > 1);
+    let read = gather(&mut b, QUIET).await;
+    assert_eq!(read.agents.len(), 1, "the other phone of the owner");
+    assert_eq!(
+        (
+            read.agents[0].agent_id.as_str(),
+            read.agents[0].rev,
+            read.agents[0].id.clone()
+        ),
+        (A_NEW, on_a.rev, on_a.id.clone())
+    );
+    let read = gather(&mut eve, QUIET).await;
+    assert!(
+        read.agents.is_empty() && read.results.is_empty(),
+        "nothing for another account"
+    );
+
+    // The same action again, as the outbox of the phone sends it: a success, and no new frame.
+    let (status, read) = act(
+        &mut a,
+        A_NEW,
+        "m-1",
+        AgentOpKind::Allow,
+        Some("Refund cleaner"),
+        None,
+    )
+    .await;
+    assert_eq!(status, AgentResultStatus::Ok);
+    assert!(
+        read.agents.is_empty(),
+        "an action that changed nothing sends nothing"
+    );
+
+    // Refusals: each one is a status, and none of them changes the agent.
+    let before = agents_as_seen_by(&mut a).await;
+    for (agent, op, name, into, want) in [
+        (
+            A_KNOWN,
+            AgentOpKind::Rename,
+            Some("a\nb"),
+            None,
+            AgentResultStatus::InvalidName,
+        ),
+        (
+            A_KNOWN,
+            AgentOpKind::Rename,
+            Some("a\u{202e}b"),
+            None,
+            AgentResultStatus::InvalidName,
+        ),
+        (
+            A_KNOWN,
+            AgentOpKind::Rename,
+            Some(" padded"),
+            None,
+            AgentResultStatus::InvalidName,
+        ),
+        (
+            A_KNOWN,
+            AgentOpKind::Rename,
+            Some("REFUND  cleaner"),
+            None,
+            AgentResultStatus::NameTaken,
+        ),
+        (
+            A_NEW,
+            AgentOpKind::Rename,
+            Some("night etl"),
+            None,
+            AgentResultStatus::NameTaken,
+        ),
+        (
+            A_NEW,
+            AgentOpKind::Merge,
+            None,
+            Some(A_NEW),
+            AgentResultStatus::BadState,
+        ),
+        (
+            A_NEW,
+            AgentOpKind::Merge,
+            None,
+            Some(A_FOREIGN),
+            AgentResultStatus::CrossKey,
+        ),
+        (
+            A_NEW,
+            AgentOpKind::Merge,
+            None,
+            Some(NOBODY),
+            AgentResultStatus::NotFound,
+        ),
+        (
+            A_NEW,
+            AgentOpKind::Unblock,
+            None,
+            None,
+            AgentResultStatus::Ok,
+        ),
+        (
+            NOBODY,
+            AgentOpKind::Block,
+            None,
+            None,
+            AgentResultStatus::NotFound,
+        ),
+        (
+            NOBODY,
+            AgentOpKind::Rename,
+            Some("x"),
+            None,
+            AgentResultStatus::NotFound,
+        ),
+        (
+            &bucket_id,
+            AgentOpKind::Block,
+            None,
+            None,
+            AgentResultStatus::BadState,
+        ),
+        (
+            &bucket_id,
+            AgentOpKind::Rename,
+            Some("x"),
+            None,
+            AgentResultStatus::BadState,
+        ),
+        (
+            &bucket_id,
+            AgentOpKind::Allow,
+            None,
+            None,
+            AgentResultStatus::BadState,
+        ),
+        (
+            &bucket_id,
+            AgentOpKind::Merge,
+            None,
+            Some(A_NEW),
+            AgentResultStatus::BadState,
+        ),
+    ] {
+        let (status, read) = act(&mut a, agent, "m-2", op, name, into).await;
+        assert_eq!(status, want, "{op:?} {name:?} {into:?} on {agent}");
+        assert!(read.agents.is_empty(), "{op:?} on {agent} sent a frame");
+    }
+    assert_eq!(
+        agents_as_seen_by(&mut a).await,
+        before,
+        "the refusals changed nothing"
+    );
+
+    // Another account: the agent is not its own. It gets `not_found` for each action, as for an agent that does not exist.
+    for (op, name) in [
+        (AgentOpKind::Rename, Some("Mine")),
+        (AgentOpKind::Block, None),
+        (AgentOpKind::Allow, None),
+    ] {
+        let (status, read) = act(&mut eve, A_NEW, "m-eve", op, name, None).await;
+        assert_eq!(status, AgentResultStatus::NotFound, "{op:?}");
+        assert!(read.agents.is_empty());
+    }
+    let (status, _) = act(
+        &mut eve,
+        A_NEW,
+        "m-eve2",
+        AgentOpKind::Merge,
+        None,
+        Some(A_KNOWN),
+    )
+    .await;
+    assert_eq!(status, AgentResultStatus::NotFound);
+    eve.send(&ClientMsg::Sync {
+        open: vec![],
+        agents: Some(vec![]),
+    })
+    .await;
+    assert!(
+        gather(&mut eve, QUIET).await.agents.is_empty(),
+        "no agent of another owner in a sync"
+    );
+    assert_eq!(
+        agents_as_seen_by(&mut a).await,
+        before,
+        "the other account changed nothing"
+    );
+
+    // Block: the open item is cancelled with the reason `agent_blocked`, and the service reads `void`.
+    let (status, read) = act(&mut a, A_NEW, "m-3", AgentOpKind::Block, None, None).await;
+    assert_eq!(status, AgentResultStatus::Ok);
+    assert_eq!(by_id(&read.agents, A_NEW).state, AgentState::Blocked);
+    assert_eq!(by_id(&read.agents, A_NEW).open, 0);
+    let s = read
+        .settled
+        .iter()
+        .find(|s| s.request_id == first)
+        .expect("the item is settled");
+    assert_eq!(
+        (s.state, s.reason.as_str()),
+        (ItemState::Cancelled, "agent_blocked")
+    );
+    assert_eq!(pep.verdict(&first)["verdict"], "void");
+    let read = gather(&mut b, QUIET).await;
+    assert_eq!(by_id(&read.agents, A_NEW).state, AgentState::Blocked);
+    assert!(read.settled.iter().any(|s| s.request_id == first));
+    // Allow on a blocked agent: a bad state. Unblock: known again, and nothing comes back to life.
+    let (status, _) = act(&mut a, A_NEW, "m-4", AgentOpKind::Allow, None, None).await;
+    assert_eq!(status, AgentResultStatus::BadState);
+    let (status, read) = act(&mut a, A_NEW, "m-5", AgentOpKind::Unblock, None, None).await;
+    assert_eq!(status, AgentResultStatus::Ok);
+    assert_eq!(
+        (
+            by_id(&read.agents, A_NEW).state,
+            by_id(&read.agents, A_NEW).open
+        ),
+        (AgentState::Known, 0)
+    );
+    assert_eq!(pep.verdict(&first)["verdict"], "void");
+    // Merge into the other agent of the key: the agent is `merged`, the target gets a frame too.
+    let (status, read) = act(
+        &mut a,
+        A_NEW,
+        "m-6",
+        AgentOpKind::Merge,
+        None,
+        Some(A_KNOWN),
+    )
+    .await;
+    assert_eq!(status, AgentResultStatus::Ok);
+    let merged = by_id(&read.agents, A_NEW);
+    assert_eq!(
+        (merged.state, merged.merged_into.as_deref()),
+        (AgentState::Merged, Some(A_KNOWN))
+    );
+    assert_eq!(by_id(&read.agents, A_KNOWN).state, AgentState::Known);
+    // The same merge again: a success that sends nothing.
+    let (status, read) = act(
+        &mut a,
+        A_NEW,
+        "m-6",
+        AgentOpKind::Merge,
+        None,
+        Some(A_KNOWN),
+    )
+    .await;
+    assert_eq!(status, AgentResultStatus::Ok);
+    assert!(read.agents.is_empty());
+}
+
+/// What a phone that holds nothing learns about the agents of its owner, by agent.
+async fn agents_as_seen_by(c: &mut Conn) -> Vec<(String, u64, &'static str, String)> {
+    c.send(&ClientMsg::Sync {
+        open: vec![],
+        agents: Some(vec![]),
+    })
+    .await;
+    let mut seen: Vec<_> = gather(c, QUIET)
+        .await
+        .agents
+        .into_iter()
+        .map(|a| (a.agent_id, a.rev, a.state.as_str(), a.label))
+        .collect();
+    seen.sort();
+    seen
+}
+
+/// A malformed `agent_do` is a protocol error: the session closes with 4426, and the agent is as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_malformed_agent_do_closes_the_session() {
+    let pep = with_agents(true);
+    let phone = pep.phone("pixel").await;
+    pep.submit(&command(41), 60);
+    seed_agent(&pep, A_NEW, &pep.key_id, "new", 1, None);
+    for frame in [
+        // A rename with no name.
+        format!(r#"{{"t":"agent_do","agent_id":"{A_NEW}","client_msg_id":"m-1","op":"rename"}}"#),
+        // A block with a name.
+        format!(
+            r#"{{"t":"agent_do","agent_id":"{A_NEW}","client_msg_id":"m-1","op":"block","name":"x"}}"#
+        ),
+        // An op that does not exist, and a member that does not exist.
+        format!(r#"{{"t":"agent_do","agent_id":"{A_NEW}","client_msg_id":"m-1","op":"delete"}}"#),
+        format!(
+            r#"{{"t":"agent_do","agent_id":"{A_NEW}","client_msg_id":"m-1","op":"block","force":true}}"#
+        ),
+        // A name of 33 characters.
+        format!(
+            r#"{{"t":"agent_do","agent_id":"{A_NEW}","client_msg_id":"m-1","op":"rename","name":"{}"}}"#,
+            "n".repeat(33)
+        ),
+        // A sync with an agent that has no rev.
+        format!(r#"{{"t":"sync","open":[],"agents":[{{"agent_id":"{A_NEW}","rev":0}}]}}"#),
+    ] {
+        let mut conn = connect(&pep, &phone).await;
+        conn.send_raw(&frame).await;
+        assert_eq!(conn.closed_code().await, Some(4426), "{frame}");
+    }
+    let mut conn = connect(&pep, &phone).await;
+    let (status, _) = act(&mut conn, A_NEW, "m-9", AgentOpKind::Allow, None, None).await;
+    assert_eq!(
+        status,
+        AgentResultStatus::Ok,
+        "the session and the agent work after the refusals"
+    );
+}
+
+/// The lock of a new agent. With `lock_new = true` the server refuses `accept` for the item of a new agent with the status
+/// `agent_locked`, and the item stays open. A decline works. An allow unlocks it. With `lock_new = false` (the default
+/// of the file) the owner can approve at once, and the frame of the agent says so.
+async fn lock_cycle(lock: bool) {
+    let pep = with_agents(lock);
+    let phone = pep.phone("pixel").await;
+    let (locked, _) = pep.submit(&command(51), 60);
+    let (declined, _) = pep.submit(&command(52), 60);
+    let (after_allow, _) = pep.submit(&command(53), 60);
+    let (of_known, c_known) = (pep.submit(&command(54), 60).0, command(54));
+    seed_agent(&pep, A_NEW, &pep.key_id, "new", 1, None);
+    seed_agent(&pep, A_KNOWN, &pep.key_id, "known", 2, Some("Night ETL"));
+    for id in [&locked, &declined, &after_allow] {
+        give_item(&pep, id, A_NEW);
+    }
+    give_item(&pep, &of_known, A_KNOWN);
+    let mut conn = connect(&pep, &phone).await;
+    let read = gather(&mut conn, QUIET).await;
+    let req = |id: &str| {
+        read.requests
+            .iter()
+            .find(|r| r.request_id == id)
+            .unwrap()
+            .clone()
+    };
+    conn.send(&ClientMsg::Sync {
+        open: vec![],
+        agents: Some(vec![]),
+    })
+    .await;
+    let frames = gather(&mut conn, QUIET).await;
+    let new = by_id(&frames.agents, A_NEW);
+    assert_eq!(
+        (new.state, new.lock_accept),
+        (AgentState::New, lock),
+        "the frame says what the server does"
+    );
+
+    // Accept on the item of a new agent.
+    let r = req(&locked);
+    conn.send(&answer(&r, "m-a", Action::Accept, Some(shown(&r))))
+        .await;
+    let result = next_result(&mut conn, WAIT).await;
+    if lock {
+        assert_eq!(
+            (result.status, result.state, result.client_msg_id.as_str()),
+            (AnswerStatus::AgentLocked, Some(ItemState::Pending), "m-a")
+        );
+        assert_eq!(
+            pep.verdict(&locked)["verdict"],
+            "pending",
+            "the item stays open"
+        );
+        assert_eq!(pep.resume(&command(51))["decision"], false);
+        // The same answer again, as the outbox sends it: the same status.
+        conn.send(&answer(&r, "m-a", Action::Accept, Some(shown(&r))))
+            .await;
+        assert_eq!(
+            next_result(&mut conn, WAIT).await.status,
+            AnswerStatus::AgentLocked
+        );
+    } else {
+        assert_eq!(
+            (result.status, result.state),
+            (AnswerStatus::Accepted, Some(ItemState::Answered))
+        );
+        assert_eq!(pep.verdict(&locked)["verdict"], "approved");
+        assert_eq!(pep.resume(&command(51))["decision"], true);
+    }
+
+    // A decline works for a new agent, locked or not.
+    let r = req(&declined);
+    conn.send(&answer(&r, "m-d", Action::Decline, None)).await;
+    assert_eq!(
+        next_result(&mut conn, WAIT).await.status,
+        AnswerStatus::Accepted
+    );
+    assert_eq!(pep.verdict(&declined)["verdict"], "denied");
+
+    // The item of a known agent is not locked.
+    let r = req(&of_known);
+    conn.send(&answer(&r, "m-k", Action::Accept, Some(shown(&r))))
+        .await;
+    assert_eq!(
+        next_result(&mut conn, WAIT).await.status,
+        AnswerStatus::Accepted
+    );
+    assert_eq!(pep.verdict(&of_known)["verdict"], "approved");
+    assert_eq!(pep.resume(&c_known)["decision"], true);
+
+    // The owner allows the agent: the lock is gone, and the item can be approved.
+    let (status, read) = act(&mut conn, A_NEW, "m-allow", AgentOpKind::Allow, None, None).await;
+    assert_eq!(status, AgentResultStatus::Ok);
+    assert_eq!(
+        (
+            by_id(&read.agents, A_NEW).state,
+            by_id(&read.agents, A_NEW).lock_accept
+        ),
+        (AgentState::Known, false)
+    );
+    let r = req(&after_allow);
+    conn.send(&answer(&r, "m-b", Action::Accept, Some(shown(&r))))
+        .await;
+    assert_eq!(
+        next_result(&mut conn, WAIT).await.status,
+        AnswerStatus::Accepted
+    );
+    assert_eq!(pep.verdict(&after_allow)["verdict"], "approved");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_agent_is_locked_for_accept_until_the_owner_allows_it() {
+    lock_cycle(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_agent_is_not_locked_when_lock_new_is_false() {
+    lock_cycle(false).await;
+}
+
+/// A phone of another account that sends the answer of an item of a new agent gets the same status as for any item that is
+/// not its own: `closed`. The lock status tells nothing about the items of another owner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_phone_of_another_account_learns_nothing_of_the_lock() {
+    let pep = with_agents(true);
+    let owner_phone = pep.phone("pixel").await;
+    let (id, _) = pep.submit(&command(61), 60);
+    seed_agent(&pep, A_NEW, &pep.key_id, "new", 1, None);
+    give_item(&pep, &id, A_NEW);
+    let mut owner = connect(&pep, &owner_phone).await;
+    let req = first_request(&mut owner).await;
+    let eve_phone = common::enroll_as(&pep.s, "eve-phone", "eve")
+        .await
+        .expect("a phone of another account");
+    let mut eve = connect(&pep, &eve_phone).await;
+    eve.send(&answer(&req, "m-eve", Action::Accept, Some(shown(&req))))
+        .await;
+    let result = next_result(&mut eve, WAIT).await;
+    assert_eq!((result.status, result.state), (AnswerStatus::Closed, None));
 }

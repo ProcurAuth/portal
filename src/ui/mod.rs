@@ -14,6 +14,7 @@
 
 pub mod access;
 pub mod activity;
+pub mod agents;
 #[cfg(test)]
 pub(crate) mod body_words;
 pub mod components;

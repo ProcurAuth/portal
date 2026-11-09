@@ -22,6 +22,13 @@ const val MAX_FORM_HEADER_CHARS = 16
 const val MAX_FORM_TEXT_CHARS = 600
 const val MAX_SYNC_ENTRIES = 500
 const val MAX_DIGEST_IDS = 200
+const val MAX_SYNC_AGENTS = 200
+const val MAX_AGENT_NAME_CHARS = 32
+const val MAX_AGENT_LABEL_CHARS = 64
+const val MAX_AGENT_CLIENT_CHARS = 64
+const val MAX_AGENT_USER_AGENT_CHARS = 128
+const val MAX_AGENT_NET_CHARS = 43
+const val MAX_AGENT_NETS_SEEN = 8
 const val MAX_VIEW_FIELDS = 12
 const val MAX_VIEW_TITLE_CHARS = 128
 const val MAX_VIEW_LABEL_CHARS = 48
@@ -66,6 +73,38 @@ internal object Check {
             if (isBidi(cp) || cp == 0x2028 || cp == 0x2029) bad(what)
             i += Character.charCount(cp)
         }
+        return text
+    }
+
+    /**
+     * Whether a character is of the class Cf (format) of Unicode: the bidirectional controls, the zero-width characters,
+     * the invisible operators and the tag characters. It is the list of `is_format_char` of the core crate.
+     */
+    fun isFormatChar(cp: Int): Boolean = cp == 0x00AD || cp in 0x0600..0x0605 || cp == 0x061C || cp == 0x06DD ||
+        cp == 0x070F || cp in 0x0890..0x0891 || cp == 0x08E2 || cp == 0x180E || cp in 0x200B..0x200F ||
+        cp in 0x202A..0x202E || cp in 0x2060..0x2064 || cp in 0x2066..0x206F || cp == 0xFEFF ||
+        cp in 0xFFF9..0xFFFB || cp == 0x110BD || cp == 0x110CD || cp in 0x13430..0x1343F ||
+        cp in 0x1BCA0..0x1BCA3 || cp in 0x1D173..0x1D17A || cp == 0xE0001 || cp in 0xE0020..0xE007F
+
+    /**
+     * A text that an agent or a client sent: one line of 1 to `max` characters, with no control character, no format
+     * character and no line or paragraph separator.
+     */
+    fun untrustedLine(text: String, max: Int, what: String): String {
+        line(text, max, what)
+        var i = 0
+        while (i < text.length) {
+            val cp = text.codePointAt(i)
+            if (isFormatChar(cp) || cp == 0x2028 || cp == 0x2029) bad(what)
+            i += Character.charCount(cp)
+        }
+        return text
+    }
+
+    /** The name that the owner gives to an agent: 1 to 32 characters with no NUL. The server checks the other rules. */
+    fun agentName(text: String, what: String): String {
+        text(text, MAX_AGENT_NAME_CHARS, what)
+        if (text.contains('\u0000')) bad(what)
         return text
     }
 

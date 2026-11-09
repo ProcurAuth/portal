@@ -1200,10 +1200,20 @@ An agent can ask the owner of its key to approve an action. The owner answers on
 | **History** | `/auth/settings/inbox/items` | The account owns keys, or it holds `approval.read`. |
 | One request | `/auth/settings/inbox/items/{id}` | The owner of the request, or `approval.read` for the metadata. |
 | Content for the administrator | `/auth/settings/inbox/items/{id}/body` | The superadmin, and `inbox.at_rest.admin_body_read = true`. Else the route answers `404`. |
+| **Agents** | `/auth/settings/inbox/agents` | The block `inbox.agents`. It lists the agents of the account. |
+| One agent | `/auth/settings/inbox/agents/{id}` | The owner of the agent. Another account gets `404`. |
 | **Inbox limits** | `/auth/settings/inbox/limits` | `approval.read`. The page is read only. |
 | **Preferences** | `/auth/settings/inbox/prefs` | The account itself. A session that the superadmin opens as the account gets `403`. |
 
-- **Order on the page Inbox:** the alerts come first, then the panel **Open items**, then the phones and the connections. The page scrolls when the panel is present.
+- **Order on the page Inbox:** the alerts come first, then the notices of the new agents, then the panel **Open items**, then the phones and the connections. The page scrolls when the panel is present.
+- **Groups by agent:** the panel has one group for each agent that has a request that waits. The header of a group has the name, the key, the state and the count. A group opens and closes without script.
+- **Names:** the name of a group is text of the server. It is the name that the owner gave, else the key name and a number, such as `ops-key #4`. The new agents come first. The other groups follow by the age of their oldest request. The group **Unattributed** of a key comes last. A key with no agent has one group with the name of the key.
+- **Not verified:** under the header, the line **Observed, not verified** shows what the agent said about itself, its client and its address range. These values can be wrong or copied. The page escapes them and marks each hidden character. It never uses them as a name.
+- **New agent:** a notice shows above the panel for each new agent. It has a form to name the agent and allow it. It has a button to allow it with its number, and a button to block it. It has a form to merge it into a known agent of the same key.
+- **Warning:** the notice warns when the text of the agent is the name of a known agent. With `inbox.agents.lock_new = true` the page also says that Approve is locked. With the default `false`, no row is locked.
+- **Page of an agent:** `/auth/settings/inbox/agents/{id}` shows the open requests, the observed values, the events and the forms **Rename**, **Merge** and **Block**. A blocked agent has the form **Unblock**.
+- **Forms of the agents:** the POST routes are `rename`, `allow`, `block`, `unblock` and `merge` under `/auth/settings/inbox/agents`. Each needs the owner of the agent, the session, the field `csrf` and the right `Origin`. A name that is not valid or that is taken gives `422`. A state that does not allow the action gives `409`. An agent of another owner gives the same answer as an agent that does not exist.
+- **Approval of a locked agent:** the server refuses `accept` for an item of a new agent when `lock_new` is true. The page answers `409` with the reason. **Decline** and the question stay open.
 - **The page of a request:** the zone **Command** comes first. It shows the text of the service in a fixed font, with line numbers. It shows the fields of the view and the short hash of the effect. The hint `language` sets the colors.
 - **The explanation:** the zone **Agent explanation** comes below the command. It has the label "Not checked", a dashed edge and the note that it does not change what the service runs. An explanation in Markdown shows as a safe subset. A code block of the agent has muted colors and a copy button.
 - **Copy:** the button of the command copies the exact bytes of the command. The buttons need script, so they are hidden without it.
@@ -1212,9 +1222,9 @@ An agent can ask the owner of its key to approve an action. The owner answers on
 - **Old request:** after `inbox.items.stale_after` the page shows a banner and a box "I know this request is N days old". **Approve** needs the box. A refusal does not.
 - **Comment and question:** the field of a comment shows only when the agent set `allow_custom`. The form **Ask the agent a question** (`POST /auth/settings/inbox/items/reply`) shows only when the agent set `allow_ask_back`.
 - **`web_approval = false`:** the pages list the requests and show the content. They have no form that decides.
-- **History:** the filters are the state, the key, the service and the period (7, 30 or 90 days). A request that follows an abandoned or replaced one stands right after it. An owner sees only the own requests. An account with `approval.read` sees the metadata of all of them.
+- **History:** the filters are the state, the key, the service, the period (7, 30 or 90 days) and the agent (`agent=<id>`). The column **Agent** names the agent and links to its filter. A request that follows an abandoned or replaced one stands right after it. An owner sees only the own requests. An account with `approval.read` sees the metadata of all of them.
 - **Cancel:** an account with `approval.cancel` sees the button **Cancel this request** on an open request. The service sees a closed request.
-- **Rules of safety:** a form needs the session, the token `csrf` and the right `Origin`. A session that the superadmin opens as another account reads no request and answers nothing. Each read of the route of the administrator writes one row `body_read` and adds one to `portal_item_body_reads_total`. The row has no content.
+- **Rules of safety:** a form needs the session, the token `csrf` and the right `Origin`. A session that the superadmin opens as another account reads no request or agent and answers nothing. Each read of the route of the administrator writes one row `body_read` and adds one to `portal_item_body_reads_total`. The row has no content.
 
 ### Preferences
 
