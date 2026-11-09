@@ -148,18 +148,8 @@
     <string name="alarm_stop_description">Stop the alarm. Slide out of the circle or long press.</string>
 
     <!-- Notification channels -->
-    <string name="ch_alarm_name">Alarms</string>
-    <string name="ch_alarm_desc">Critical alerts. They ring until you stop them, even in silent mode.</string>
-    <string name="ch_alarm_active_name">Alarm on screen</string>
-    <string name="ch_alarm_active_desc">A ringing alarm that is already open full screen.</string>
-    <string name="ch_ring_name">Rings</string>
-    <string name="ch_ring_desc">One sound, even in silent or vibrate mode.</string>
-    <string name="ch_notify_name">Notifications</string>
-    <string name="ch_notify_desc">Standard notifications. They follow the sound mode of the phone.</string>
     <string name="ch_status_name">Connection status</string>
     <string name="ch_status_desc">Permanent notification of the Portal Inbox service.</string>
-    <string name="ch_warning_name">Connection lost</string>
-    <string name="ch_warning_desc">Warns when the app cannot receive messages.</string>
 
     <!-- Service notifications -->
     <string name="svc_starting">Starting…</string>
@@ -168,9 +158,6 @@
     <string name="svc_disconnected">%1$s: disconnected %2$s</string>
     <string name="svc_reenroll">%1$s: re-enrollment required</string>
     <string name="svc_key_changed">%1$s: key changed, not connected</string>
-    <string name="svc_warning_title">Not connected: %1$s</string>
-    <string name="svc_warning_text">The app is no longer connected to this server.</string>
-    <string name="svc_warning_big">The app cannot receive messages from %1$s. %2$s</string>
 
     <!-- Enrollment errors -->
     <string name="err_unreachable">Cannot reach the server. Check the address and the network.</string>
@@ -219,16 +206,6 @@
     </plurals>
 
     <!-- Items: channels -->
-    <string name="ch_requests_name">Approvals and questions</string>
-    <string name="ch_requests_desc">A request that waits for you. The text never shows the command.</string>
-    <string name="ch_requests_quiet_name">Approvals and questions, quiet</string>
-    <string name="ch_requests_quiet_desc">The same requests in quiet hours, with no sound.</string>
-    <string name="ch_digest_name">Daily summary</string>
-    <string name="ch_digest_desc">The number of requests that wait for you. No sound.</string>
-    <string name="ch_replies_name">Replies from agents</string>
-    <string name="ch_replies_desc">An agent answered you in a discussion.</string>
-    <string name="ch_replies_quiet_name">Replies from agents, quiet</string>
-    <string name="ch_replies_quiet_desc">The same replies in quiet hours, with no sound.</string>
 
     <!-- Items: home list -->
     <string name="section_alerts">Alerts</string>
@@ -320,7 +297,6 @@
 
     <!-- Items: notifications -->
     <string name="notification_decline">Decline</string>
-    <string name="notification_open">Open</string>
 
     <!-- Home list with several portals (lot MP3) -->
     <string name="filter_all">All</string>

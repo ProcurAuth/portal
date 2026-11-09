@@ -106,9 +106,6 @@
             android:name=".alert.StopReceiver"
             android:exported="false" />
         <receiver
-            android:name=".alert.ReadReceiver"
-            android:exported="false" />
-        <receiver
             android:name=".alert.DeclineReceiver"
             android:exported="false" />
     </application>

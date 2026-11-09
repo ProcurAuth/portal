@@ -65,10 +65,16 @@ class BiometricPolicyTest {
     }
 
     @Test
-    fun thePromptShowsTheCodeTheServiceAndTheShortHashOnly() {
-        assertEquals("Approve K7QF", BiometricPolicy.title("K7QF"))
-        assertEquals("datastore · sha256:3c1f9a02", BiometricPolicy.subtitle("datastore", "3c1f9a02"))
-        assertEquals("datastore", BiometricPolicy.subtitle("datastore", null))
+    fun thePromptNamesThePortalInTheTitleAndShowsTheCodeTheServiceAndTheShortHashOnly() {
+        assertEquals("Approve on Production", BiometricPolicy.title("Production"))
+        assertEquals("K7QF · datastore · sha256:3c1f9a02", BiometricPolicy.subtitle("K7QF", "datastore", "3c1f9a02"))
+        assertEquals("K7QF · datastore", BiometricPolicy.subtitle("K7QF", "datastore", null))
+    }
+
+    @Test
+    fun aHiddenCharacterInTheNicknameOrTheCodeShowsAsAMark() {
+        assertEquals("Approve on Pr<U+202E>od", BiometricPolicy.title("Pr\u202Eod"))
+        assertEquals("K7<U+202E>QF · datastore", BiometricPolicy.subtitle("K7\u202EQF", "datastore", null))
     }
 }
 

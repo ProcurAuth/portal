@@ -44,7 +44,28 @@ object ApprovalState {
     }
 
     /** Why Approve is locked. The first reason of this order wins. */
-    enum class Lock { READ_COMMAND, CONFIRM_STALE, NO_SCREEN_LOCK, SENDING }
+    enum class Lock { READ_COMMAND, CONFIRM_STALE, NO_SCREEN_LOCK, SENDING, PORTAL_BLOCKED }
+
+    /**
+     * What the phone can do with an answer for this portal now (proposal 3.11). [ONLINE]: it goes at once. [OFFLINE]: the outbox
+     * holds it until the portal is back, and the server decides then. [BLOCKED]: the key of the portal changed or the portal
+     * revoked this device. Nothing can be sent, so Approve and Decline are off.
+     */
+    enum class Link { ONLINE, OFFLINE, BLOCKED }
+
+    /** Maps the state of the connection to [Link]. A connection that is starting counts as online: it opens within seconds. */
+    fun linkOf(state: app.portalinbox.service.LinkState): Link = when (state) {
+        app.portalinbox.service.LinkState.CONNECTED, app.portalinbox.service.LinkState.CONNECTING -> Link.ONLINE
+        app.portalinbox.service.LinkState.DISCONNECTED -> Link.OFFLINE
+        app.portalinbox.service.LinkState.REENROLL, app.portalinbox.service.LinkState.KEY_CHANGED -> Link.BLOCKED
+    }
+
+    /** "Offline. Your answer is sent when Production is back." Null when the portal is online. */
+    fun offlineLine(link: Link, nickname: String): String? = when (link) {
+        Link.ONLINE -> null
+        Link.OFFLINE -> "Offline. Your answer is sent when ${VisibleText.escapeLine(nickname)} is back."
+        Link.BLOCKED -> "Not connected. Nothing is sent to ${VisibleText.escapeLine(nickname)}."
+    }
 
     data class Input(
         val item: Item,
@@ -56,6 +77,10 @@ object ApprovalState {
         val canAuthenticate: Boolean,
         /** Lot A3 gives the discussion screen. Without it the button "Ask the agent" does not show. */
         val askAvailable: Boolean,
+        /** The state of the link to the portal of the item. */
+        val link: Link = Link.ONLINE,
+        /** The nickname of the portal, for the offline line. */
+        val portal: String = "this portal",
     )
 
     data class Screen(
@@ -74,6 +99,10 @@ object ApprovalState {
         val hint: String?,
         /** The red or amber line at the top for an invalid request or a closed item. */
         val notice: String?,
+        /** The line about the link: offline or blocked. Null when the portal is online or the item is closed. */
+        val linkLine: String? = null,
+        /** The button says "Queue approval": the portal is offline and the answer waits on the phone. */
+        val queued: Boolean = false,
     ) {
         val approveEnabled: Boolean get() = approveShown && approveLock == null
     }
@@ -93,14 +122,16 @@ object ApprovalState {
             else -> Mode.OPEN
         }
         val approveShown = mode == Mode.OPEN || mode == Mode.SENDING
+        val blocked = i.link == Link.BLOCKED && mode != Mode.CLOSED
         val lock = when {
             mode == Mode.SENDING -> Lock.SENDING
+            blocked -> Lock.PORTAL_BLOCKED
             !i.gate.readToEnd -> Lock.READ_COMMAND
             stale && !i.staleConfirmed -> Lock.CONFIRM_STALE
             !i.canAuthenticate -> Lock.NO_SCREEN_LOCK
             else -> null
         }
-        val declineEnabled = mode == Mode.OPEN || mode == Mode.INVALID
+        val declineEnabled = (mode == Mode.OPEN || mode == Mode.INVALID) && !blocked
         val staleBox = stale && approveShown
         return Screen(
             mode = mode,
@@ -115,6 +146,8 @@ object ApprovalState {
             staleBoxText = if (staleBox) "I know this request is ${Ages.long(age)} old." else null,
             hint = hintOf(mode, if (approveShown) lock else null, i.answer),
             notice = noticeOf(item, mode),
+            linkLine = if (mode == Mode.CLOSED) null else offlineLine(i.link, i.portal),
+            queued = i.link == Link.OFFLINE && mode == Mode.OPEN,
         )
     }
 
@@ -126,6 +159,7 @@ object ApprovalState {
             Lock.READ_COMMAND -> "Scroll the command to its end to unlock Approve."
             Lock.CONFIRM_STALE -> "Tick the box to unlock Approve."
             Lock.NO_SCREEN_LOCK -> "Set a screen lock or a fingerprint on this phone to approve."
+            Lock.PORTAL_BLOCKED -> "Nothing can be sent to this portal now."
             Lock.SENDING -> null
             null -> "Approve asks for your fingerprint or your device PIN."
         }

@@ -19,10 +19,13 @@ object BiometricPolicy {
     fun allowed(sdkInt: Int): Allowed =
         if (sdkInt in 28..29) Allowed.WEAK_OR_CREDENTIAL else Allowed.STRONG_OR_CREDENTIAL
 
-    /** The title of the prompt: it shows the code only, never the command. */
-    fun title(code: String): String = "Approve $code"
+    /**
+     * The title of the prompt: "Approve on Production". The prompt is system UI, so it cannot show the color of the portal.
+     * The nickname is the cue. The nickname is local: the portal never sets it.
+     */
+    fun title(nickname: String): String = "Approve on " + VisibleText.escapeLine(nickname)
 
-    /** The subtitle of the prompt: the service and the short hash. */
-    fun subtitle(service: String, shortEffect: String?): String =
-        listOfNotNull(VisibleText.escapeLine(service), shortEffect?.let { "sha256:$it" }).joinToString(" · ")
+    /** The subtitle of the prompt: the code, the service and the short hash. It never shows the command. */
+    fun subtitle(code: String, service: String, shortEffect: String?): String =
+        listOfNotNull(VisibleText.escapeLine(code), VisibleText.escapeLine(service), shortEffect?.let { "sha256:$it" }).joinToString(" · ")
 }
