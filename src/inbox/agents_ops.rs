@@ -861,3 +861,135 @@ pub async fn human_op<T: ItemTx>(
     out.agent = a;
     Ok(Done { value: Ok(out), fx })
 }
+
+// ---------------------------------------------------------------- the mode `enrolled` (lot G6)
+
+/// What `enroll` needs. The caller prepares the id and the token, so the transaction needs no random source.
+#[derive(Clone)]
+pub struct EnrollReq {
+    pub key_id: String,
+    pub owner: String,
+    /// The mode of the key, as the caller read it from the directory of the keys.
+    pub mode: AgentMode,
+    /// The name that the owner gives. The engine checks it with the rules of a rename.
+    pub name: String,
+    pub agent_id: String,
+    pub token: Zeroizing<String>,
+    pub digest: String,
+}
+
+/// Why `enroll` or `reset_token` refuses. A refusal writes nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnrollError {
+    /// The agent does not exist, or it belongs to another owner. One answer for each case.
+    NotFound,
+    /// The key is not in the mode `enrolled`, or the portal has no block `inbox.agents`.
+    WrongMode,
+    /// The key has `max_per_key` agents.
+    Cap,
+    InvalidName(TextError),
+    /// Another agent of the key has this name, after the fold.
+    NameTaken,
+    /// The bucket, an agent that a call made, or a merged agent has no token to reset.
+    BadState,
+}
+
+/// Makes an agent for the owner. The agent is `known`, its origin is `owner`, and it has the name of the owner. It never
+/// passes through the state `new`, so it makes no first-use notice. The phones get the frame `agent` as for any change.
+/// The token is in `req`: the engine writes its digest and never the token.
+pub async fn enroll<T: ItemTx>(
+    tx: &mut T,
+    cx: &Cx,
+    req: &EnrollReq,
+) -> Result<Done<Result<AgentRow, EnrollError>>, DbError> {
+    let refuse = |e: EnrollError| Done {
+        value: Err(e),
+        fx: Effects::default(),
+    };
+    if cx.rules.agents.effective(req.mode) != AgentMode::Enrolled {
+        return Ok(refuse(EnrollError::WrongMode));
+    }
+    let name_key = match name_key_of(&req.name) {
+        Ok(k) => k,
+        Err(OpError::InvalidName(e)) => return Ok(refuse(EnrollError::InvalidName(e))),
+        Err(_) => return Ok(refuse(EnrollError::BadState)),
+    };
+    // The cap is counted after this lock: two instances that make an agent for one key are in line.
+    tx.lock_creation().await?;
+    if tx.count_agents(&req.key_id).await? >= i64::from(cx.rules.agents.max_per_key) {
+        return Ok(refuse(EnrollError::Cap));
+    }
+    if tx.name_taken(&req.key_id, &name_key, "").await? {
+        return Ok(refuse(EnrollError::NameTaken));
+    }
+    ensure_bucket(tx, cx, &req.key_id, &req.owner).await?;
+    let ordinal = tx.bump_ordinal(&req.key_id).await?;
+    let row = AgentRow {
+        agent_id: req.agent_id.clone(),
+        key_id: req.key_id.clone(),
+        owner: req.owner.clone(),
+        kind: AgentKind::Agent,
+        state: AgentState::Known,
+        origin: AgentOrigin::Owner,
+        ordinal,
+        name: Some(req.name.clone()),
+        name_key: Some(name_key),
+        token_digest: Some(req.digest.clone()),
+        merged_into: None,
+        rev: 1,
+        created_at: cx.now,
+        named_at: Some(cx.now),
+        last_seen_at: cx.now,
+        hints: None,
+    };
+    tx.insert_agent(&row).await?;
+    tx.insert_agent_event(
+        &row.agent_id,
+        cx.now,
+        "enrolled",
+        &req.owner,
+        Some(&format!("ordinal={ordinal}")),
+    )
+    .await?;
+    let mut fx = Effects::default();
+    agent_notice(&mut fx, cx, &row);
+    ops::done(tx, cx, Ok(row), fx).await
+}
+
+/// Replaces the token of an agent that the owner made. The old digest is gone at once, so the old token gives
+/// `agent_unknown`. `rev` grows, and the event `token_reset` holds no secret. The caller prepares the new digest.
+pub async fn reset_token<T: ItemTx>(
+    tx: &mut T,
+    cx: &Cx,
+    login: &str,
+    agent_id: &str,
+    mode: AgentMode,
+    digest: &str,
+) -> Result<Done<Result<AgentRow, EnrollError>>, DbError> {
+    let refuse = |e: EnrollError| Done {
+        value: Err(e),
+        fx: Effects::default(),
+    };
+    let Some(mut a) = tx
+        .agent_locked(agent_id)
+        .await?
+        .filter(|a| a.owner == login)
+    else {
+        return Ok(refuse(EnrollError::NotFound));
+    };
+    if cx.rules.agents.effective(mode) != AgentMode::Enrolled {
+        return Ok(refuse(EnrollError::WrongMode));
+    }
+    if a.kind != AgentKind::Agent || a.origin != AgentOrigin::Owner || a.state == AgentState::Merged
+    {
+        return Ok(refuse(EnrollError::BadState));
+    }
+    a.token_digest = Some(digest.to_string());
+    a.rev += 1;
+    tx.save_agent(&a).await?;
+    tx.insert_agent_event(&a.agent_id, cx.now, "token_reset", login, None)
+        .await?;
+    let mut fx = Effects::default();
+    agent_notice(&mut fx, cx, &a);
+    ops::done(tx, cx, Ok(a), fx).await
+}

@@ -4655,6 +4655,10 @@ textarea.uiInput { height: auto; min-height: 64px; padding: 6px 8px; resize: ver
 .sender__of { color: var(--muted); font-size: var(--fs-s); }
 .sender__of b { color: var(--text); font-weight: 600; }
 .sender__of a { color: var(--accent-text); }
+.sender__also { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: var(--fs-s); min-width: 0; }
+.sender__also > span { min-width: 0; overflow-wrap: anywhere; }
+.sender__also a { color: var(--accent-text); }
+.enrollBox { margin-top: 16px; max-width: 520px; }
 .says { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 4px 8px; border: 1px dashed var(--border-strong); border-radius: var(--radius-compact); background: var(--raised); color: var(--muted); font-size: var(--fs-s); min-width: 0; }
 .says > span { min-width: 0; overflow-wrap: anywhere; }
 .says .tag { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--warning); }

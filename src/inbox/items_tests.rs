@@ -1261,7 +1261,7 @@ async fn a_sealed_value_that_moves_does_not_open() {
 }
 
 /// Every text and blob that the database holds, one string for each value (a blob as lossy text and as hex).
-async fn dump(env: &Env) -> Vec<String> {
+pub(super) async fn dump(env: &Env) -> Vec<String> {
     match (&env.store, &env.pg) {
         (Store::Sqlite(db), _) => db
             .call(|c| {

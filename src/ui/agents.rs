@@ -28,6 +28,8 @@ pub const ALLOW: &str = "/auth/settings/inbox/agents/allow";
 pub const BLOCK: &str = "/auth/settings/inbox/agents/block";
 pub const UNBLOCK: &str = "/auth/settings/inbox/agents/unblock";
 pub const MERGE: &str = "/auth/settings/inbox/agents/merge";
+pub const ENROLL: &str = "/auth/settings/inbox/agents/enroll";
+pub const RESET: &str = "/auth/settings/inbox/agents/reset";
 
 /// The text of the outcome of a form of the agents, from a fixed list.
 pub fn notice_for(code: &str) -> Option<Notice> {
@@ -61,6 +63,14 @@ pub fn notice_for(code: &str) -> Option<Notice> {
         ),
         "agent_cross_key" => ("You can merge only agents of the same key.", false),
         "agent_no_target" => ("Choose the agent to merge into.", false),
+        "agent_no_key" => (
+            "Choose a key in the mode Enrolled. A key that you own and that is in another mode cannot enroll an agent.",
+            false,
+        ),
+        "agent_cap" => (
+            "This key has the most agents that the file allows. Merge or block an agent, or ask the operator to raise the limit.",
+            false,
+        ),
         _ => return None,
     };
     Some(Notice { text, ok })
@@ -371,6 +381,8 @@ pub struct AgentPage<'a> {
     pub merged_into: Option<(String, String)>,
     /// The name that the owner typed in a form that the server refused.
     pub typed: Option<&'a str>,
+    /// The owner made this agent and the key is in the mode `enrolled`: the box "Reset token" shows.
+    pub can_reset: bool,
 }
 
 fn crumbs(last: &str) -> String {
@@ -392,6 +404,8 @@ fn event_text(e: &AgentEventRow) -> String {
     let plural = |n: u64, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
     match e.event.as_str() {
         "created" => "Made by a first call of the key".to_string(),
+        "enrolled" => format!("Added by {who}. The token was shown one time."),
+        "token_reset" => format!("Token reset by {who}. The old token stopped at once."),
         "allowed" => format!("Allowed by {who}"),
         "named" => format!("Named by {who}"),
         "renamed" => format!("Renamed by {who}"),
@@ -583,6 +597,13 @@ fn side_forms(p: &AgentPage) -> String {
                 icon("git-merge")
             );
         }
+        if p.can_reset {
+            let _ = write!(
+                out,
+                r#"<div class="sidebox"><h3>Token</h3><form class="acts" method="post" action="{RESET}">{fields}<p>The server keeps only a digest of the token, so it cannot show the token again. If the agent lost it, make a new one. <b>The old token stops at once.</b> The agent cannot call until you give it the new token.</p><div class="row"><button class="button" type="submit">{}Reset token</button></div></form></div>"#,
+                icon("key")
+            );
+        }
         let cancel = match p.open.len() {
             0 => "No request waits now.".to_string(),
             1 => "The 1 open request is cancelled.".to_string(),
@@ -712,6 +733,38 @@ pub struct ListRow {
 pub struct AgentsList {
     pub rows: Vec<ListRow>,
     pub now_ms: i64,
+    /// The form "Add agent": present when the owner has a key in the mode `enrolled`.
+    pub enroll: Option<EnrollForm>,
+}
+
+/// The form "Add agent" of the list (lot G6). The owner makes an agent for a key in the mode `enrolled`. The server then shows
+/// the token one time.
+pub struct EnrollForm {
+    pub csrf: String,
+    /// The keys of the owner in the mode `enrolled`: `(key id, key name)`.
+    pub keys: Vec<(String, String)>,
+    /// What the owner typed in a form that the server refused.
+    pub typed_key: String,
+    pub typed_name: String,
+}
+
+fn enroll_form(f: &EnrollForm) -> String {
+    let mut options = String::new();
+    for (id, name) in &f.keys {
+        let _ = write!(
+            options,
+            r#"<option value="{}"{}>{}</option>"#,
+            html_escape(id),
+            if *id == f.typed_key { " selected" } else { "" },
+            html::escape(name)
+        );
+    }
+    format!(
+        r#"<section class="sidebox enrollBox" aria-labelledby="en-t"><h3 id="en-t">Add agent</h3><form class="acts" method="post" action="{ENROLL}"><input type="hidden" name="csrf" value="{}"><div class="field"><label class="field__label" for="en-key">Key</label><select class="uiInput" id="en-key" name="key" required>{options}</select></div><div class="field"><label class="field__label" for="en-name">Name of the agent</label><input class="uiInput" id="en-name" name="name" maxlength="32" required autocomplete="off" placeholder="For example: Refund cleaner" value="{}"></div><div class="row"><button class="button button--primary" type="submit">{}Add agent</button></div><p>The server gives a token for this agent and shows it one time. Put the token in the setup of the agent. A call of this key with no token, or with another token, is refused.</p></form></section>"#,
+        html_escape(&f.csrf),
+        html::escape_attr(&f.typed_name),
+        icon("plus"),
+    )
 }
 
 /// The page that lists all the agents of the owner, new ones first. It is the way to a blocked or idle agent.
@@ -756,19 +809,70 @@ pub fn agents_page(frame: &Frame, l: &AgentsList, notice: Option<Notice>) -> Str
         );
     }
     let table = if rows.is_empty() {
-        r#"<div class="uiState uiState--left"><p class="uiState__body">No agent yet. An agent shows here after its first request.</p></div>"#.to_string()
+        r#"<div class="uiState uiState--left"><p class="uiState__body">No agent yet. An agent shows here after its first request, or after you add it.</p></div>"#.to_string()
     } else {
         format!(
             r#"<div class="histWrap"><table class="agTbl agTbl--list"><thead><tr><th>Agent</th><th>State</th><th>Open</th><th>Last call</th></tr></thead><tbody>{body}</tbody></table></div>"#
         )
     };
+    let add = l.enroll.as_ref().map(enroll_form).unwrap_or_default();
     let _ = write!(
         out,
-        r#"<div class="page"><section class="zone" aria-labelledby="ag-t"><div class="zone__head"><h2 class="title" id="ag-t">Agents</h2><span class="count">{}</span><span class="grow"></span>{}</div><div class="scroll">{table}</div></section><p class="note">The names are yours. An agent that the server does not know gets the name of its key and a number. The text that an agent says about itself is not verified: it is on the page of the agent.</p></div>"#,
+        r#"<div class="page"><section class="zone" aria-labelledby="ag-t"><div class="zone__head"><h2 class="title" id="ag-t">Agents</h2><span class="count">{}</span><span class="grow"></span>{}</div><div class="scroll">{table}</div></section>{add}<p class="note">The names are yours. An agent that the server does not know gets the name of its key and a number. The text that an agent says about itself is not verified: it is on the page of the agent.</p></div>"#,
         rows.len(),
         segmented(View::Agents, true),
     );
     fill_page(Tab::Inbox, frame, "Inbox: agents", &out)
+}
+
+// The token, one time ----------------------------------------------------------------------------
+
+/// The page that shows a token one time: after "Add agent" and after "Reset token" (lot G6). The server keeps only a digest of
+/// the token, so no other page can show it again.
+pub struct TokenPage<'a> {
+    /// The name of the agent: text of the server.
+    pub label: &'a str,
+    pub key_name: &'a str,
+    pub agent_id: &'a str,
+    pub token: &'a str,
+    /// True after "Reset token": the old token is dead.
+    pub reset: bool,
+}
+
+/// The header line that an MCP client sends: the owner pastes it in the setup of the client.
+pub fn header_line(token: &str) -> String {
+    format!("Agent-Token: {token}")
+}
+
+fn copy_row(id: &str, label: &str, value: &str) -> String {
+    format!(
+        r##"<div class="field"><label class="field__label" for="{id}">{label}</label><div class="keyRow"><input class="uiInput uiInput--mono keyText" id="{id}" type="text" readonly value="{}" spellcheck="false" autocomplete="off"><button class="button copyButton" type="button" data-copy="{id}"><svg class="icon icon--sm copyButton__idle" aria-hidden="true"><use href="#i-copy"/></svg><svg class="icon icon--sm copyButton__done" aria-hidden="true"><use href="#i-check"/></svg>Copy</button></div></div>"##,
+        html_escape(value)
+    )
+}
+
+/// The page of the token. It is an answer to a POST and it has `Cache-Control: no-store`. It has no link to another site.
+pub fn token_page(frame: &Frame, t: &TokenPage) -> String {
+    let name = html::escape(t.label);
+    let lead = if t.reset {
+        format!(
+            "The token of <strong>{name}</strong> is new. The old token stopped at once. Copy the new token now. The server shows it one time and keeps only a digest."
+        )
+    } else {
+        format!(
+            "The agent <strong>{name}</strong> is made for the key {}. Copy its token now. The server shows it one time and keeps only a digest.",
+            key_chip(t.key_name)
+        )
+    };
+    let id = html_escape(t.agent_id);
+    let body = format!(
+        r#"<div class="page page--narrow">{}<div class="head"><h2>{}</h2></div><p class="uiBanner uiBanner--inset uiBanner--ok" role="status"><span class="uiBanner__text">{lead}</span></p>{}{}<div class="sidebox"><h3>How the agent sends the token</h3><p>Best: put the header line above in the setup of the MCP client. Then the model never has to copy the token.</p><p>If the client cannot set a header, the model gives the token in the argument <code>agent_token</code> of each tool.</p><p>A token in a query string is refused. Each call that makes a request needs the token. A call with no token, or with a wrong token, is refused.</p></div><p class="uiBanner uiBanner--inset uiBanner--warn"><span class="uiBanner__text">Do not put the token in a text that other people read. The server refuses an explanation that holds a live token.</span></p><div class="row"><a class="button button--primary" href="{AGENTS}/{id}">Done</a></div></div>"#,
+        crumbs(&name),
+        if t.reset { "New token" } else { "Agent made" },
+        copy_row("agent-token", "Token", t.token),
+        copy_row("agent-header", "Header line", &header_line(t.token)),
+    );
+    fill_page(Tab::Inbox, frame, "Inbox: agent token", &body)
 }
 
 /// What the page of one request shows of the sender.
@@ -778,6 +882,38 @@ pub struct Sender {
     /// The viewer is the owner: the box shows the text of the agent and links to its page.
     pub owner: bool,
     pub lock: bool,
+    /// The other agents that asked for the same effect and got this request (the event `also_requested`): their names, as the
+    /// server writes them. It is never text of an agent. Empty for a viewer that is not the owner.
+    pub also: Vec<AlsoBy>,
+}
+
+/// An agent that asked for the effect of a request that was open already.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlsoBy {
+    pub agent_id: String,
+    /// The name of the owner, else "<key name> #<number>": text of the server.
+    pub label: String,
+}
+
+/// The line "Also asked by": the other agents that asked for the same effect. The names are text of the server.
+fn also_line(also: &[AlsoBy]) -> String {
+    if also.is_empty() {
+        return String::new();
+    }
+    let links: Vec<String> = also
+        .iter()
+        .map(|a| {
+            format!(
+                r#"<a href="{AGENTS}/{}">{}</a>"#,
+                html_escape(&a.agent_id),
+                html::escape(&a.label)
+            )
+        })
+        .collect();
+    format!(
+        r#"<div class="sender__also"><span class="sender__label">Also asked by</span><span>{}</span><span class="muted">They asked for the same effect. The server gave them this request.</span></div>"#,
+        links.join(", ")
+    )
 }
 
 impl Sender {
@@ -849,7 +985,12 @@ pub fn sender_box(s: &Sender, owner_login: &str) -> String {
         }
         format!(r#"<div class="says">{line}</div>"#)
     };
-    format!(r#"<div class="sender" aria-label="From">{main}{says}</div>"#)
+    let also = if s.owner {
+        also_line(&s.also)
+    } else {
+        String::new()
+    };
+    format!(r#"<div class="sender" aria-label="From">{main}{says}{also}</div>"#)
 }
 
 /// The side box "About the sender": what the server wrote, and what the agent wrote.
@@ -981,6 +1122,28 @@ mod tests {
             },
             merged_into: None,
             typed: None,
+            can_reset: false,
+        }
+    }
+
+    fn enroll_for_test() -> EnrollForm {
+        EnrollForm {
+            csrf: "tok<".into(),
+            keys: vec![("k1".into(), "ops<key".into()), ("k2".into(), "etl".into())],
+            typed_key: "k2".into(),
+            typed_name: "Re\"fund".into(),
+        }
+    }
+
+    const SECRET: &str = "agt_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-_abcde";
+
+    fn token_for_test(reset: bool) -> TokenPage<'static> {
+        TokenPage {
+            label: "Billing <bot>",
+            key_name: "ops-key",
+            agent_id: "g1",
+            token: SECRET,
+            reset,
         }
     }
 
@@ -1225,7 +1388,15 @@ mod tests {
                 idle: true,
             },
         ];
-        let html = agents_page(&frame(), &AgentsList { rows, now_ms: NOW }, None);
+        let html = agents_page(
+            &frame(),
+            &AgentsList {
+                rows,
+                now_ms: NOW,
+                enroll: None,
+            },
+            None,
+        );
         assert!(
             html.contains(r#"href="/auth/settings/inbox/agents/g4""#)
                 && html.contains("New, not named")
@@ -1242,6 +1413,7 @@ mod tests {
             &AgentsList {
                 rows: vec![],
                 now_ms: NOW,
+                enroll: None,
             },
             None,
         );
@@ -1290,6 +1462,17 @@ mod tests {
                         idle: false,
                     }],
                     now_ms: NOW,
+                    enroll: Some(enroll_for_test()),
+                },
+                None,
+            ),
+            token_page(&frame(), &token_for_test(false)),
+            token_page(&frame(), &token_for_test(true)),
+            agent_page(
+                &frame(),
+                &AgentPage {
+                    can_reset: true,
+                    ..page_for(view("g1", "Billing bot", AgentState::Known))
                 },
                 None,
             ),
@@ -1310,5 +1493,118 @@ mod tests {
             Via::Mcp,
         );
         let _: Option<(&ItemRow, &ApprovalRow, &Loaded)> = None;
+    }
+
+    #[test]
+    fn the_token_page_shows_the_token_and_the_header_line_with_copy_buttons_and_says_one_time() {
+        let page = token_page(&frame(), &token_for_test(false));
+        assert!(page.contains(&format!(
+            r#"id="agent-token" type="text" readonly value="{SECRET}""#
+        )));
+        assert!(page.contains(&format!(
+            r#"id="agent-header" type="text" readonly value="Agent-Token: {SECRET}""#
+        )));
+        assert!(
+            page.contains(r#"data-copy="agent-token""#)
+                && page.contains(r#"data-copy="agent-header""#)
+        );
+        assert!(page.contains("shows it one time") && page.contains("Copy its token now"));
+        assert!(page.contains("<code>agent_token</code>"));
+        // The name is text of the owner: it is escaped.
+        assert!(page.contains("Billing &lt;bot&gt;") && !page.contains("Billing <bot>"));
+        // The page links only inside the application.
+        let main = page.split("<main").nth(1).unwrap();
+        assert!(!main.contains("http://") && !main.contains("https://"));
+        assert!(page.contains(r#"href="/auth/settings/inbox/agents/g1""#));
+        let reset = token_page(&frame(), &token_for_test(true));
+        assert!(reset.contains("The old token stopped at once"));
+        assert_eq!(header_line(SECRET), format!("Agent-Token: {SECRET}"));
+    }
+
+    #[test]
+    fn the_list_has_the_form_add_agent_only_with_a_key_in_the_mode_enrolled() {
+        let none = agents_page(
+            &frame(),
+            &AgentsList {
+                rows: vec![],
+                now_ms: NOW,
+                enroll: None,
+            },
+            None,
+        );
+        assert!(!none.contains(ENROLL) && !none.contains("Add agent"));
+        let html = agents_page(
+            &frame(),
+            &AgentsList {
+                rows: vec![],
+                now_ms: NOW,
+                enroll: Some(enroll_for_test()),
+            },
+            None,
+        );
+        assert!(html.contains(&format!(r#"method="post" action="{ENROLL}""#)));
+        assert!(html.contains(r#"name="csrf" value="tok&lt;""#));
+        // The key is a choice, the name is typed, and the refused values come back.
+        assert!(html.contains(r#"<option value="k1">ops&lt;key</option>"#));
+        assert!(html.contains(r#"<option value="k2" selected>etl</option>"#));
+        assert!(html.contains(r#"value="Re&quot;fund""#));
+        assert!(html.contains("shows it one time"));
+    }
+
+    #[test]
+    fn the_box_reset_token_shows_only_when_the_page_says_so_and_it_warns_the_old_token_stops() {
+        let plain = agent_page(
+            &frame(),
+            &page_for(view("g1", "Billing bot", AgentState::Known)),
+            None,
+        );
+        assert!(!plain.contains(RESET) && !plain.contains("Reset token"));
+        let page = agent_page(
+            &frame(),
+            &AgentPage {
+                can_reset: true,
+                ..page_for(view("g1", "Billing bot", AgentState::Known))
+            },
+            None,
+        );
+        assert!(page.contains(&format!(r#"method="post" action="{RESET}""#)));
+        assert!(page.contains("Reset token") && page.contains("The old token stops at once."));
+        let form = page.split(&format!(r#"action="{RESET}""#)).nth(1).unwrap();
+        let form = &form[..form.find("</form>").unwrap()];
+        assert!(form.contains(r#"name="csrf""#) && form.contains(r#"name="agent_id" value="g1""#));
+    }
+
+    #[test]
+    fn the_events_of_the_enrolled_mode_have_a_text_with_no_secret() {
+        for (event, text) in [
+            ("enrolled", "Added by alice"),
+            ("token_reset", "Token reset by alice"),
+        ] {
+            let t = event_text(&AgentEventRow {
+                at: NOW,
+                event: event.into(),
+                actor: "alice".into(),
+                detail: None,
+            });
+            assert!(t.starts_with(text), "{t}");
+        }
+        assert!(notice_for("agent_no_key").is_some() && notice_for("agent_cap").is_some());
+    }
+
+    #[test]
+    fn the_line_also_asked_by_names_the_other_agents_with_text_of_the_server() {
+        assert_eq!(also_line(&[]), "");
+        let line = also_line(&[
+            AlsoBy {
+                agent_id: "g2".into(),
+                label: "Night <ETL>".into(),
+            },
+            AlsoBy {
+                agent_id: "g3".into(),
+                label: "ops-key #5".into(),
+            },
+        ]);
+        assert!(line.contains("Also asked by"));
+        assert!(line.contains(r#"<a href="/auth/settings/inbox/agents/g2">Night &lt;ETL&gt;</a>, <a href="/auth/settings/inbox/agents/g3">ops-key #5</a>"#));
     }
 }

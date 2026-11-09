@@ -1045,6 +1045,22 @@ fn agent_text_and_number_limits_are_exact() {
     assert!(bad_bucket(&|v| v["merged_into"] = json!("c".repeat(32))));
 }
 
+/// Lot G6: the web is the only place where an owner makes an agent or resets a token. The frame has no such operation.
+#[test]
+fn agent_do_has_no_operation_to_enroll_or_to_reset_a_token() {
+    let a = "d4".repeat(16);
+    for op in ["enroll", "reset_token", "reset", "add", "make"] {
+        for extra in [json!({}), json!({"name": "Refund cleaner"})] {
+            let mut v =
+                json!({"t": "agent_do", "agent_id": a, "client_msg_id": "m-0010", "op": op});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            assert!(!client_ok(&v), "{op} {extra}");
+        }
+    }
+}
+
 #[test]
 fn agent_do_ops_and_limits() {
     let a = "d4".repeat(16);

@@ -1592,6 +1592,7 @@ mod tests {
             lookalike: None,
             owner: true,
             lock: false,
+            also: Vec::new(),
         }
     }
 

@@ -182,7 +182,39 @@ The mode is an attribute of the key. The owner sets it in the form of the key, w
 |---|---|---|
 | `key` | One agent for the key. No token. All items go to the bucket of the key. | Keys of the kind `api` |
 | `discover` | A call that makes an item and has no token makes an agent, and the result gives its token. | Keys of the kind `mcp` |
-| `enrolled` | The owner makes the agents. A call that makes an item and has no valid token gives `agent_token_required`. | None |
+| `enrolled` | The owner makes the agents. A call that makes an item and has no valid token gives `agent_token_required`. See "Enrolled mode". | None |
+
+### Enrolled mode
+
+In the mode `enrolled`, an agent never makes itself. The owner makes it on the web, and gets the token once. This is the sure way for an agent that cannot keep a token that a tool result gave.
+
+To add an agent:
+
+1. Set the mode of the key to `enrolled`. Use the form of the key. The file must have the block `inbox.agents`.
+2. Open the tab Inbox, then the list **Agents**. The form **Add agent** shows only when you own a key in this mode.
+3. Choose the key and type the name of the agent. The name follows the rules of a rename: 1 to 32 characters, unique inside the key.
+4. Press **Add agent**. The answer is a page with the token in a box with a copy button. It also shows the header line to paste: `Agent-Token: agt_...`.
+5. Copy the token now. The server keeps only a digest and never shows the token again.
+6. Put the header line in the setup of the MCP client. If the client cannot set a header, the model gives the token in the argument `agent_token` of each tool.
+
+What the agent is:
+
+- The state is `known` at once, and its origin is the owner. It never has the state `new`. It makes no first-use notice and no lock, although `inbox.agents.lock_new` is true.
+- The phones get the frame `agent` for it, as for each change.
+- The key counts it against `inbox.agents.max_per_key`. A form that would pass the limit gets the status 409.
+- A call of the key with no token, or with a token that is not valid, is refused. The codes are `agent_token_required` and `agent_unknown`.
+
+To reset a token, open the page of the agent and press **Reset token**. The page says that the old token stops at once. The answer shows the new token once, in the same way. The agent cannot call until you give it the new token. The agent keeps its name, its state and its requests.
+
+The event `token_reset` is in the list of events of the agent. It holds no secret.
+
+The reset is only for an agent that the owner made, on a key in the mode `enrolled`. It is not for an agent that a call made, for the bucket or for a merged agent. A blocked agent can get a new token, and it stays blocked.
+
+The phone cannot add an agent or reset a token. The frame `agent_do` has no such operation. Use the web page.
+
+The server never shows the token on another page. It is not in a URL, in the History, in an event, in a log line, in a metric or in a frame. The service at the end of a PEP chain never sees it.
+
+The sweeper erases an enrolled agent that has no item and no call for `inbox.agents.purge_after`. Its token is then unknown, and you must add the agent again.
 
 ### Errors of the agents
 
