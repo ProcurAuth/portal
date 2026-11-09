@@ -1479,3 +1479,105 @@ async fn base_database_without_agents_table_stops_the_start() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn last_seen_is_written_at_most_once_in_60_seconds() {
+    for env in envs().await {
+        let items = env.items();
+        let (a, token) = make(&items, KEY1).await;
+        let seen = || async { items.agent(&a).await.unwrap().unwrap().last_seen_at };
+        let t0 = seen().await;
+        env.advance(Duration::from_secs(30));
+        who(&items, KEY1, &token, false).await.unwrap();
+        assert_eq!(
+            seen().await,
+            t0,
+            "{}: 30 seconds is inside the step",
+            env.name
+        );
+        env.advance(Duration::from_secs(31));
+        who(&items, KEY1, &token, false).await.unwrap();
+        assert_eq!(seen().await, t0 + 61_000, "{}", env.name);
+        // The touch never changes `rev`: a device does not need a new frame for a call.
+        assert_eq!(items.agent(&a).await.unwrap().unwrap().rev, 1);
+        // A blocked agent that calls is alive too: its row is not erased as idle.
+        op(&items, &a, AgentOp::Block).await.unwrap();
+        env.advance(Duration::from_secs(120));
+        assert!(who(&items, KEY1, &token, true).await.is_err());
+        assert_eq!(seen().await, t0 + 181_000, "{}", env.name);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn enrolled_mode_accepts_a_known_token_and_refuses_a_call_with_none() {
+    for env in envs().await {
+        let items = env.items();
+        let (a, token) = make(&items, KEY1).await;
+        let enrolled = |token: Option<&str>| AgentCall {
+            mode: AgentMode::Enrolled,
+            token: token.map(str::to_string),
+            hints: Hints::default(),
+        };
+        let r = items
+            .resolve_agent(KEY1, OWNER, &enrolled(Some(&token)), true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (r.agent_id.as_str(), r.token.is_none()),
+            (a.as_str(), true),
+            "{}",
+            env.name
+        );
+        let e = items
+            .resolve_agent(KEY1, OWNER, &enrolled(None), true)
+            .await
+            .unwrap_err();
+        assert_eq!((e.code(), e.status()), ("agent_token_required", 422));
+        // A read with no token is allowed in this mode: the item decides.
+        assert!(items
+            .resolve_agent(KEY1, OWNER, &enrolled(None), false)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            env.count("SELECT COUNT(*) FROM agents WHERE kind = 'agent'")
+                .await,
+            1,
+            "the refusal made no agent"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_items_of_one_agent_can_be_listed() {
+    for env in envs().await {
+        let items = env.items();
+        let (a, _) = make(&items, KEY1).await;
+        let (b, _) = make(&items, KEY1).await;
+        item_of(&items, 1, KEY1, Some(&a)).await;
+        item_of(&items, 2, KEY1, Some(&a)).await;
+        item_of(&items, 3, KEY1, Some(&b)).await;
+        let listed = |agent: &str, open: Option<bool>| {
+            let filter = super::items_ops::ListFilter {
+                agent_id: Some(agent.to_string()),
+                open,
+                limit: 10,
+                ..Default::default()
+            };
+            let items = &items;
+            async move { items.list(filter).await.unwrap().len() }
+        };
+        assert_eq!(
+            (listed(&a, None).await, listed(&b, None).await),
+            (2, 1),
+            "{}",
+            env.name
+        );
+        op(&items, &a, AgentOp::Block).await.unwrap();
+        assert_eq!(
+            (listed(&a, Some(true)).await, listed(&a, Some(false)).await),
+            (0, 2)
+        );
+    }
+}

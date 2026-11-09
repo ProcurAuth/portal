@@ -164,14 +164,13 @@ impl Items<'_> {
         let sealed = self.seal_hints(&row.agent_id, &now)?;
         let cx = self.cx();
         let (id, rev) = (row.agent_id.clone(), row.rev);
-        let written = in_tx!(
+        // The result is false when another call wrote a newer record first: this update is dropped.
+        in_tx!(
             self,
             [cx, id, rev, sealed, events],
             tx,
             ops::write_hints(tx, &cx, &id, rev, &sealed, &events)
         )?;
-        // A lost race means that another call wrote a newer record: this one is dropped.
-        let _ = written;
         Ok(())
     }
 
