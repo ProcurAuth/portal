@@ -2,15 +2,14 @@ package app.portalinbox.alert
 
 import app.portalinbox.data.Item
 import app.portalinbox.data.ItemEngine
-import app.portalinbox.data.ItemEvent
 import app.portalinbox.proto.QuietPrefs
 import app.portalinbox.proto.Urgency
 import app.portalinbox.testsupport.Make
+import app.portalinbox.testsupport.Portals
 import app.portalinbox.testsupport.MemoryItemRepository
 import app.portalinbox.testsupport.ReferenceEffectHasher
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalDateTime
@@ -111,49 +110,53 @@ class QuietHoursTest {
         assertEquals("22:00 to 07:00", QuietHours.describe(night))
     }
 
-    // ------------------------------------------------------------ the notification plan
+    // ------------------------------------------------------------ the one notification
 
     private val server = 1L
     private val repo = MemoryItemRepository()
     private val engine = ItemEngine(repo, ReferenceEffectHasher(), { 1_788_000_100_000L })
+    private val identity = Portals.identity(1, "Production", 0)
 
     private fun approval(urgency: Urgency): Item {
         engine.onRequest(server, Make.approval(Make.hex(0xb), Make.hex(1)) { it.put("urgency", urgency.wire) })
         return repo.item(server, Make.hex(0xb))!!
     }
 
-    @Test
-    fun aRequestInTheWindowNotifiesOnTheQuietChannelWithoutSound() {
-        val i = approval(Urgency.NORMAL)
-        val plan = NotificationPlan.forEvent(ItemEvent.NewRequest(i), NotificationPlan.Env(night, at(23, 0)))!!
-        assertEquals(NotificationPlan.CH_REQUESTS_QUIET, plan.channel)
-        assertFalse(plan.ring)
-        // The decline action stays: quiet is only about the sound.
-        assertTrue(plan.declineAction)
+    private fun decide(item: Item, quiet: QuietPrefs?, nowMs: Long): Pair<Attention.Aggregate, Attention.Decision> {
+        val a = Attention.compute(
+            Attention.Input(listOf(Attention.Portal(identity, false, false, quiet, 0L)), listOf(item), emptyList(), emptyList(), nowMs),
+        )
+        return a to Attention.decide(emptyMap(), a)
     }
 
     @Test
-    fun aRequestOutsideTheWindowRings() {
-        val i = approval(Urgency.NORMAL)
-        val plan = NotificationPlan.forEvent(ItemEvent.NewRequest(i), NotificationPlan.Env(night, at(9, 0)))!!
-        assertEquals(NotificationPlan.CH_REQUESTS, plan.channel)
-        assertTrue(plan.ring)
+    fun aRequestInTheWindowPostsOnTheQuietChannelWithoutSound() {
+        val (a, d) = decide(approval(Urgency.NORMAL), night, at(23, 0))
+        assertFalse(d.alert)
+        assertEquals(Attention.Sound.NONE, d.sound)
+        val plan = Attention.plan(a, d, false, false)
+        assertEquals(Attention.CH_QUIET, plan.channel)
+        // Quiet is only about the sound: the notification still shows the request, and the single approval keeps its action.
+        assertEquals("1 to answer", plan.content.title)
+        assertEquals(1L to Make.hex(0xb), plan.decline)
+    }
+
+    @Test
+    fun aRequestOutsideTheWindowAlerts() {
+        val (a, d) = decide(approval(Urgency.NORMAL), night, at(9, 0))
+        assertTrue(d.alert)
+        assertEquals(Attention.CH_ATTENTION, Attention.plan(a, d, false, false).channel)
     }
 
     @Test
     fun anUrgentRequestRingsInTheWindowWhenTheOwnerAllowsIt() {
         val i = approval(Urgency.HIGH)
-        val allowed = NotificationPlan.forEvent(ItemEvent.NewRequest(i), NotificationPlan.Env(loud, at(23, 0)))!!
-        assertTrue(allowed.ring)
-        assertEquals(NotificationPlan.CH_REQUESTS, allowed.channel)
-        val refused = NotificationPlan.forEvent(ItemEvent.NewRequest(i), NotificationPlan.Env(night, at(23, 0)))!!
-        assertFalse(refused.ring)
+        assertTrue(decide(i, loud, at(23, 0)).second.alert)
+        assertFalse(decide(i, night, at(23, 0)).second.alert)
     }
 
     @Test
     fun withoutPrefsOnlyTheFlagOfTheFrameDecides() {
-        val i = approval(Urgency.NORMAL)
-        assertTrue(NotificationPlan.forEvent(ItemEvent.NewRequest(i))!!.ring)
-        assertNull(NotificationPlan.forEvent(ItemEvent.Settled(i)))
+        assertTrue(decide(approval(Urgency.NORMAL), null, at(23, 0)).second.alert)
     }
 }

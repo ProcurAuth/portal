@@ -3,7 +3,6 @@ package app.portalinbox.alert
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -22,107 +21,64 @@ import android.provider.Settings
 import android.util.Log
 import app.portalinbox.R
 import app.portalinbox.data.Alert
-import app.portalinbox.data.Kind
 import app.portalinbox.data.Levels
 import app.portalinbox.data.Store
 import app.portalinbox.service.Registry
 import app.portalinbox.service.ServerClock
 import app.portalinbox.ui.AlarmActivity
-import app.portalinbox.ui.MainActivity
 
 /**
- * Turns a stored alert into what the subscriber asked for:
- * - `alarm`: full-screen alert, looping alarm sound at full alarm volume through
- *   silent / vibrate / do-not-disturb, vibration, until stopped on the phone, which
- *   then gets its silent / vibrate mode and alarm volume back;
+ * Turns a stored alert into what the subscriber asked for. The notification is the one of [AttentionNotifier]: an alert never
+ * posts a notification of its own.
+ * - `alarm`: full-screen alert, looping alarm sound at full alarm volume through silent / vibrate / do-not-disturb, vibration,
+ *   until stopped on the phone, which then gets its silent / vibrate mode and alarm volume back;
  * - `ring`: one sound on the alarm stream (audible in silent / vibrate) + vibration;
- * - `notify`: a standard notification that follows the phone sound mode.
+ * - `notify`: the sound of a notification, which follows the phone sound mode.
+ * The sound of `ring` and `notify` is played by the one notification, when the alert is new and at least as urgent as what the
+ * notification already shows. The alarm always rings.
  */
 object Alerter {
-    const val CH_ALARM = "alarm"
-    /** Alarm already on screen (phone in use): no heads-up hiding the alarm page. */
-    const val CH_ALARM_ACTIVE = "alarm_active"
-    const val CH_RING = "ring"
-    const val CH_NOTIFY = "notify"
     const val CH_STATUS = "status"
-    const val CH_WARNING = "warning"
     private const val TAG = "Inbox.Alerter"
+
+    /** The channels of the first versions. They are removed: the one notification uses [Attention.CH_ATTENTION] and [Attention.CH_QUIET]. */
+    private val OLD_CHANNELS = listOf(
+        "alarm", "alarm_active", "ring", "notify", "warning", "approvals", "approvals_quiet", "digest", "replies", "replies_quiet",
+    )
 
     private val alarmAudio: AudioAttributes = AudioAttributes.Builder()
         .setUsage(AudioAttributes.USAGE_ALARM)
         .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
         .build()
 
+    /**
+     * Three channels. The status notification of the service is silent and low. The one notification of items and alerts uses
+     * a channel that can alert and a quiet one, and the code picks the channel when it posts (Android cannot silence one
+     * notification below API 34). Neither of them has a sound of its own: the code plays the sound that fits the thing that
+     * arrived (alarm stream for a ring and an item, notification stream for a plain alert).
+     */
     fun createChannels(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java)
-        val alarm = NotificationChannel(CH_ALARM, context.getString(R.string.ch_alarm_name), NotificationManager.IMPORTANCE_HIGH).apply {
-            description = context.getString(R.string.ch_alarm_desc)
-            setSound(null, null) // played by AlarmPlayer on the alarm stream
-            enableVibration(false) // vibration handled by AlarmPlayer
-            setBypassDnd(true)
-            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-        }
-        val active = NotificationChannel(CH_ALARM_ACTIVE, context.getString(R.string.ch_alarm_active_name), NotificationManager.IMPORTANCE_LOW).apply {
-            description = context.getString(R.string.ch_alarm_active_desc)
-            setSound(null, null)
-            enableVibration(false)
-            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-        }
-        val ring = NotificationChannel(CH_RING, context.getString(R.string.ch_ring_name), NotificationManager.IMPORTANCE_HIGH).apply {
-            description = context.getString(R.string.ch_ring_desc)
-            setSound(null, null)
-            enableVibration(false)
-            setBypassDnd(true)
-            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-        }
-        val notify = NotificationChannel(CH_NOTIFY, context.getString(R.string.ch_notify_name), NotificationManager.IMPORTANCE_DEFAULT).apply {
-            description = context.getString(R.string.ch_notify_desc)
-        }
+        for (id in OLD_CHANNELS) nm.deleteNotificationChannel(id)
         val status = NotificationChannel(CH_STATUS, context.getString(R.string.ch_status_name), NotificationManager.IMPORTANCE_MIN).apply {
             description = context.getString(R.string.ch_status_desc)
             setShowBadge(false)
         }
-        val warning = NotificationChannel(CH_WARNING, context.getString(R.string.ch_warning_name), NotificationManager.IMPORTANCE_HIGH).apply {
-            description = context.getString(R.string.ch_warning_desc)
-        }
-        // The items. The channel of a request rings once like the level Ring, and its notifications are private.
-        val requests = NotificationChannel(NotificationPlan.CH_REQUESTS, context.getString(R.string.ch_requests_name), NotificationManager.IMPORTANCE_HIGH).apply {
-            description = context.getString(R.string.ch_requests_desc)
-            setSound(null, null) // played by ItemAlerter on the alarm stream
+        val attention = NotificationChannel(Attention.CH_ATTENTION, context.getString(R.string.ch_attention_name), NotificationManager.IMPORTANCE_HIGH).apply {
+            description = context.getString(R.string.ch_attention_desc)
+            setSound(null, null) // played by the code, on the stream that fits
             enableVibration(false)
             setBypassDnd(true)
             lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         }
-        val requestsQuiet = NotificationChannel(NotificationPlan.CH_REQUESTS_QUIET, context.getString(R.string.ch_requests_quiet_name), NotificationManager.IMPORTANCE_LOW).apply {
-            description = context.getString(R.string.ch_requests_quiet_desc)
+        val quiet = NotificationChannel(Attention.CH_QUIET, context.getString(R.string.ch_attention_quiet_name), NotificationManager.IMPORTANCE_LOW).apply {
+            description = context.getString(R.string.ch_attention_quiet_desc)
             setSound(null, null)
             enableVibration(false)
             lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         }
-        val digest = NotificationChannel(NotificationPlan.CH_DIGEST, context.getString(R.string.ch_digest_name), NotificationManager.IMPORTANCE_LOW).apply {
-            description = context.getString(R.string.ch_digest_desc)
-            setSound(null, null)
-            enableVibration(false)
-            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
-        }
-        val replies = NotificationChannel(NotificationPlan.CH_REPLIES, context.getString(R.string.ch_replies_name), NotificationManager.IMPORTANCE_DEFAULT).apply {
-            description = context.getString(R.string.ch_replies_desc)
-            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
-        }
-        val repliesQuiet = NotificationChannel(NotificationPlan.CH_REPLIES_QUIET, context.getString(R.string.ch_replies_quiet_name), NotificationManager.IMPORTANCE_LOW).apply {
-            description = context.getString(R.string.ch_replies_quiet_desc)
-            setSound(null, null)
-            enableVibration(false)
-            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
-        }
-        nm.createNotificationChannels(listOf(alarm, active, ring, notify, status, warning, requests, requestsQuiet, digest, replies, repliesQuiet))
+        nm.createNotificationChannels(listOf(status, attention, quiet))
     }
-
-    /** Notification tag/id: unique per alert, so re-posting replaces instead of duplicating. */
-    private fun tag(a: Alert) = "alert:${a.serverId}:${a.alertId}"
-    private const val ALERT_NOTIFICATION_ID = 1000
-
-    private fun requestCode(a: Alert, salt: Int) = (tag(a).hashCode() * 31) + salt
 
     fun present(context: Context, a: Alert) {
         // An alert to the account that the user turned off: it stays in the list, with no sound
@@ -131,97 +87,22 @@ object Alerter {
         // Phone in use and allowed to draw over apps: the alarm page is opened directly,
         // so the notification must not add a heads-up on top of it. Otherwise the
         // full-screen intent (locked / screen off) or its heads-up fallback is used.
-        val direct = a.action == "alarm" && phoneInUse(context) && Settings.canDrawOverlays(context)
-        post(context, a, direct)
-        when (a.action) {
-            "alarm" -> {
-                AlarmPlayer.start(context, a)
-                openAlarmScreen(context, a)
-            }
-            "ring" -> playOnce(context)
-            else -> {}
+        if (a.action == "alarm") AttentionNotifier.alarmDirect(phoneInUse(context) && Settings.canDrawOverlays(context))
+        AttentionNotifier.refresh(context)
+        if (a.action == "alarm") {
+            AlarmPlayer.start(context, a)
+            openAlarmScreen(context, a)
         }
     }
 
     /**
-     * Once the alarm page is on screen, replaces each ringing alarm's heads-up with
-     * the same notification on the discreet channel, so it does not cover the page.
+     * Once the alarm page is on screen, the one notification stops its heads-up and its full-screen intent, so it does not
+     * cover the page.
      */
-    fun quietAlarmNotifications(context: Context, alerts: List<Alert>) {
-        val nm = context.getSystemService(NotificationManager::class.java)
-        for (a in alerts) {
-            nm.cancel(tag(a), ALERT_NOTIFICATION_ID)
-            post(context, a, direct = true)
-        }
-    }
-
-    private fun post(context: Context, a: Alert, direct: Boolean) {
-        val nm = context.getSystemService(NotificationManager::class.java)
-        val body = if (Levels.isDirect(a.group)) {
-            context.getString(if (a.kind == Kind.ALERT) R.string.alert_direct else R.string.message_direct)
-        } else {
-            context.getString(
-                if (a.kind == Kind.ALERT) R.string.alert_in_group else R.string.message_in_group, a.groupName
-            )
-        }
-        // Tapping the notification opens the alert in the app, which marks it read.
-        val open = PendingIntent.getActivity(
-            context, requestCode(a, 1),
-            MainActivity.openAlert(context, a.serverId, a.alertId),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val channel = when (a.action) {
-            "alarm" -> if (direct) CH_ALARM_ACTIVE else CH_ALARM
-            "ring" -> CH_RING
-            else -> CH_NOTIFY
-        }
-        val b = Notification.Builder(context, channel)
-            .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(a.title)
-            .setContentText(body)
-            .setWhen(a.createdAtMs)
-            .setShowWhen(true)
-            .setContentIntent(open)
-            .setAutoCancel(a.action != "alarm")
-            .setVisibility(Notification.VISIBILITY_PUBLIC)
-        if (a.action != "alarm") {
-            // Dismissing the notification or tapping "Mark as read" marks it read.
-            val read = PendingIntent.getBroadcast(
-                context, requestCode(a, 4),
-                Intent(context, ReadReceiver::class.java)
-                    .putExtra(ReadReceiver.EXTRA_SERVER, a.serverId)
-                    .putExtra(ReadReceiver.EXTRA_ALERT, a.alertId),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            b.setDeleteIntent(read)
-                .addAction(Notification.Action.Builder(null, context.getString(R.string.alert_mark_read), read).build())
-        }
-        if (a.action == "alarm") {
-            val full = PendingIntent.getActivity(
-                context, requestCode(a, 3), AlarmActivity.intent(context, a.serverId, a.alertId),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            val stop = PendingIntent.getBroadcast(
-                context, requestCode(a, 2),
-                Intent(context, StopReceiver::class.java)
-                    .putExtra(StopReceiver.EXTRA_SERVER, a.serverId)
-                    .putExtra(StopReceiver.EXTRA_ALERT, a.alertId),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            b.setCategory(Notification.CATEGORY_ALARM)
-                .setOngoing(true)
-                .addAction(Notification.Action.Builder(null, context.getString(R.string.alert_stop), stop).build())
-                .setContentIntent(full)
-                .setColor(0xFFB42318.toInt())
-            if (!direct) b.setFullScreenIntent(full, true)
-        } else {
-            b.setCategory(Notification.CATEGORY_MESSAGE)
-        }
-        try {
-            nm.notify(tag(a), ALERT_NOTIFICATION_ID, b.build())
-        } catch (e: SecurityException) {
-            Log.w(TAG, "notification permission missing", e)
-        }
+    @Suppress("UNUSED_PARAMETER")
+    fun quietAlarmNotifications(context: Context, ringing: List<Alert> = emptyList()) {
+        AttentionNotifier.alarmDirect(true)
+        AttentionNotifier.refresh(context)
     }
 
     /**
@@ -259,7 +140,7 @@ object Alerter {
         if (a.action == "alarm" && a.stoppedAtMs == null) {
             stopAlarm(context, serverId, alertId)
         } else {
-            context.getSystemService(NotificationManager::class.java).cancel(tag(a), ALERT_NOTIFICATION_ID)
+            AttentionNotifier.refresh(context)
             Registry.changed()
         }
         return changed
@@ -270,30 +151,29 @@ object Alerter {
         val marked = Store.get(context).unreadAlerts()
             .filter { markRead(context, it.serverId, it.alertId) }
             .map { it.serverId to it.alertId }
+        AttentionNotifier.refresh(context)
         Registry.changed()
         return marked
     }
 
     /**
-     * Undo of a mark-read: the alerts count as unread again. Their notifications
-     * are not posted again and a stopped alarm stays stopped.
+     * Undo of a mark-read: the alerts count as unread again. They do not alert again (the phone already showed them) and a
+     * stopped alarm stays stopped.
      */
     fun markUnread(context: Context, alerts: List<Pair<Long, String>>) {
         val store = Store.get(context)
         for ((serverId, alertId) in alerts) store.markUnread(serverId, alertId)
+        AttentionNotifier.refresh(context)
         Registry.changed()
     }
 
-    /** Before a server is deleted: silences its alarms and removes its notifications. */
+    /** Before a server is deleted: silences its alarms and removes it from the one notification. */
     fun forgetServer(context: Context, serverId: Long) {
-        ItemAlerter.forgetServer(context, serverId)
-        ServerClock.forget(context, serverId)
-        val nm = context.getSystemService(NotificationManager::class.java)
         for (a in Store.get(context).serverAlerts(serverId)) {
             if (a.action == "alarm" && a.stoppedAtMs == null) AlarmPlayer.stop(context, serverId, a.alertId)
-            nm.cancel(tag(a), ALERT_NOTIFICATION_ID)
         }
-        nm.cancel(app.portalinbox.service.InboxService.WARNING_BASE_ID + serverId.toInt())
+        ServerClock.forget(context, serverId)
+        ItemAlerter.forgetServer(context, serverId)
     }
 
     /** Stops every alarm still ringing on this phone (local only). */
@@ -310,11 +190,8 @@ object Alerter {
         store.markStopped(serverId, alertId)
         // Stopping an alarm is seeing it: it is read too.
         store.markRead(serverId, alertId)
-        val a = store.alert(serverId, alertId)
-        if (a != null) {
-            context.getSystemService(NotificationManager::class.java).cancel(tag(a), ALERT_NOTIFICATION_ID)
-        }
         AlarmPlayer.stop(context, serverId, alertId)
+        AttentionNotifier.refresh(context)
         Registry.changed()
     }
 
@@ -476,22 +353,7 @@ object AlarmPlayer {
     fun isRinging(): Boolean = active.isNotEmpty()
 }
 
-/** "Mark as read" action, and dismissal, of ring / notify notifications (local only). */
-class ReadReceiver : BroadcastReceiver() {
-    companion object {
-        const val EXTRA_SERVER = "server_id"
-        const val EXTRA_ALERT = "alert_id"
-    }
-
-    override fun onReceive(context: Context, intent: Intent) {
-        val serverId = intent.getLongExtra(EXTRA_SERVER, -1)
-        val alertId = intent.getStringExtra(EXTRA_ALERT) ?: return
-        if (serverId < 0) return
-        Alerter.markRead(context, serverId, alertId)
-    }
-}
-
-/** "Stop alarm" action on alarm notifications (local only). */
+/** "Stop alarm" action of the one notification (local only). It stops every alarm that rings. A call with an alarm id stops that one. */
 class StopReceiver : BroadcastReceiver() {
     companion object {
         const val EXTRA_SERVER = "server_id"
@@ -500,8 +362,11 @@ class StopReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         val serverId = intent.getLongExtra(EXTRA_SERVER, -1)
-        val alertId = intent.getStringExtra(EXTRA_ALERT) ?: return
-        if (serverId < 0) return
+        val alertId = intent.getStringExtra(EXTRA_ALERT)
+        if (serverId < 0 || alertId == null) {
+            Alerter.stopAllAlarms(context)
+            return
+        }
         Alerter.stopAlarm(context, serverId, alertId)
     }
 }

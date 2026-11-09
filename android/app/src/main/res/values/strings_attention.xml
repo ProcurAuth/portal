@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The one notification of items and alerts (lot MP4). -->
+    <string name="ch_attention_name">Needs your attention</string>
+    <string name="ch_attention_desc">One notification for the requests, replies, alerts and lost connections of all portals. It never shows a command or a message.</string>
+    <string name="ch_attention_quiet_name">Needs your attention, quiet</string>
+    <string name="ch_attention_quiet_desc">The same notification when a change makes no sound, for example in quiet hours.</string>
+    <string name="svc_no_network">No network. All portals are paused.</string>
+    <!-- The approval screen with the identity of the portal (lot MP4). -->
+    <string name="approval_queue">Queue approval</string>
+    <string name="approval_on_portal">on %1$s</string>
+    <string name="approval_banner_key">key %1$s</string>
+    <string name="approval_banner_description">Portal %1$s. Key %2$s.</string>
+    <string name="approval_footer_description">Portal %1$s. Full key fingerprint %2$s.</string>
+    <string name="approval_footer_key">%1$s · key %2$s</string>
+    <string name="approval_command_label">%1$s: command</string>
+</resources>

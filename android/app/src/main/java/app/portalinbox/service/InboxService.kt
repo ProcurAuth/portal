@@ -19,6 +19,7 @@ import android.os.SystemClock
 import android.util.Log
 import app.portalinbox.R
 import app.portalinbox.alert.AlarmPlayer
+import app.portalinbox.alert.AttentionNotifier
 import app.portalinbox.alert.Alerter
 import app.portalinbox.alert.ItemAlerter
 import app.portalinbox.data.LocalRetention
@@ -36,7 +37,6 @@ class InboxService : Service() {
     companion object {
         private const val TAG = "Inbox.Service"
         private const val STATUS_ID = 1
-        const val WARNING_BASE_ID = 2000
         private const val TICK_MS = 15_000L
         private const val UNACKED_ALARM_RESUME_MS = 24 * 3600_000L
         private const val LOCAL_HISTORY_MS = 30L * 24 * 3600_000L
@@ -53,7 +53,6 @@ class InboxService : Service() {
 
     private val handler = Handler(Looper.getMainLooper())
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
-    private val warned = mutableSetOf<Long>()
     private var recovered = false
     private val onChange: () -> Unit = { updateStatus() }
 
@@ -79,6 +78,11 @@ class InboxService : Service() {
         networkCallback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 Registry.connections.values.forEach { it.wake() }
+                handler.post { updateStatus() }
+            }
+
+            override fun onLost(network: Network) {
+                handler.post { updateStatus() }
             }
         }.also { cm.registerDefaultNetworkCallback(it) }
         handler.post(tick)
@@ -154,6 +158,11 @@ class InboxService : Service() {
             .build()
     }
 
+    /**
+     * The status notification (silent, low): one line for each portal that is not connected, and "No network" once when the phone
+     * has no network. The warnings of portals that are down are not posted here: they are a line of the one notification
+     * of items and alerts ([AttentionNotifier]).
+     */
     private fun updateStatus() {
         val store = Store.get(this)
         val servers = store.servers()
@@ -171,40 +180,23 @@ class InboxService : Service() {
                 LinkState.KEY_CHANGED -> getString(R.string.svc_key_changed, s.nickname)
             }
             if (line != null) lines.add(line)
-            val offline = st.state != LinkState.CONNECTED &&
-                (st.state == LinkState.REENROLL || st.state == LinkState.KEY_CHANGED || now - st.sinceMs >= s.offlineWarningMs)
-            val id = WARNING_BASE_ID + s.id.toInt()
-            if (offline && s.id !in warned) {
-                warned.add(s.id)
-                val w = Notification.Builder(this, Alerter.CH_WARNING)
-                    .setSmallIcon(R.drawable.ic_notification)
-                    .setContentTitle(getString(R.string.svc_warning_title, s.nickname))
-                    .setContentText(st.detail ?: getString(R.string.svc_warning_text))
-                    .setStyle(Notification.BigTextStyle().bigText(getString(R.string.svc_warning_big, s.nickname, st.detail ?: "")))
-                    .setContentIntent(PendingIntent.getActivity(this, id, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
-                    .build()
-                try {
-                    nm.notify(id, w)
-                } catch (e: SecurityException) {
-                    Log.w(TAG, "notification permission missing", e)
-                }
-            } else if (!offline && s.id in warned) {
-                warned.remove(s.id)
-                nm.cancel(id)
-            }
         }
-        // "1/2 servers connected", then one line per server that is not.
-        val summary = if (servers.isEmpty()) {
-            getString(R.string.svc_no_server)
-        } else {
-            val count = resources.getQuantityString(R.plurals.servers_connected, servers.size, connected, servers.size)
-            (listOf(count) + lines).joinToString("\n")
+        // "1/2 servers connected", then one line per server that is not. With no network: one line instead of one for each.
+        val summary = when {
+            servers.isEmpty() -> getString(R.string.svc_no_server)
+            !AttentionNotifier.hasNetwork(this) -> getString(R.string.svc_no_network)
+            else -> {
+                val count = resources.getQuantityString(R.plurals.servers_connected, servers.size, connected, servers.size)
+                (listOf(count) + lines).joinToString("\n")
+            }
         }
         try {
             nm.notify(STATUS_ID, statusNotification(summary))
         } catch (e: SecurityException) {
             Log.w(TAG, "notification permission missing", e)
         }
+        // The portals that are down are a line of the one notification. The check posts only when the shape changed.
+        AttentionNotifier.refresh(this, force = false)
     }
 }
 
