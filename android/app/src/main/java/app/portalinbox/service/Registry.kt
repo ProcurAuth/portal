@@ -9,7 +9,12 @@ import java.util.concurrent.CopyOnWriteArraySet
  * The state of the link to one portal. [REENROLL]: the portal revoked this device, or the address is invalid. [KEY_CHANGED]:
  * the portal does not prove the pinned key (see [KeyChange]). Both stop the connection until the user acts.
  */
-enum class LinkState { CONNECTING, CONNECTED, DISCONNECTED, REENROLL, KEY_CHANGED }
+enum class LinkState {
+    CONNECTING, CONNECTED, DISCONNECTED, REENROLL, KEY_CHANGED;
+
+    /** The phone tries to reach the portal, or failed: the two states count as one period without a link. */
+    val notConnected: Boolean get() = this == CONNECTING || this == DISCONNECTED
+}
 
 data class LinkStatus(val state: LinkState, val sinceMs: Long, val detail: String?)
 
@@ -32,7 +37,10 @@ object Registry {
 
     fun setStatus(serverId: Long, state: LinkState, detail: String?) {
         val prev = statuses[serverId]
-        val since = if (prev != null && prev.state == state) prev.sinceMs else System.currentTimeMillis()
+        // CONNECTING and DISCONNECTED are one period "not connected": each new attempt must not restart the clock, or a portal that
+        // stays down would never reach its offline threshold (lot MP3: the home list and the warning use `sinceMs`).
+        val sameSpell = prev != null && (prev.state == state || (prev.state.notConnected && state.notConnected))
+        val since = if (prev != null && sameSpell) prev.sinceMs else System.currentTimeMillis()
         statuses[serverId] = LinkStatus(state, since, detail)
         changed()
     }

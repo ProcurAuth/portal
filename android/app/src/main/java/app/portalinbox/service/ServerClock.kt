@@ -27,6 +27,12 @@ object ServerClock {
         return offsets.now(serverId, System.currentTimeMillis())
     }
 
+    /** `server time - phone time`, in ms (0 when no `welcome` was seen): the input of the sort of the home list ([app.portalinbox.portal.ItemSort]). */
+    fun offset(context: Context, serverId: Long): Long {
+        now(context, serverId) // loads the saved offset, if any
+        return offsets.offset(serverId) ?: 0L
+    }
+
     fun forget(context: Context, serverId: Long) {
         offsets.forget(serverId)
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().remove(serverId.toString()).apply()

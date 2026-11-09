@@ -2,10 +2,12 @@ package app.portalinbox.testsupport
 
 import app.portalinbox.data.Item
 import app.portalinbox.data.ItemRepository
+import app.portalinbox.data.OpenCount
 import app.portalinbox.data.OutboxEntry
 import app.portalinbox.data.StoredPrefs
 import app.portalinbox.data.Turn
 import app.portalinbox.proto.ItemState
+import app.portalinbox.proto.RequestKind
 import app.portalinbox.proto.SettledFrame
 
 /** The storage of the engine in memory. A transaction that throws puts every table back as it was. */
@@ -54,6 +56,10 @@ class MemoryItemRepository : ItemRepository {
 
     override fun items(serverId: Long): List<Item> =
         items.values.filter { it.serverId == serverId }.sortedWith(compareByDescending<Item> { it.request.createdAtMs }.thenBy { it.requestId })
+
+    override fun openCounts(): Map<Long, OpenCount> = items.values.filter { it.state.isOpen }.groupBy { it.serverId }.mapValues { (_, list) ->
+        OpenCount(list.count { it.kind == RequestKind.APPROVAL }, list.count { it.kind != RequestKind.APPROVAL })
+    }
 
     override fun hasDelivery(serverId: Long, deliveryId: String) = Key(serverId, deliveryId) in deliveries
 

@@ -2,6 +2,11 @@ package app.portalinbox.data
 
 import app.portalinbox.proto.SettledFrame
 
+/** How many items of one portal wait: approvals and questions in state `pending` or `replied`. */
+data class OpenCount(val approvals: Int, val questions: Int) {
+    val total: Int get() = approvals + questions
+}
+
 /**
  * The storage that the [ItemEngine] needs. The SQLite implementation is [SqlItemRepository].
  * Tests use a memory implementation. Each method of the engine that writes runs inside
@@ -19,6 +24,12 @@ interface ItemRepository {
 
     /** Every item of the server, the most recent first. */
     fun items(serverId: Long): List<Item>
+
+    /**
+     * The open items of every portal, counted by kind, in one pass (lot MP3: the filter chips of the home list count without
+     * loading each item). A portal with no open item has no entry.
+     */
+    fun openCounts(): Map<Long, OpenCount>
 
     /** True when the delivery was stored. The server sends a row again until the receipt arrives. */
     fun hasDelivery(serverId: Long, deliveryId: String): Boolean

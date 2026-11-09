@@ -531,26 +531,37 @@ class Store private constructor(private val appContext: Context) :
 
     private fun readFilter(includeRead: Boolean) = if (includeRead) "" else " AND read_at_ms IS NULL"
 
+    /** The SQL and the argument of the filter on one portal (lot MP3). [serverId] null = every portal. */
+    private fun portalFilter(serverId: Long?) = if (serverId == null) "" else " AND server_id = ?"
+
+    private fun portalArgs(serverId: Long?): Array<String> = if (serverId == null) emptyArray() else arrayOf(serverId.toString())
+
     /**
-     * The `limit` most recent alerts of every server received since `sinceMs`, newest
-     * first; unread ones only unless `includeRead`.
+     * The `limit` most recent alerts of every server (or of [serverId] only) received since `sinceMs`, newest
+     * first; unread ones only unless `includeRead`. The order uses the phone clock (`received_at_ms`), so a portal cannot move
+     * its alerts up with a forged time.
      */
-    fun recentAlerts(sinceMs: Long, limit: Int, includeRead: Boolean): List<Alert> = readAlerts(
-        "SELECT $alertColumns FROM alerts WHERE received_at_ms >= ?${readFilter(includeRead)} " +
+    fun recentAlerts(sinceMs: Long, limit: Int, includeRead: Boolean, serverId: Long? = null): List<Alert> = readAlerts(
+        "SELECT $alertColumns FROM alerts WHERE received_at_ms >= ?${readFilter(includeRead)}${portalFilter(serverId)} " +
             "ORDER BY received_at_ms DESC, id DESC LIMIT ?",
-        arrayOf(sinceMs.toString(), limit.toString())
+        arrayOf(sinceMs.toString()) + portalArgs(serverId) + limit.toString()
     )
 
-    /** The `limit` most recent alerts of every server, whatever their age, newest first. */
-    fun latestAlerts(limit: Int, includeRead: Boolean): List<Alert> = readAlerts(
-        "SELECT $alertColumns FROM alerts WHERE 1 = 1${readFilter(includeRead)} " +
+    /** The `limit` most recent alerts of every server (or of [serverId] only), whatever their age, newest first. */
+    fun latestAlerts(limit: Int, includeRead: Boolean, serverId: Long? = null): List<Alert> = readAlerts(
+        "SELECT $alertColumns FROM alerts WHERE 1 = 1${readFilter(includeRead)}${portalFilter(serverId)} " +
             "ORDER BY received_at_ms DESC, id DESC LIMIT ?",
-        arrayOf(limit.toString())
+        portalArgs(serverId) + limit.toString()
     )
 
-    fun alertCount(includeRead: Boolean): Int = readableDatabase
-        .rawQuery("SELECT COUNT(*) FROM alerts WHERE 1 = 1${readFilter(includeRead)}", null)
+    fun alertCount(includeRead: Boolean, serverId: Long? = null): Int = readableDatabase
+        .rawQuery("SELECT COUNT(*) FROM alerts WHERE 1 = 1${readFilter(includeRead)}${portalFilter(serverId)}", portalArgs(serverId))
         .use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+
+    /** The number of unread alerts of each portal, in one pass (the filter chips of the home list). A portal with none has no entry. */
+    fun unreadCounts(): Map<Long, Int> = readableDatabase
+        .rawQuery("SELECT server_id, COUNT(*) FROM alerts WHERE read_at_ms IS NULL GROUP BY server_id", null)
+        .use { c -> buildMap { while (c.moveToNext()) put(c.getLong(0), c.getInt(1)) } }
 
     /** Marks one alert read. Returns false if it already was. */
     fun markRead(serverId: Long, alertId: String): Boolean =

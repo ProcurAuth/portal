@@ -9,6 +9,7 @@ import app.portalinbox.proto.ItemState
 import app.portalinbox.proto.MessageFrame
 import app.portalinbox.proto.Prefs
 import app.portalinbox.proto.RequestFrame
+import app.portalinbox.proto.RequestKind
 import app.portalinbox.proto.ServerFrames
 import app.portalinbox.proto.SettledFrame
 import app.portalinbox.proto.StrictJson
@@ -173,6 +174,20 @@ class SqlItemRepository(private val store: Store) : ItemRepository {
         "SELECT $itemColumns FROM items WHERE server_id = ? ORDER BY created_at_ms DESC, request_id",
         arrayOf(serverId.toString()),
     )
+
+    override fun openCounts(): Map<Long, OpenCount> {
+        val approvals = HashMap<Long, Int>()
+        val questions = HashMap<Long, Int>()
+        db.rawQuery(
+            "SELECT server_id, kind, COUNT(*) FROM items WHERE state IN ('pending', 'replied') GROUP BY server_id, kind", null,
+        ).use { c ->
+            while (c.moveToNext()) {
+                val into = if (c.getString(1) == RequestKind.APPROVAL.wire) approvals else questions
+                into[c.getLong(0)] = (into[c.getLong(0)] ?: 0) + c.getInt(2)
+            }
+        }
+        return (approvals.keys + questions.keys).associateWith { OpenCount(approvals[it] ?: 0, questions[it] ?: 0) }
+    }
 
     // ------------------------------------------------------------ deliveries
 
