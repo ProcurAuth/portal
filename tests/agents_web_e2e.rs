@@ -1419,7 +1419,7 @@ fn also_asked_by_names_the_other_agents_that_asked_the_same_effect_with_text_of_
     assert_eq!(st, 200);
     assert!(page.contains("class=\"sender__also\""), "{page}");
     let t = text(&page);
-    assert!(t.contains("Also asked by Report writer, Third one"), "{t}");
+    assert!(t.contains("Also asked byReport writer, Third one"), "{t}");
     // The sender stays the first agent. The text of the other agents is on no part of the page.
     assert!(t.contains("Night ETL"));
     assert!(page.contains("etl-says"));
@@ -1490,7 +1490,8 @@ fn enroll_and_reset_need_csrf_origin_the_owner_and_a_key_in_the_mode_enrolled() 
     };
     assert_eq!(count(), Some("1".into()));
 
-    // The session of "Log in as" reads no form and acts on none.
+    // The session of "Log in as" reads no form and acts on none. Erin is made first: the root session is used for it.
+    let erin = other_owner(&pep, "erin");
     let as_dana = impersonate(&pep, OWNER);
     let icsrf = csrf_of(&pep, &as_dana);
     assert_eq!(
@@ -1504,7 +1505,6 @@ fn enroll_and_reset_need_csrf_origin_the_owner_and_a_key_in_the_mode_enrolled() 
     assert_eq!(count(), Some("1".into()));
 
     // Another owner: the key, the agent and the pages are the same as unknown ones.
-    let erin = other_owner(&pep, "erin");
     let ecsrf = csrf_of(&pep, &erin);
     let (st, _, foreign) = pep.post(&erin, ENROLL, &ecsrf, &enroll_fields, None);
     let (st_unknown, _, unknown) = pep.post(

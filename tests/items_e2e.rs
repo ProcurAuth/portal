@@ -2070,3 +2070,98 @@ async fn two_agents_of_one_key_with_real_tokens_reach_the_phones_and_agent_do_ch
     assert_eq!(agent_of(&pep, &x.request_id), ax);
     let _ = (z.request_id, ids);
 }
+
+/// The mode `enrolled` (lot G6). The owner makes an agent on the web. The phone gets the frame `agent` with the state `known`,
+/// the name of the owner and no lock, and no first-use notice. A reset of the token raises `rev`. No frame holds a token.
+/// The phone cannot enroll: `agent_do` has no such operation, so the web is the only place.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_enrolled_agent_reaches_the_phone_as_known_and_a_reset_raises_its_rev() {
+    let pep = Pep::with_mode(
+        |s| {
+            s.add_to_inbox("agents { max_per_key = 8 new_per_hour = 20 lock_new = true }");
+        },
+        Some("enrolled"),
+    );
+    let phone = pep.phone("pixel").await;
+    let mut conn = connect(&pep, &phone).await;
+    gather(&mut conn, QUIET).await;
+    let cookie = pep.cookie(OWNER);
+    let (st, _, page) = pep.enroll_via_web(&cookie, "Night ETL");
+    assert_eq!(st, 200, "{page}");
+    let token = Pep::token_of(&page);
+    let read = gather(&mut conn, QUIET).await;
+    let frames: Vec<&AgentMsg> = read
+        .agents
+        .iter()
+        .filter(|a| a.kind == AgentKind::Agent)
+        .collect();
+    assert_eq!(
+        frames.len(),
+        1,
+        "one frame for the new agent: {:?}",
+        read.agents
+    );
+    let f = frames[0];
+    assert_eq!(
+        (f.state, f.named, f.label.as_str(), f.lock_accept, f.rev),
+        (AgentState::Known, true, "Night ETL", false, 1)
+    );
+    assert!(f.observed.is_none() && f.similar.is_none());
+
+    // The agent asks with its token: the request names it, and the phone can approve it at once.
+    let ask = pep.agent_request(
+        Some(&token),
+        "claude-code 2.1",
+        &command(61),
+        json!({"agent_label": "night-etl-says"}),
+    );
+    assert_eq!(ask.status, "known");
+    let read = gather(&mut conn, QUIET).await;
+    // The call showed hints, so the agent has a new `rev` (the frame `agent` with the hints).
+    let before = read
+        .agents
+        .iter()
+        .filter(|a| a.agent_id == f.agent_id)
+        .map(|a| a.rev)
+        .max()
+        .unwrap_or(f.rev);
+    let request = read
+        .requests
+        .iter()
+        .find(|r| r.request_id == ask.request_id)
+        .expect("the request reaches the phone");
+    assert_eq!(
+        (
+            request.from.agent_id.as_str(),
+            request.from.label.as_str(),
+            request.from.agent_state
+        ),
+        (f.agent_id.as_str(), "Night ETL", AgentState::Known)
+    );
+
+    // The reset gives a new frame with a higher `rev`, for the same agent.
+    let (st, _, page) = pep.reset_via_web(&cookie, &f.agent_id);
+    assert_eq!(st, 200, "{page}");
+    let fresh = Pep::token_of(&page);
+    let read = gather(&mut conn, QUIET).await;
+    let after = by_id(&read.agents, &f.agent_id);
+    assert_eq!((after.rev, after.state), (before + 1, AgentState::Known));
+    // No frame holds a token.
+    for frame in read.agents.iter().chain(std::iter::once(f)) {
+        let text = serde_json::to_string(frame).unwrap();
+        for t in [&token, &fresh] {
+            assert!(!text.contains(&t[4..]), "{text}");
+        }
+        assert!(!text.contains("agt_"));
+    }
+    // The old token is dead, and the new one gives the same agent.
+    let (is_error, e) = pep.tool_as(
+        Some(&token),
+        "claude-code 2.1",
+        "approval_intent",
+        json!({"lease_s": 60}),
+    );
+    assert!(is_error && e["error"]["code"] == "agent_unknown", "{e}");
+    let again = pep.agent_request(Some(&fresh), "claude-code 2.1", &command(62), json!({}));
+    assert_eq!(again.status, "known");
+}
