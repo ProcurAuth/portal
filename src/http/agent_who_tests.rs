@@ -1614,7 +1614,11 @@ fn explanation_with_a_live_token_is_refused() {
         );
         assert_eq!(e["code"], "agent_token_in_text", "[{name}] {e}");
         // The refusal comes before any write: no item, no intent, no agent.
-        assert_eq!(r.count("SELECT COUNT(*) FROM items"), items_before, "[{name}]");
+        assert_eq!(
+            r.count("SELECT COUNT(*) FROM items"),
+            items_before,
+            "[{name}]"
+        );
         assert_eq!(
             r.count("SELECT COUNT(*) FROM approval_intents"),
             intents_before,
@@ -1712,10 +1716,19 @@ fn explanation_with_a_live_token_is_refused() {
             &[("Agent-Token", rest_token.as_str())],
             "POST",
             "/api/v1/approval-intents",
-            &with(intent_args(), "explanation", json!(format!("t={rest_token}"))).to_string(),
+            &with(
+                intent_args(),
+                "explanation",
+                json!(format!("t={rest_token}")),
+            )
+            .to_string(),
         );
         assert_eq!(leak.status, 422, "[{name}] {}", leak.body);
-        assert_eq!(leak.json()["error"]["code"], "agent_token_in_text", "[{name}]");
+        assert_eq!(
+            leak.json()["error"]["code"],
+            "agent_token_in_text",
+            "[{name}]"
+        );
         assert!(!leak.body.contains(&rest_token[4..]), "[{name}]");
     });
 }

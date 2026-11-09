@@ -32,8 +32,8 @@ use inbox_core::proto::{
     is_untrusted_line, AgentKind as WireKind, AgentMsg, AgentState as WireState, ApprovalBody,
     Author, Channel, Command, DigestMsg, ExplanationFormat, Follows, FormAnswer, Hint, Input,
     Intent, ItemState, Kind, Language, LeaseMode, MessageMsg, Observed as WireObserved, Previous,
-    RequestMsg, Sender, SettledBy, SettledMsg, MAX_AGENT_CLIENT_CHARS, MAX_AGENT_LABEL_CHARS,
-    MAX_AGENT_NET_CHARS, MAX_AGENT_USER_AGENT_CHARS,
+    RequestMsg, Sender, SettledBy, SettledMsg, Similar, MAX_AGENT_CLIENT_CHARS,
+    MAX_AGENT_LABEL_CHARS, MAX_AGENT_NET_CHARS, MAX_AGENT_USER_AGENT_CHARS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -256,6 +256,25 @@ pub struct AgentFacts<'a> {
     pub open: i64,
     /// `inbox.agents.lock_new`.
     pub lock_new: bool,
+    /// The known agent that a `new` agent looks like. See [`similar_of`].
+    pub similar: Option<Similar>,
+}
+
+/// The hint "looks like" for a `new` agent: a known agent of the same key that says the same text, or that has the same
+/// client and the same address range (lot G5). The label is portal text, as for `label`. The hint is help for the owner:
+/// the portal never merges by itself, and a hint can be copied. `others` are the agents of the owner with their hints.
+pub fn similar_of<'a>(
+    agent: &AgentRow,
+    mine: Option<&Observed>,
+    others: impl IntoIterator<Item = (&'a AgentRow, Option<Observed>)>,
+    key_name: &str,
+    mode: AgentMode,
+) -> Option<Similar> {
+    let (other, _) = super::agents::find_similar(agent, mine, others)?;
+    Some(Similar {
+        agent_id: other.agent_id.clone(),
+        label: agent_label(other, key_name, mode),
+    })
 }
 
 /// The hints of an agent as the frame carries them. A hint that the frame would refuse (a control character, a format
@@ -313,8 +332,7 @@ pub fn agent_frame(
         open: u32::try_from(facts.open.max(0)).unwrap_or(u32::MAX),
         lock_accept: agent.state == AgentState::New && facts.lock_new,
         observed: observed_frame(agent, facts.observed),
-        // The hint "looks like another agent" comes with the hardening lot (G5). The member is part of the wire already.
-        similar: None,
+        similar: facts.similar.clone().filter(|_| state == WireState::New),
     };
     inbox_core::proto::ServerMsg::Agent(Box::new(frame.clone()))
         .validate()
@@ -862,6 +880,7 @@ mod tests {
             observed,
             open,
             lock_new: true,
+            similar: None,
         }
     }
 
@@ -875,6 +894,63 @@ mod tests {
             net: Some("203.0.113.0/24".into()),
             nets: vec!["203.0.113.0/24".into(), "198.51.100.0/24".into()],
         }
+    }
+
+    #[test]
+    fn the_frame_of_a_new_agent_names_a_similar_known_agent_and_no_other_frame_does() {
+        let l = approval();
+        let mut new = agent_row(&l.item);
+        new.agent_id = "d4".repeat(16);
+        new.name = None;
+        new.name_key = None;
+        new.state = AgentState::New;
+        let mut known = agent_row(&l.item);
+        known.agent_id = "a1".repeat(16);
+        known.name = Some("Billing bot".into());
+        known.name_key = Some("billing bot".into());
+        known.state = AgentState::Known;
+        let o = observed_all();
+        let similar = similar_of(
+            &new,
+            Some(&o),
+            [(&known, Some(o.clone()))],
+            "ops-key",
+            AgentMode::Discover,
+        )
+        .expect("the same text");
+        assert_eq!(
+            (similar.agent_id.as_str(), similar.label.as_str()),
+            (known.agent_id.as_str(), "Billing bot")
+        );
+        let mut with = facts(Some(&o), 1);
+        with.similar = Some(similar.clone());
+        let f = agent_frame(&"c".repeat(32), &new, &with).unwrap();
+        assert_eq!(f.similar.as_ref(), Some(&similar));
+        // A known agent has no hint, even when the facts carry one. The label is portal text, so it is a valid line.
+        let f = agent_frame(&"c".repeat(32), &known, &with).unwrap();
+        assert!(f.similar.is_none());
+        // An unnamed known agent shows as "<key> #<number>", and a long key name is cut as in `label`.
+        known.name = None;
+        known.name_key = None;
+        let unnamed = similar_of(
+            &new,
+            Some(&o),
+            [(&known, Some(o.clone()))],
+            "ops-key",
+            AgentMode::Discover,
+        )
+        .unwrap();
+        assert!(unnamed.label.starts_with("ops-key #"), "{}", unnamed.label);
+        let long = "k".repeat(80);
+        let cut = similar_of(
+            &new,
+            Some(&o),
+            [(&known, Some(o.clone()))],
+            &long,
+            AgentMode::Discover,
+        )
+        .unwrap();
+        assert!(cut.label.chars().count() <= 64);
     }
 
     #[test]

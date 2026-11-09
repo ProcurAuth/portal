@@ -2080,6 +2080,7 @@ mod tests {
             open: 1,
             lock: true,
             lookalike: None,
+            similar: None,
             targets: vec![("g1".into(), "Billing bot".into())],
             csrf: "tok",
             typed: "",

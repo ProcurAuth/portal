@@ -36,7 +36,7 @@ use inbox_core::proto::{
 };
 use zeroize::Zeroizing;
 
-use super::agents::{AgentMode, AgentState, AgentSummary};
+use super::agents::{AgentKind, AgentMode, AgentRow, AgentState, AgentSummary, Observed};
 use super::agents_ops::{AgentOp, OpError};
 use super::device::{send_encoded, send_msg, End};
 use super::frames::{self, AgentFacts, ApprovalFacts, OwnerAnswer};
@@ -150,12 +150,40 @@ impl<'a> Builder<'a> {
                 .as_deref(),
         );
         let observed = self.items.observed(row);
+        let mode = self.mode_of(&row.key_id);
+        // A `new` agent can look like a known agent of the same key: the frame names it (a hint, never a merge).
+        let similar = if row.state == AgentState::New && row.kind == AgentKind::Agent {
+            let rows: Vec<AgentRow> = self
+                .agents()
+                .await?
+                .values()
+                .filter(|o| o.agent.key_id == row.key_id)
+                .map(|o| o.agent.clone())
+                .collect();
+            let others: Vec<(AgentRow, Option<Observed>)> = rows
+                .into_iter()
+                .map(|a| {
+                    let seen = self.items.observed(&a);
+                    (a, seen)
+                })
+                .collect();
+            frames::similar_of(
+                row,
+                observed.as_ref(),
+                others.iter().map(|(a, o)| (a, o.clone())),
+                &key_name,
+                mode,
+            )
+        } else {
+            None
+        };
         let facts = AgentFacts {
             key_name: &key_name,
-            mode: self.mode_of(&row.key_id),
+            mode,
             observed: observed.as_ref(),
             open: s.open,
             lock_new: self.items.rules.agents.lock_new,
+            similar,
         };
         match frames::agent_frame(id, row, &facts) {
             Ok(frame) => Ok(encode(&ServerMsg::Agent(Box::new(frame)))),

@@ -828,3 +828,109 @@ fn lock_new_false_the_default_gives_the_frame_without_the_lock_and_the_same_fiel
         );
     });
 }
+
+// ---------------------------------------------------------------- the hint "similar"
+
+/// A new agent that looks like a known agent of the same key carries `similar` in its frame, on both ways of delivery
+/// (the queue and `sync`). The hint is help for the owner: the frames of the other agents carry none, and nothing merges
+/// by itself (lot G5, decision Q12).
+#[test]
+fn a_new_agent_that_looks_like_a_known_one_carries_similar_and_nothing_merges() {
+    each_rig(true, OPEN, |r, name| {
+        r.device();
+        let key = r.key_a();
+        // The known agent: the owner allowed it and gave it a name.
+        let known = first_item(r, &discover(r, &key, hints("billing-bot")), &key, 1).0;
+        assert_eq!(
+            act(
+                r,
+                OWNER,
+                &known,
+                AgentOpKind::Allow,
+                Some("Billing bot"),
+                None
+            ),
+            AgentResultStatus::Ok
+        );
+        // The same text with other letters: it folds to the same text.
+        let copy = first_item(r, &discover(r, &key, hints("BILLING-bot")), &key, 2).0;
+        // The same client and the same range, with another text.
+        let same_client = first_item(r, &discover(r, &key, hints("night-etl")), &key, 3).0;
+        // Another text, another client and another range: nothing looks like it.
+        let other = Hints {
+            says: Some("report-writer".into()),
+            client: Some("curl/8.0".into()),
+            user_agent: Some("curl/8.0".into()),
+            net: Some("198.51.100.0/24".into()),
+        };
+        let stranger = first_item(r, &discover(r, &key, other), &key, 4).0;
+        let want = |frames: &[AgentMsg], id: &str| -> Option<(String, String)> {
+            frames
+                .iter()
+                .find(|a| a.agent_id == id)
+                .unwrap_or_else(|| panic!("[{name}] no frame for {id}"))
+                .similar
+                .as_ref()
+                .map(|s| (s.agent_id.clone(), s.label.clone()))
+        };
+        let named = Some((known.clone(), "Billing bot".to_string()));
+        // `sync`: a phone that holds nothing gets each agent.
+        let all = sync_frames(r, OWNER, &[]);
+        assert_eq!(want(&all, &copy), named, "[{name}] the same text");
+        assert_eq!(want(&all, &same_client), named, "[{name}] the same client");
+        assert_eq!(want(&all, &stranger), None, "[{name}]");
+        assert_eq!(
+            want(&all, &known),
+            None,
+            "[{name}] a known agent has no hint"
+        );
+        for a in &all {
+            assert_eq!(
+                a.similar.is_some(),
+                a.state == WireState::New && a.agent_id != stranger,
+                "[{name}]"
+            );
+        }
+        // The queue: the frame of the new agent that the phone got when it was made is built with the state of now.
+        let queued = agent_frames(frames_as(r, DEVICE, OWNER));
+        assert_eq!(want(&queued, &copy), named, "[{name}] from the queue");
+        assert_eq!(want(&queued, &stranger), None, "[{name}] from the queue");
+        // The hint changes nothing: every new agent is still new, and no agent was merged.
+        for id in [&copy, &same_client, &stranger] {
+            assert_eq!(
+                r.count(&format!(
+                    "SELECT COUNT(*) FROM agents WHERE agent_id = '{id}' AND state = 'new'"
+                )),
+                1,
+                "[{name}]"
+            );
+        }
+        assert_eq!(
+            r.count("SELECT COUNT(*) FROM agents WHERE state = 'merged'"),
+            0,
+            "[{name}]"
+        );
+        // The hint ends with the known agent: blocked, it is no candidate.
+        assert_eq!(
+            act(r, OWNER, &known, AgentOpKind::Block, None, None),
+            AgentResultStatus::Ok
+        );
+        let after = sync_frames(r, OWNER, &[]);
+        assert_eq!(
+            want(&after, &copy),
+            None,
+            "[{name}] a blocked agent is no hint"
+        );
+        assert_eq!(want(&after, &same_client), None, "[{name}]");
+        // A bucket never gets a hint.
+        r.submit(&key, 9);
+        let with_bucket = sync_frames(r, OWNER, &[]);
+        assert!(
+            with_bucket
+                .iter()
+                .filter(|a| a.kind == WireKind::Bucket)
+                .all(|a| a.similar.is_none()),
+            "[{name}]"
+        );
+    });
+}

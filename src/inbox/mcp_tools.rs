@@ -1114,7 +1114,10 @@ mod tests {
         assert_eq!(AgentError::token_conflict().status, 422);
         assert_eq!(AgentError::invalid_label().code, "invalid_agent_label");
         let leak = AgentError::token_in_text();
-        assert_eq!((leak.status, leak.code, leak.retryable()), (422, "agent_token_in_text", false));
+        assert_eq!(
+            (leak.status, leak.code, leak.retryable()),
+            (422, "agent_token_in_text", false)
+        );
         // The intent core gives the same message.
         assert_eq!(
             AgentError::from(ApprovalError::new(422, "agent_token_in_text")).message,

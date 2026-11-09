@@ -679,6 +679,73 @@ pub fn net_of(ip: std::net::IpAddr) -> String {
     }
 }
 
+// ---------------------------------------------------------------- the hint "similar"
+
+/// Why a new agent looks like a known agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SimilarWhy {
+    /// The two say the same text, after the fold of [`fold`].
+    Says,
+    /// The two have the same client and the same address range.
+    ClientAndNet,
+}
+
+/// The known agent of the same key that a `new` agent looks like (lot G5, decision Q12). The rule is a hint for the owner
+/// and nothing else: the hints are text that a client sent, and anyone who holds the key can copy them. The portal never
+/// merges by itself.
+///
+/// An agent is a candidate when it has the same key and the same owner, it is not the agent itself, it is an agent and not
+/// a bucket, and its state is `known`. It matches when it says the same text as `agent` (after [`fold`]), or when it has
+/// the same client and the same address range. A text match wins over a client match. Among equal matches, the agent that
+/// called last wins, then the lower id, so the answer does not depend on the order of `others`. A `new` agent only gets a
+/// hint: for each other state the result is `None`.
+pub fn find_similar<'a>(
+    agent: &AgentRow,
+    mine: Option<&Observed>,
+    others: impl IntoIterator<Item = (&'a AgentRow, Option<Observed>)>,
+) -> Option<(&'a AgentRow, SimilarWhy)> {
+    if agent.kind != AgentKind::Agent || agent.state != AgentState::New {
+        return None;
+    }
+    let mine = mine?;
+    let says = mine.says.as_deref().map(fold).filter(|s| !s.is_empty());
+    let same = |a: &Option<String>, b: &Option<String>| a.is_some() && a == b;
+    let mut best: Option<(&AgentRow, SimilarWhy)> = None;
+    for (other, theirs) in others {
+        if other.agent_id == agent.agent_id
+            || other.key_id != agent.key_id
+            || other.owner != agent.owner
+            || other.kind != AgentKind::Agent
+            || other.state != AgentState::Known
+        {
+            continue;
+        }
+        let Some(theirs) = theirs else { continue };
+        let why = if says.is_some() && theirs.says.as_deref().map(fold) == says {
+            SimilarWhy::Says
+        } else if same(&mine.client, &theirs.client) && same(&mine.net, &theirs.net) {
+            SimilarWhy::ClientAndNet
+        } else {
+            continue;
+        };
+        let rank = |w: SimilarWhy| u8::from(w == SimilarWhy::ClientAndNet);
+        let better = match &best {
+            None => true,
+            Some((b, bw)) => {
+                (
+                    rank(why),
+                    std::cmp::Reverse(other.last_seen_at),
+                    &other.agent_id,
+                ) < (rank(*bw), std::cmp::Reverse(b.last_seen_at), &b.agent_id)
+            }
+        };
+        if better {
+            best = Some((other, why));
+        }
+    }
+    best
+}
+
 // ---------------------------------------------------------------- the binding of a call to an item
 
 /// The rule of section 4.4 for a call that names an item: a read goes by the key, a write goes by the agent.
@@ -771,6 +838,140 @@ mod tests {
         // A text with a non-ASCII character never breaks a boundary.
         assert!(token_candidates("é".repeat(100).as_str()).is_empty());
         assert!(token_candidates(&format!("é{bare}é")).contains(&token.to_string()));
+    }
+
+    fn row(id: &str, state: AgentState, seen: i64) -> AgentRow {
+        AgentRow {
+            agent_id: id.into(),
+            key_id: "k".into(),
+            owner: "alice".into(),
+            kind: AgentKind::Agent,
+            state,
+            origin: AgentOrigin::Call,
+            ordinal: 1,
+            name: None,
+            name_key: None,
+            token_digest: Some(id.into()),
+            merged_into: None,
+            rev: 1,
+            created_at: 0,
+            named_at: None,
+            last_seen_at: seen,
+            hints: None,
+        }
+    }
+
+    fn seen(says: Option<&str>, client: Option<&str>, net: Option<&str>) -> Observed {
+        Observed {
+            says: says.map(str::to_string),
+            client: client.map(str::to_string),
+            net: net.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn similar_names_a_known_agent_with_the_same_says_or_the_same_client_and_net() {
+        let new = row("n", AgentState::New, 0);
+        let known = row("a", AgentState::Known, 10);
+        let by = |mine: &Observed, others: &[(&AgentRow, Observed)]| {
+            find_similar(
+                &new,
+                Some(mine),
+                others.iter().map(|(a, o)| (*a, Some(o.clone()))),
+            )
+            .map(|(a, why)| (a.agent_id.clone(), why))
+        };
+        // The same text, after the fold (NFKC, lower case, one space).
+        let mine = seen(Some("Billing  Bot"), None, None);
+        let theirs = seen(Some("ｂｉｌｌｉｎｇ bot"), None, None);
+        assert_eq!(
+            by(&mine, &[(&known, theirs)]),
+            Some(("a".into(), SimilarWhy::Says))
+        );
+        // The same client and the same range. The client alone, or the range alone, is not enough.
+        let mine = seen(None, Some("claude-code"), Some("203.0.113.0/24"));
+        assert_eq!(
+            by(&mine, &[(&known, mine.clone())]),
+            Some(("a".into(), SimilarWhy::ClientAndNet))
+        );
+        for other in [
+            seen(None, Some("claude-code"), Some("198.51.100.0/24")),
+            seen(None, Some("curl"), Some("203.0.113.0/24")),
+            seen(None, None, None),
+        ] {
+            assert_eq!(by(&mine, &[(&known, other)]), None);
+        }
+        // A text that is not the same, and no text at all, never match.
+        let mine = seen(Some("billing-bot"), None, None);
+        assert_eq!(
+            by(&mine, &[(&known, seen(Some("billing bot"), None, None))]),
+            None
+        );
+        assert_eq!(
+            by(&seen(None, None, None), &[(&known, seen(None, None, None))]),
+            None
+        );
+        // A text match wins over a client match. Then the agent that called last wins, then the lower id.
+        let text = seen(Some("x"), Some("c"), Some("n"));
+        let by_client = row("b", AgentState::Known, 99);
+        let by_text = row("c", AgentState::Known, 1);
+        let only_client = seen(None, Some("c"), Some("n"));
+        assert_eq!(
+            by(
+                &text,
+                &[(&by_client, only_client.clone()), (&by_text, text.clone())]
+            ),
+            Some(("c".into(), SimilarWhy::Says))
+        );
+        let late = row("z", AgentState::Known, 50);
+        let early = row("y", AgentState::Known, 5);
+        for order in [
+            [(&late, &text), (&early, &text)],
+            [(&early, &text), (&late, &text)],
+        ] {
+            let others: Vec<_> = order.iter().map(|(a, o)| (*a, (*o).clone())).collect();
+            assert_eq!(by(&text, &others).unwrap().0, "z");
+        }
+        let tie_a = row("e", AgentState::Known, 5);
+        let tie_b = row("d", AgentState::Known, 5);
+        assert_eq!(
+            by(&text, &[(&tie_a, text.clone()), (&tie_b, text.clone())])
+                .unwrap()
+                .0,
+            "d"
+        );
+        // Only a known agent of the same key and owner, and never the agent itself.
+        let mut other_key = row("k2", AgentState::Known, 1);
+        other_key.key_id = "other".into();
+        let mut other_owner = row("o2", AgentState::Known, 1);
+        other_owner.owner = "erin".into();
+        let blocked = row("b2", AgentState::Blocked, 1);
+        let merged = row("m2", AgentState::Merged, 1);
+        let fresh = row("f2", AgentState::New, 1);
+        let mut bucket = row("u2", AgentState::Known, 1);
+        bucket.kind = AgentKind::Bucket;
+        let itself = row("n", AgentState::Known, 1);
+        for r in [
+            &other_key,
+            &other_owner,
+            &blocked,
+            &merged,
+            &fresh,
+            &bucket,
+            &itself,
+        ] {
+            assert_eq!(by(&text, &[(r, text.clone())]), None, "{}", r.agent_id);
+        }
+        // Only a `new` agent gets a hint.
+        let known_one = row("n", AgentState::Known, 0);
+        assert!(find_similar(&known_one, Some(&text), [(&known, Some(text.clone()))]).is_none());
+        let mut bucket_one = row("n", AgentState::New, 0);
+        bucket_one.kind = AgentKind::Bucket;
+        assert!(find_similar(&bucket_one, Some(&text), [(&known, Some(text.clone()))]).is_none());
+        // An agent with no hints gets none, and another agent with no hints is no candidate.
+        assert!(find_similar(&new, None, [(&known, Some(text.clone()))]).is_none());
+        assert!(find_similar(&new, Some(&text), [(&known, None)]).is_none());
     }
 
     #[test]
