@@ -64,7 +64,30 @@ enum class AnswerStatus(override val wire: String) : Wire {
     ACCEPTED("accepted"), ALREADY_ANSWERED("already_answered"), CLOSED("closed"), ABANDONED("abandoned"),
     SUPERSEDED("superseded"), EXPIRED("expired"), CANCELLED("cancelled"), EFFECT_MISMATCH("effect_mismatch"),
     DEVICE_REVOKED("device_revoked"), CUSTOM_NOT_ALLOWED("custom_not_allowed"),
-    ASK_BACK_NOT_ALLOWED("ask_back_not_allowed")
+    ASK_BACK_NOT_ALLOWED("ask_back_not_allowed"),
+
+    /** The agent of the item is `new` and the server locks the new agents: accept is refused, the item stays open. */
+    AGENT_LOCKED("agent_locked")
+}
+
+/** What an agent is. The bucket is the pseudo agent "Unattributed" of a key: the items that no agent claims. */
+enum class AgentKind(override val wire: String) : Wire { AGENT("agent"), BUCKET("bucket") }
+
+/**
+ * The state of an agent. `NEW`: the call made it and the owner did not allow it yet. `KNOWN`: the owner allowed it.
+ * `BLOCKED`: its calls are refused. `MERGED`: the owner moved its items to another agent.
+ */
+enum class AgentState(override val wire: String) : Wire { NEW("new"), KNOWN("known"), BLOCKED("blocked"), MERGED("merged") }
+
+/** The result of an `agent_do`. The values are closed. */
+enum class AgentResultStatus(override val wire: String) : Wire {
+    OK("ok"), NOT_FOUND("not_found"), INVALID_NAME("invalid_name"), NAME_TAKEN("name_taken"),
+    BAD_STATE("bad_state"), CROSS_KEY("cross_key"), NOT_ENABLED("not_enabled")
+}
+
+/** What the owner does with an agent. */
+enum class AgentOp(override val wire: String) : Wire {
+    RENAME("rename"), ALLOW("allow"), BLOCK("block"), UNBLOCK("unblock"), MERGE("merge")
 }
 
 enum class Action(override val wire: String) : Wire { ACCEPT("accept"), DECLINE("decline") }
@@ -73,9 +96,24 @@ enum class DigestMode(override val wire: String) : Wire { OFF("off"), DAILY("dai
 
 // ---------------------------------------------------------------- shared parts
 
-data class Sender(val label: String, val keyName: String, val owner: String, val via: Via, val interaction: Interaction) {
+/**
+ * Who asks. The portal computes each value. None of it is text that an agent sent. [label] is the name that the owner
+ * gave to the agent, else the key name and the number of the agent. [agentId] is the key of a group on the screen.
+ * [agentState] is `NEW` or `KNOWN`: the open request of a blocked or a merged agent does not exist. A bucket is `KNOWN`.
+ */
+data class Sender(
+    val label: String,
+    val keyName: String,
+    val owner: String,
+    val via: Via,
+    val interaction: Interaction,
+    val agentId: String,
+    val agentKind: AgentKind,
+    val agentState: AgentState,
+) {
     fun toJson(): JSONObject = JSONObject().put("label", label).put("key_name", keyName).put("owner", owner)
-        .put("via", via.wire).put("interaction", interaction.wire)
+        .put("via", via.wire).put("interaction", interaction.wire).put("agent_id", agentId)
+        .put("agent_kind", agentKind.wire).put("agent_state", agentState.wire)
 
     companion object {
         internal fun read(o: Obj): Sender {
@@ -85,8 +123,13 @@ data class Sender(val label: String, val keyName: String, val owner: String, val
                 Check.line(o.str("owner"), 64, "from.owner"),
                 o.enum("via", Via.entries.toTypedArray()),
                 o.enum("interaction", Interaction.entries.toTypedArray()),
+                Check.id(o.str("agent_id"), "from.agent_id"),
+                o.enum("agent_kind", AgentKind.entries.toTypedArray()),
+                o.enum("agent_state", AgentState.entries.toTypedArray()),
             )
             o.done()
+            val open = s.agentState == AgentState.NEW || s.agentState == AgentState.KNOWN
+            if (!open || (s.agentKind == AgentKind.BUCKET && s.agentState != AgentState.KNOWN)) Check.bad("from.agent_state")
             return s
         }
     }
@@ -492,6 +535,8 @@ data class RequestFrame(
     val allowAskBack: Boolean,
     val supersedes: String?,
     val previousId: String?,
+    /** What the agent says that it is. Text of the agent, not verified. It is never in [from]. */
+    val agentLabel: String?,
     val question: QuestionBody?,
     val approval: ApprovalBody?,
 ) : ServerFrame {
@@ -502,7 +547,7 @@ data class RequestFrame(
             .put("agent_seen_at_ms", agentSeenAtMs).put("lease_mode", leaseMode.wire)
             .putOpt("lease_until_ms", leaseUntilMs).putOpt("until_at_ms", untilAtMs)
             .put("allow_custom", allowCustom).put("allow_ask_back", allowAskBack)
-            .putOpt("supersedes", supersedes).putOpt("previous_id", previousId)
+            .putOpt("supersedes", supersedes).putOpt("previous_id", previousId).putOpt("agent_label", agentLabel)
         if (quiet) o.put("quiet", true)
         question?.let { q ->
             o.put("title", q.title).putOpt("explanation", q.explanation)
@@ -567,6 +612,81 @@ data class AnswerResultFrame(
         .put("client_msg_id", clientMsgId).put("status", status.wire).putOpt("state", state?.wire)
 }
 
+/**
+ * What the portal remembers of the hints of an agent. All text in it came from a client: it is not verified, and anyone
+ * who holds the key can send the same text. A screen shows it in a box marked "Not verified".
+ */
+data class Observed(
+    val says: String?,
+    /** How many times [says] changed, 1 or more. Null: never. Only with [says]. */
+    val saysChanged: Long?,
+    val client: String?,
+    val userAgent: String?,
+    /** The address range of the client: a /24 for IPv4 or a /48 for IPv6. */
+    val net: String?,
+    /** The number of distinct address ranges seen with the token of the agent, 0 to 8. */
+    val netsSeen: Int,
+) {
+    fun toJson(): JSONObject = JSONObject().putOpt("says", says).putOpt("says_changed", saysChanged).putOpt("client", client)
+        .putOpt("user_agent", userAgent).putOpt("net", net).put("nets_seen", netsSeen)
+
+    companion object {
+        internal fun read(o: Obj): Observed {
+            val says = o.optStr("says")?.let { Check.untrustedLine(it, MAX_AGENT_LABEL_CHARS, "agent.observed.says") }
+            val changed = o.optLong("says_changed")
+            if (changed != null && (changed < 1 || changed > 0xFFFF_FFFFL || says == null)) Check.bad("agent.observed.says_changed")
+            val client = o.optStr("client")?.let { Check.untrustedLine(it, MAX_AGENT_CLIENT_CHARS, "agent.observed.client") }
+            val agent = o.optStr("user_agent")?.let { Check.untrustedLine(it, MAX_AGENT_USER_AGENT_CHARS, "agent.observed.user_agent") }
+            val net = o.optStr("net")?.let { Check.untrustedLine(it, MAX_AGENT_NET_CHARS, "agent.observed.net") }
+            val nets = o.long("nets_seen")
+            if (nets !in 0..MAX_AGENT_NETS_SEEN) Check.bad("agent.observed.nets_seen")
+            o.done()
+            return Observed(says, changed, client, agent, net, nets.toInt())
+        }
+    }
+}
+
+/** An agent of the same key that looks like a new agent. A hint, never a merge. */
+data class Similar(val agentId: String, val label: String) {
+    fun toJson(): JSONObject = JSONObject().put("agent_id", agentId).put("label", label)
+}
+
+/**
+ * The state of one agent. The device keeps one agent for each [agentId] and ignores a frame with a [rev] lower than the one
+ * that it holds. [open] and [lastSeenMs] are the values when the server built the frame: they do not raise [rev].
+ * [label] is text of the portal, like `from.label`. [lockAccept] is true only for a `NEW` agent when the server locks the
+ * new agents. A bucket is `KNOWN`, is not named and has no [observed]. [mergedInto] is set with `MERGED` only, and always.
+ */
+data class AgentFrame(
+    val id: String,
+    val agentId: String,
+    val rev: Long,
+    val keyName: String,
+    val kind: AgentKind,
+    val state: AgentState,
+    val label: String,
+    val named: Boolean,
+    val mergedInto: String?,
+    val createdAtMs: Long,
+    val lastSeenMs: Long,
+    val open: Long,
+    val lockAccept: Boolean,
+    val observed: Observed?,
+    val similar: Similar?,
+) : ServerFrame {
+    override fun toJson(): JSONObject = JSONObject().put("t", "agent").put("id", id).put("agent_id", agentId).put("rev", rev)
+        .put("key_name", keyName).put("kind", kind.wire).put("state", state.wire).put("label", label).put("named", named)
+        .putOpt("merged_into", mergedInto).put("created_at_ms", createdAtMs).put("last_seen_ms", lastSeenMs)
+        .put("open", open).put("lock_accept", lockAccept).putOpt("observed", observed?.toJson())
+        .putOpt("similar", similar?.toJson())
+}
+
+/** The result of an `agent_do`. It has no delivery id: the device does not acknowledge it. */
+data class AgentResultFrame(val clientMsgId: String, val agentId: String, val status: AgentResultStatus) : ServerFrame {
+    override fun toJson(): JSONObject = JSONObject().put("t", "agent_result").put("client_msg_id", clientMsgId)
+        .put("agent_id", agentId).put("status", status.wire)
+}
+
 data class SubscriptionsFrame(val subscriptions: List<String>) : ServerFrame {
     override fun toJson(): JSONObject = JSONObject().put("t", "subscriptions").put("subscriptions", JSONArray(subscriptions))
 }
@@ -596,6 +716,8 @@ object ServerFrames {
             "settled" -> settled(o)
             "digest" -> digest(o)
             "answer_result" -> answerResult(o)
+            "agent" -> agent(o)
+            "agent_result" -> agentResult(o)
             "subscriptions" -> SubscriptionsFrame(o.arr("subscriptions").strings("subscriptions")).also { o.done() }
             "pong" -> PongFrame(o.unsigned("nonce")).also { o.done() }
             "error" -> ErrorFrame(o.str("code"), o.str("message")).also { o.done() }
@@ -656,6 +778,7 @@ object ServerFrames {
         val allowAskBack = o.bool("allow_ask_back")
         val supersedes = o.optStr("supersedes")?.let { Check.id(it, "request.supersedes") }
         val previousId = o.optStr("previous_id")?.let { Check.id(it, "request.previous_id") }
+        val agentLabel = o.optStr("agent_label")?.let { Check.untrustedLine(it, MAX_AGENT_LABEL_CHARS, "request.agent_label") }
         when {
             leaseMode == LeaseMode.LEASE && leaseUntil != null && untilAt == null -> Check.time(leaseUntil, "request.lease")
             leaseMode == LeaseMode.UNTIL && leaseUntil == null && untilAt != null -> Check.time(untilAt, "request.lease")
@@ -699,7 +822,7 @@ object ServerFrames {
         o.done()
         return RequestFrame(
             id, requestId, kind, chainId, seq, from, urgency, quiet, created, chainCreated, agentSeen, leaseMode,
-            leaseUntil, untilAt, allowCustom, allowAskBack, supersedes, previousId, question, approval,
+            leaseUntil, untilAt, allowCustom, allowAskBack, supersedes, previousId, agentLabel, question, approval,
         )
     }
 
@@ -763,6 +886,51 @@ object ServerFrames {
         if (count < 1 || count > 0xFFFF_FFFFL || ids.size > MAX_DIGEST_IDS || ids.size > count) Check.bad("digest.count")
         ids.forEach { Check.id(it, "digest.ids") }
         return DigestFrame(id, count, oldest, ids)
+    }
+
+    private fun agent(o: Obj): AgentFrame {
+        val id = Check.id(o.str("id"), "agent.id")
+        val agentId = Check.id(o.str("agent_id"), "agent.agent_id")
+        val rev = o.long("rev")
+        if (rev < 1) Check.bad("agent.rev")
+        val keyName = Check.line(o.str("key_name"), MAX_AGENT_LABEL_CHARS, "agent.key_name")
+        val kind = o.enum("kind", AgentKind.entries.toTypedArray())
+        val state = o.enum("state", AgentState.entries.toTypedArray())
+        val label = Check.line(o.str("label"), MAX_AGENT_LABEL_CHARS, "agent.label")
+        val named = o.bool("named")
+        val mergedInto = o.optStr("merged_into")?.let { Check.id(it, "agent.merged_into") }
+        val created = Check.time(o.long("created_at_ms"), "agent.created_at_ms")
+        val lastSeen = Check.time(o.long("last_seen_ms"), "agent.last_seen_ms")
+        val open = o.unsigned("open")
+        if (open > 0xFFFF_FFFFL) Check.bad("agent.open")
+        val lockAccept = o.bool("lock_accept")
+        val observed = o.optObj("observed")?.let { Observed.read(it) }
+        val similar = o.optObj("similar")?.let { s ->
+            Similar(Check.id(s.str("agent_id"), "agent.similar"), Check.line(s.str("label"), MAX_AGENT_LABEL_CHARS, "agent.similar"))
+                .also { s.done() }
+        }
+        o.done()
+        if ((mergedInto != null) != (state == AgentState.MERGED) || mergedInto == agentId) Check.bad("agent.merged_into")
+        if (lockAccept && state != AgentState.NEW) Check.bad("agent.lock_accept")
+        if (similar != null && (state != AgentState.NEW || similar.agentId == agentId)) Check.bad("agent.similar")
+        // The bucket cannot be named, merged, blocked or locked, and it has no token, so it has no hints.
+        if (kind == AgentKind.BUCKET && (state != AgentState.KNOWN || named || observed != null || similar != null)) {
+            Check.bad("agent.kind")
+        }
+        return AgentFrame(
+            id, agentId, rev, keyName, kind, state, label, named, mergedInto, created, lastSeen, open, lockAccept, observed,
+            similar,
+        )
+    }
+
+    private fun agentResult(o: Obj): AgentResultFrame {
+        val f = AgentResultFrame(
+            Check.clientMsgId(o.str("client_msg_id")),
+            Check.id(o.str("agent_id"), "agent_result.agent_id"),
+            o.enum("status", AgentResultStatus.entries.toTypedArray()),
+        )
+        o.done()
+        return f
     }
 
     private fun answerResult(o: Obj): AnswerResultFrame {
@@ -913,14 +1081,61 @@ data class RefreshFrame(val requestId: String) : ClientFrame {
 
 data class OpenRef(val requestId: String, val seq: Long)
 
-/** The items that the device holds open, with the last turn that it knows. */
-data class SyncFrame(val open: List<OpenRef>) : ClientFrame {
+/** An agent that the device holds, with the `rev` that it knows. */
+data class AgentRef(val agentId: String, val rev: Long)
+
+/**
+ * The items that the device holds open, with the last turn that it knows, and the agents that it holds, with their `rev`.
+ * The server sends the `agent` frames that the device lacks or holds in an older `rev`. Null [agents]: the device holds no
+ * agent. At most 200 agents, with no repeat.
+ */
+data class SyncFrame(val open: List<OpenRef>, val agents: List<AgentRef>? = null) : ClientFrame {
     override fun toJson(): JSONObject = JSONObject().put("t", "sync")
         .put("open", JSONArray(open.map { JSONObject().put("request_id", it.requestId).put("seq", it.seq) }))
+        .also { o ->
+            agents?.let { list ->
+                o.put("agents", JSONArray(list.map { JSONObject().put("agent_id", it.agentId).put("rev", it.rev) }))
+            }
+        }
 
     override fun validate() {
         if (open.size > MAX_SYNC_ENTRIES) Check.bad("sync.open")
         open.forEach { Check.id(it.requestId, "sync.open"); if (it.seq < 0) Check.bad("sync.open") }
+        val list = agents.orEmpty()
+        if (list.size > MAX_SYNC_AGENTS) Check.bad("sync.agents")
+        val seen = HashSet<String>()
+        for (a in list) {
+            Check.id(a.agentId, "sync.agents")
+            if (a.rev < 1 || !seen.add(a.agentId)) Check.bad("sync.agents")
+        }
+    }
+}
+
+/**
+ * One action of the owner on an agent. [name] goes with `RENAME` (always) and `ALLOW` (optional): 1 to 32 characters. The
+ * server checks the other rules of a name. [into] goes with `MERGE`, always, and with no other action. The device sends the
+ * same [clientMsgId] again until it gets `agent_result`. The device asks for no biometric for this action.
+ */
+data class AgentDoFrame(
+    val agentId: String,
+    val clientMsgId: String,
+    val op: AgentOp,
+    val name: String? = null,
+    val into: String? = null,
+) : ClientFrame {
+    override fun toJson(): JSONObject = JSONObject().put("t", "agent_do").put("agent_id", agentId)
+        .put("client_msg_id", clientMsgId).put("op", op.wire).putOpt("name", name).putOpt("into", into)
+
+    override fun validate() {
+        Check.id(agentId, "agent_do.agent_id")
+        Check.clientMsgId(clientMsgId)
+        when {
+            op == AgentOp.RENAME && name != null && into == null -> Check.agentName(name, "agent_do.name")
+            op == AgentOp.ALLOW && into == null -> name?.let { Check.agentName(it, "agent_do.name") }
+            (op == AgentOp.BLOCK || op == AgentOp.UNBLOCK) && name == null && into == null -> {}
+            op == AgentOp.MERGE && name == null && into != null -> Check.id(into, "agent_do.into")
+            else -> Check.bad("agent_do.op")
+        }
     }
 }
 
@@ -963,6 +1178,14 @@ object ClientFrames {
                     val r = Obj(it, "sync.open")
                     OpenRef(r.str("request_id"), r.unsigned("seq")).also { r.done() }
                 },
+                o.optArr("agents")?.objects("sync.agents")?.map {
+                    val r = Obj(it, "sync.agents")
+                    AgentRef(r.str("agent_id"), r.long("rev")).also { r.done() }
+                },
+            )
+            "agent_do" -> AgentDoFrame(
+                o.str("agent_id"), o.str("client_msg_id"), o.enum("op", AgentOp.entries.toTypedArray()),
+                o.optStr("name"), o.optStr("into"),
             )
             "set_prefs" -> SetPrefsFrame(Prefs.read(o))
             else -> Check.bad("unknown frame $t".take(40))
