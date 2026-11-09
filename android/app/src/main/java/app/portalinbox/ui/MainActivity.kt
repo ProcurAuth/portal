@@ -141,7 +141,7 @@ class MainActivity : BaseActivity() {
         val store = Store.get(this)
         val a = store.alert(serverId, alertId) ?: return
         if (screen != Screen.ALERTS) go(Screen.ALERTS)
-        showAlert(a, store.server(serverId)?.serverName ?: "")
+        showAlert(a, store.server(serverId)?.nickname ?: "")
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -398,7 +398,7 @@ class MainActivity : BaseActivity() {
         // A server whose groups are known but none followed sends this phone nothing.
         for (s in servers) {
             if (store.subscriptions(s.id).isNotEmpty() || store.groups(s.id).isEmpty()) continue
-            body.addView(banner(getString(R.string.alerts_no_group, s.serverName), getString(R.string.alerts_choose_groups),
+            body.addView(banner(getString(R.string.alerts_no_group, s.nickname), getString(R.string.alerts_choose_groups),
                 color(R.color.primary), color(R.color.primary_soft), R.drawable.ic_bell_outline) { openServer(s.id) },
                 lp().margins(this, t = 8))
         }
@@ -410,7 +410,7 @@ class MainActivity : BaseActivity() {
         // The configured count within the window, then older ones 10 at a time.
         val base = store.recentAlerts(now - window, limit, showRead)
         val alerts = if (extra == 0) base else store.latestAlerts(base.size + extra, showRead)
-        val names = servers.associate { it.id to it.serverName }
+        val names = servers.associate { it.id to it.nickname }
         val toAnswer = ItemListOrder.toAnswer(allItems(servers))
         // Alice's rule: the alerts come first, then the items to answer. A section with no row does not show.
         val sections = ItemListOrder.sections(hasAlerts = alerts.isNotEmpty(), hasItems = toAnswer.isNotEmpty())
@@ -756,7 +756,7 @@ class MainActivity : BaseActivity() {
                 }
                 row.addView(statusDot(fg, 8), lp(dp(8), dp(8)).margins(this, r = 10))
                 val col = lin()
-                col.addView(label(s.serverName, SP_M, color(R.color.text_strong), MEDIUM, lines = 1))
+                col.addView(label(s.nickname, SP_M, color(R.color.text_strong), MEDIUM, lines = 1))
                 col.addView(label("@${s.userName} · ${s.deviceName}", SP_S, color(R.color.text_muted), lines = 1),
                     lp().margins(this, t = 2))
                 col.addView(mono(s.address.removePrefix("http://").removePrefix("https://"), SP_XS, color(R.color.text_subtle)), lp().margins(this, t = 2))
@@ -777,6 +777,7 @@ class MainActivity : BaseActivity() {
             LinkState.CONNECTING -> (st.detail ?: getString(R.string.status_connecting)) to color(R.color.warning)
             LinkState.DISCONNECTED -> getString(R.string.status_offline_since, shortAge(st.sinceMs, now)) to color(R.color.danger)
             LinkState.REENROLL -> getString(R.string.status_reenroll) to color(R.color.danger)
+            LinkState.KEY_CHANGED -> getString(R.string.status_key_changed) to color(R.color.danger)
         }
     }
 

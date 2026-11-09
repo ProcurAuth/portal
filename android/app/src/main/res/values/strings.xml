@@ -25,6 +25,7 @@
     <string name="status_offline_since">Offline %1$s</string>
     <string name="status_connecting">Connecting…</string>
     <string name="status_reenroll">Re-enroll</string>
+    <string name="status_key_changed">Key changed</string>
     <string name="status_no_server">No server</string>
     <string name="chip_ringing">Ringing</string>
 
@@ -166,6 +167,7 @@
     <string name="svc_connecting">%1$s: connecting…</string>
     <string name="svc_disconnected">%1$s: disconnected %2$s</string>
     <string name="svc_reenroll">%1$s: re-enrollment required</string>
+    <string name="svc_key_changed">%1$s: key changed, not connected</string>
     <string name="svc_warning_title">Not connected: %1$s</string>
     <string name="svc_warning_text">The app is no longer connected to this server.</string>
     <string name="svc_warning_big">The app cannot receive messages from %1$s. %2$s</string>
@@ -183,6 +185,11 @@
     <string name="err_update_app">This server needs a newer version. Update the app.</string>
     <string name="err_server_key">The answer does not come from the server of the code. Nothing was stored.</string>
     <string name="err_device_name">The device name is not valid. Use 1 to 64 characters, with no control character.</string>
+    <string name="portal_duplicate">This Portal is already added as %1$s. Nothing was changed. The code was not used.</string>
+    <string name="portal_cap">This phone can hold %1$d Portals. Remove one before you add another. The code was not used.</string>
+    <string name="portal_add_conflict">The phone did not add this Portal: its key, name or color is already in use. Nothing was stored.</string>
+    <string name="key_changed_handshake">The Portal did not prove the key that this phone pinned. Nothing is sent to it.</string>
+    <string name="key_changed_closed">The Portal does not know this phone with its key. Nothing is sent to it.</string>
     <string name="enroll_again_notice">The servers of the previous version were removed. Enroll again with a code.</string>
     <string name="err_unknown">Unknown error</string>
 

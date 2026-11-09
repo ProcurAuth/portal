@@ -161,6 +161,19 @@ fn effect_error_json(e: &inbox_core::effect::EffectError) -> Value {
     json!({ "error": { "code": e.code(), "message": e.reason() } })
 }
 
+/// The length of a Noise public key in bytes.
+const PUBLIC_KEY_LEN: usize = 32;
+
+/// The fingerprint of a pinned server key: the same function as the one that the enrollment code
+/// uses (`inbox_core::enroll::key_fingerprint`), so the rule exists once. Five groups of 4 lower
+/// case hexadecimal characters with one space between them. A key of another length is refused.
+pub fn fingerprint(public_key: &[u8]) -> Result<String, String> {
+    if public_key.len() != PUBLIC_KEY_LEN {
+        return Err(format!("a public key has {PUBLIC_KEY_LEN} bytes, not {}", public_key.len()));
+    }
+    Ok(inbox_core::enroll::key_fingerprint(public_key))
+}
+
 /// The effect of an operation (protocol 17.3). `op_json` is the JSON text of `op`, read with the
 /// strict rules (no float, no duplicate member name). Returns `{"effect": "sha256:..."}` or
 /// `{"error": {"code": "invalid_op", ...}}`.
@@ -313,6 +326,29 @@ mod tests {
             let ct = srv.encrypt(frame.as_bytes()).unwrap();
             assert_eq!(session_decrypt(&conn, &ct).unwrap(), frame.as_bytes());
         }
+    }
+
+    /// The golden vectors of `inbox-core` (`enroll.rs`). The Kotlin test `FingerprintTest` holds
+    /// the same strings: the two languages must give the same text.
+    #[test]
+    fn fingerprint_of_a_key_has_the_golden_value_and_refuses_a_wrong_length() {
+        assert_eq!(fingerprint(&[0u8; 32]).unwrap(), "6668 7aad f862 bd77 6c8f");
+        let key = |n: u16| {
+            let mut key = [0u8; 32];
+            key[30..].copy_from_slice(&n.to_be_bytes());
+            key
+        };
+        assert_eq!(fingerprint(&key(50323)).unwrap(), "9361 3343 0b8c 6a2b c988");
+        assert_eq!(fingerprint(&key(54260)).unwrap(), "9361 3343 acd6 e90c 30a9");
+        let server = ServerKey::generate().unwrap();
+        assert_eq!(
+            fingerprint(&server.noise_public).unwrap(),
+            enroll_parse(&code_text(&server))["code"]["fingerprint"].as_str().unwrap(),
+            "the enrollment code and the stored key give the same text"
+        );
+        assert!(fingerprint(&[0u8; 31]).is_err());
+        assert!(fingerprint(&[0u8; 33]).is_err());
+        assert!(fingerprint(&[]).is_err());
     }
 
     #[test]

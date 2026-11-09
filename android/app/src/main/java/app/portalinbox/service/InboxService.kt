@@ -165,21 +165,22 @@ class InboxService : Service() {
             val st = Registry.status(s.id)
             val line = when (st.state) {
                 LinkState.CONNECTED -> { connected++; null }
-                LinkState.CONNECTING -> getString(R.string.svc_connecting, s.serverName)
-                LinkState.DISCONNECTED -> getString(R.string.svc_disconnected, s.serverName, formatSince(now - st.sinceMs))
-                LinkState.REENROLL -> getString(R.string.svc_reenroll, s.serverName)
+                LinkState.CONNECTING -> getString(R.string.svc_connecting, s.nickname)
+                LinkState.DISCONNECTED -> getString(R.string.svc_disconnected, s.nickname, formatSince(now - st.sinceMs))
+                LinkState.REENROLL -> getString(R.string.svc_reenroll, s.nickname)
+                LinkState.KEY_CHANGED -> getString(R.string.svc_key_changed, s.nickname)
             }
             if (line != null) lines.add(line)
             val offline = st.state != LinkState.CONNECTED &&
-                (st.state == LinkState.REENROLL || now - st.sinceMs >= s.offlineWarningMs)
+                (st.state == LinkState.REENROLL || st.state == LinkState.KEY_CHANGED || now - st.sinceMs >= s.offlineWarningMs)
             val id = WARNING_BASE_ID + s.id.toInt()
             if (offline && s.id !in warned) {
                 warned.add(s.id)
                 val w = Notification.Builder(this, Alerter.CH_WARNING)
                     .setSmallIcon(R.drawable.ic_notification)
-                    .setContentTitle(getString(R.string.svc_warning_title, s.serverName))
+                    .setContentTitle(getString(R.string.svc_warning_title, s.nickname))
                     .setContentText(st.detail ?: getString(R.string.svc_warning_text))
-                    .setStyle(Notification.BigTextStyle().bigText(getString(R.string.svc_warning_big, s.serverName, st.detail ?: "")))
+                    .setStyle(Notification.BigTextStyle().bigText(getString(R.string.svc_warning_big, s.nickname, st.detail ?: "")))
                     .setContentIntent(PendingIntent.getActivity(this, id, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
                     .build()
                 try {

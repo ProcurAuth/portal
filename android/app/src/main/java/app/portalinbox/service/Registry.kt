@@ -5,7 +5,11 @@ import android.os.Looper
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
 
-enum class LinkState { CONNECTING, CONNECTED, DISCONNECTED, REENROLL }
+/**
+ * The state of the link to one portal. [REENROLL]: the portal revoked this device, or the address is invalid. [KEY_CHANGED]:
+ * the portal does not prove the pinned key (see [KeyChange]). Both stop the connection until the user acts.
+ */
+enum class LinkState { CONNECTING, CONNECTED, DISCONNECTED, REENROLL, KEY_CHANGED }
 
 data class LinkStatus(val state: LinkState, val sinceMs: Long, val detail: String?)
 

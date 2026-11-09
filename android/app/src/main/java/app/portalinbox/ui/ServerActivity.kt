@@ -41,7 +41,7 @@ class ServerActivity : BaseActivity() {
         detailsOpen = savedInstanceState?.getBoolean("details") ?: false
         val root = lin()
         val server = Store.get(this).server(serverId) ?: return finish()
-        title = server.serverName
+        title = server.nickname
         bar = android.widget.FrameLayout(this)
         root.addView(bar, lp())
         body = lin(padH = 10, padV = 4)
@@ -93,6 +93,7 @@ class ServerActivity : BaseActivity() {
             LinkState.CONNECTING -> (st.detail ?: getString(R.string.status_connecting)) to color(R.color.warning)
             LinkState.DISCONNECTED -> getString(R.string.status_offline_since, shortAge(st.sinceMs, now)) to color(R.color.danger)
             LinkState.REENROLL -> getString(R.string.status_reenroll) to color(R.color.danger)
+            LinkState.KEY_CHANGED -> getString(R.string.status_key_changed) to color(R.color.danger)
         }
         bar.removeAllViews()
         // Same status light as the home; the words are under the server name.
@@ -100,7 +101,7 @@ class ServerActivity : BaseActivity() {
         bar.addView(topBar(R.drawable.ic_arrow_left, getString(R.string.nav_back), { finish() }, light))
 
         // Which server, where, and its state.
-        body.addView(sectionTitle(server.serverName))
+        body.addView(sectionTitle(server.nickname))
         val where = lin(vertical = false).apply { setPadding(dp(4), 0, dp(4), 0) }
         where.addView(label(code, SP_S, fg, MEDIUM, lines = 1))
         where.addView(label(" · ", SP_S, color(R.color.text_muted)))
@@ -163,7 +164,7 @@ class ServerActivity : BaseActivity() {
         }
         body.addView(details, lp().margins(this, t = 16))
 
-        body.addView(button(getString(R.string.server_remove), ButtonKind.DANGER) { confirmRemove(server.serverName) },
+        body.addView(button(getString(R.string.server_remove), ButtonKind.DANGER) { confirmRemove(server.nickname) },
             lp().margins(this, t = 16, b = 20))
     }
 

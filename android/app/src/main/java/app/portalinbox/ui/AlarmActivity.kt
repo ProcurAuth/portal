@@ -164,7 +164,7 @@ class AlarmActivity : Activity() {
         }
         col.addView(head, lp(MATCH, WRAP).margins(this, t = 12))
         val meta = SpannableStringBuilder()
-        server?.serverName?.let { meta.append(it).append("  ·  ") }
+        server?.nickname?.let { meta.append(it).append("  ·  ") }
         meta.append(getString(R.string.alarm_sent)).append(' ')
         monoSpan(meta, hms(a.createdAtMs))
         meta.append("  ·  ").append(getString(R.string.alarm_received)).append(' ')

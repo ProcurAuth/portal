@@ -262,6 +262,20 @@ pub extern "system" fn Java_app_portalinbox_core_Native_viewResolve<'l>(
     })
 }
 
+/// The fingerprint of a pinned server key (five groups of 4 hexadecimal characters). It is the function of
+/// the enrollment code, so Kotlin does not hash a second time. A key that is not 32 bytes throws.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_portalinbox_core_Native_fingerprint<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    public_key: JByteArray<'l>,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let key = bytes(env, &public_key)?;
+        new_string(env, &bridge::fingerprint(&key)?)
+    })
+}
+
 /// The tree of a Markdown text: the safe subset of `inbox_core::render::markdown`. Returns JSON text, never an error.
 /// Over a limit the tree has one `text` block and `"fallback": true`.
 #[unsafe(no_mangle)]
@@ -320,7 +334,7 @@ mod tests {
             .filter_map(|l| l.split("external fun ").nth(1))
             .filter_map(|l| l.split('(').next())
             .collect();
-        assert_eq!(names.len(), 14, "{names:?}");
+        assert_eq!(names.len(), 15, "{names:?}");
         for name in names {
             let symbol = format!("fn Java_app_portalinbox_core_Native_{name}<");
             assert!(source.contains(&symbol), "{symbol}");
@@ -329,6 +343,6 @@ mod tests {
             .lines()
             .filter(|l| l.starts_with("pub extern \"system\" fn Java_app_portalinbox_core_Native_"))
             .count();
-        assert_eq!(exported, 14, "each exported symbol has the package of the app");
+        assert_eq!(exported, 15, "each exported symbol has the package of the app");
     }
 }

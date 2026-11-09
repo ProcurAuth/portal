@@ -75,5 +75,12 @@ object Native {
      */
     @JvmStatic external fun highlightTokens(language: String, text: String): String
 
+    /**
+     * The fingerprint of a pinned server key (32 bytes): five groups of 4 lower case hexadecimal characters with one
+     * space between them, for example `6668 7aad f862 bd77 6c8f`. It is the function that the enrollment code uses.
+     * Throws for a key of another length. Use [app.portalinbox.portal.Fingerprint], not this function, in the app.
+     */
+    @JvmStatic external fun fingerprint(publicKey: ByteArray): String
+
     @JvmStatic external fun protocolVersion(): Int
 }

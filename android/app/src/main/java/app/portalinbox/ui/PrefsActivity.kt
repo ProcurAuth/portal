@@ -89,7 +89,7 @@ class PrefsActivity : BaseActivity() {
         val server = Store.get(this).server(serverId) ?: return finish()
         body.removeAllViews()
         body.addView(sectionTitle(getString(R.string.prefs_title)))
-        body.addView(label(server.serverName, SP_S, color(R.color.text_muted)).apply { setPadding(dp(4), 0, dp(4), dp(6)) })
+        body.addView(label(server.nickname, SP_S, color(R.color.text_muted)).apply { setPadding(dp(4), 0, dp(4), dp(6)) })
 
         val s = stored()
         if (s == null || s.bodyPurgeAfterMs <= 0) {
