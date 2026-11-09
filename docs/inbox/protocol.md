@@ -15,6 +15,10 @@ user name of the device. The device cannot change it.
 Protocol 5 adds items that the owner answers: questions and approvals. It adds the effect hash,
 the thread of an item and the preferences of the account. It adds no cryptography.
 
+Protocol 5 also adds the agents of a key. An agent is one program, or one conversation of a model, that asks.
+Several agents can share one key. The portal gives each agent an id, and the owner gives it a name.
+The frames of this document tell the phone which agent asked, and let the owner act on an agent.
+
 ## Keys
 
 | Key | Where | Created by |
@@ -156,8 +160,9 @@ The plain text of a frame has at most 65519 bytes (`MAX_PLAINTEXT`).
 | `answer` | see "answer" | The only answer of an item. |
 | `reply` | `request_id`, `client_msg_id`, `text` | A question of the owner to the agent. |
 | `refresh` | `request_id` | Asks for the current state of one item. |
-| `sync` | `open[]` of `{request_id, seq}` | Tells the items that the device holds open. |
+| `sync` | `open[]` of `{request_id, seq}`, `agents[]?` of `{agent_id, rev}` | Tells the items and the agents that the device holds. |
 | `set_prefs` | `quiet?`, `digest?` | Replaces the preferences of the account. |
+| `agent_do` | see "agent_do" | An action of the owner on an agent. |
 
 ### Server to device
 
@@ -170,6 +175,8 @@ The plain text of a frame has at most 65519 bytes (`MAX_PLAINTEXT`).
 | `settled` | see "settled" | An item is final. |
 | `digest` | see "digest" | The count and the age of the open items. |
 | `answer_result` | see "answer_result" | The result of an `answer` or a `reply`. |
+| `agent` | see "agent" | The state of one agent. |
+| `agent_result` | see "agent_result" | The result of an `agent_do`. |
 | `subscriptions` | `subscriptions[]` | The groups of the device, after each change. |
 | `pong` | `nonce` | Answer to `ping`. |
 | `error` | `code`, `message` | A refusal. |
@@ -183,23 +190,27 @@ The codes of `error` are `unknown_group`, `forbidden_group`, `unavailable`, `not
 `unavailable`: the storage or the rights are not ready, so send the message again later.
 `not_enabled`: the server does not handle this frame.
 `invalid_prefs`: a value of `set_prefs` is not valid. The server stored nothing. The message names the field.
-A server without the blocks `inbox.items` and `inbox.at_rest` answers each of `answer`, `reply`, `refresh`, `sync` and `set_prefs` so.
+
+A server without the blocks `inbox.items` and `inbox.at_rest` answers each of `answer`, `reply`, `refresh`, `sync`, `set_prefs` and `agent_do` so.
+A server with items and without the block `inbox.agents` answers `agent_do` with `agent_result` and the status `not_enabled`.
 
 ## Receipts
 
-The server sends `alert`, `request`, `message`, `settled` and `digest` from one queue.
+The server sends `alert`, `request`, `message`, `settled`, `digest` and `agent` from one queue.
 Each row of the queue has an id of 32 hexadecimal characters. The receipt `ack` names this id.
 
 | Frame | Member that holds the id of the delivery |
 |---|---|
 | `alert` | `alert_id` |
-| `request`, `message`, `settled`, `digest` | `id` |
+| `request`, `message`, `settled`, `digest`, `agent` | `id` |
 
 The device stores the frame durably before it sends `ack`. It deduplicates on the id of the delivery.
 The server sends a row again until the receipt arrives. A receipt is idempotent.
 
 Each device of an owner gets the same id for the same message, and each device has its own receipt.
 The frames that answer `refresh` and `sync` have a new id that is in no queue. The device stores them as any frame.
+
+The frames `answer_result` and `agent_result` have no delivery id, and the device sends no receipt for them.
 The server ignores a receipt for an id that it does not know.
 The field `alert_id` of `ack` in protocol 4 is now `id`. The old name is not valid.
 
@@ -259,7 +270,7 @@ Members of both kinds:
 | `kind` | string | `question` or `approval`. |
 | `chain_id` | id | Id of the thread. The first item of a thread has `chain_id` equal to `request_id`. |
 | `seq` | u64 | Number of the last turn of the thread. 0 when there is no turn. |
-| `from` | object | `{label, key_name, owner, via, interaction}`. See below. |
+| `from` | object | `{label, key_name, owner, via, interaction, agent_id, agent_kind, agent_state}`. See below. |
 | `urgency` | string | `low`, `normal` or `high`. |
 | `quiet` | bool, optional | True when the item came inside the quiet hours of the account, in the time zone of the window. The server never holds an item back. The flag does not depend on `urgency`: the phone reads `high_rings` of its preferences. |
 | `created_at_ms`, `chain_created_at_ms`, `agent_seen_at_ms` | time | |
@@ -269,13 +280,29 @@ Members of both kinds:
 | `allow_custom` | bool | A question: a text can be the answer. An approval: a text can come with a decline. |
 | `allow_ask_back` | bool | The owner can ask the agent a question with `reply`. |
 | `supersedes`, `previous_id` | id, optional | The item that this one replaces. The item that this one follows. |
+| `agent_label` | string, optional | What the agent says that it is. Text of the agent, not verified. 1 to 64 characters, one line, with no control character, no format character and no line separator. |
 
-`from` holds `label` (1 to 64 characters, one line, computed by the portal), `key_name` (1 to 64 characters),
-`owner` (login, 1 to 64 characters), `via` (`mcp` or `api`) and `interaction` (`conversational` or `one_shot`).
+`from` holds these members:
+
+| Member | Type | Rule |
+|---|---|---|
+| `label` | string | One line, 1 to 64 characters. The portal computes it. It is the name that the owner gave to the agent, else the key name and the number of the agent (`ops-key #4`). For the bucket, it is the key name when the key has the mode `key`, else `Unattributed · ` and the key name. |
+| `key_name` | string | The name that the owner gave to the key. One line, 1 to 64 characters. |
+| `owner` | string | Login of the owner. One line, 1 to 64 characters. |
+| `via` | string | `mcp` or `api`. |
+| `interaction` | string | `conversational` or `one_shot`. |
+| `agent_id` | id | The agent of the item. It is the key of a group on the screen. For the bucket, it is the id of its row. |
+| `agent_kind` | string | `agent` or `bucket`. The bucket is the pseudo agent "Unattributed" of a key: it holds the items that no agent claims. |
+| `agent_state` | string | `new` or `known`. A bucket is `known`. The open request of a `blocked` or a `merged` agent does not exist, so no frame has these states here. |
+
 An item of a `one_shot` key has `allow_custom` and `allow_ask_back` false.
 
-The portal writes `label` and `key_name` from the name that the owner gave to the key. A label that the agent gives never enters them.
+The portal writes each member of `from` itself. None of it is text that an agent sent.
+A label that the agent gives never enters `from`: it is in `agent_label`, next to the explanation.
+The screen shows `agent_label` in a box marked "Not verified", and never as the name of the agent.
 A key that the portal does not find has the name `key` and the first 8 characters of its id.
+
+The server writes `agent_label` from the sealed body of the item. It leaves the member out when the body has no label.
 
 Members of a question:
 
@@ -331,7 +358,7 @@ It shows "Invalid request" when the result differs from `effect`, or when a poin
 
 ```json
 {"t":"request","id":"aaaa...","request_id":"bbbb...","kind":"approval","chain_id":"bbbb...","seq":0,
- "from":{"label":"claude-laptop","key_name":"claude-laptop","owner":"alice","via":"mcp","interaction":"conversational"},
+ "from":{"label":"claude-laptop","key_name":"claude-laptop","owner":"alice","via":"mcp","interaction":"conversational","agent_id":"a1a1...","agent_kind":"agent","agent_state":"known"},
  "urgency":"high","created_at_ms":1788000000000,"chain_created_at_ms":1788000000000,"agent_seen_at_ms":1788000001000,
  "lease_mode":"lease","lease_until_ms":1788000180000,"allow_custom":true,"allow_ask_back":true,
  "approval":{"code":"K7QF","service":"datastore","action":"data.write",
@@ -419,9 +446,96 @@ The result of an `answer` or a `reply`.
 | `device_revoked` | The device is revoked. The state of the item does not change, and the server closes the session with 4403. |
 | `custom_not_allowed` | The item has `allow_custom` false, and the frame has a text. |
 | `ask_back_not_allowed` | The item has `allow_ask_back` false, or the thread has the most turns that the file allows. |
+| `agent_locked` | The agent of the item is `new`, and `inbox.agents.lock_new` is true. The frame was an `accept`. The item stays open and nothing is written. A `decline` and a `reply` work. |
 
 A `reply` or an `answer` for an item that the owner does not have gets `closed` and no `state`.
 A frame that the server cannot handle now (the storage is away) gets the `error` frame `unavailable`. The outbox sends it again.
+
+### `agent`
+
+The state of one agent. The device keeps one agent for each `agent_id`. It ignores a frame with a `rev` lower than the one that it holds.
+
+```json
+{"t":"agent","id":"aaaa...","agent_id":"d4d4...","rev":3,"key_name":"ops-key","kind":"agent","state":"new",
+ "label":"ops-key #4","named":false,"created_at_ms":1788000000000,"last_seen_ms":1788000500000,"open":1,
+ "lock_accept":true,
+ "observed":{"says":"billing-bot","says_changed":1,"client":"claude-code/2.1.0","net":"203.0.113.0/24","nets_seen":2},
+ "similar":{"agent_id":"a1a1...","label":"Billing bot"}}
+```
+
+| Member | Type | Rule |
+|---|---|---|
+| `id` | id | Id of the delivery. |
+| `agent_id` | id | |
+| `rev` | u64 | From 1 to 9223372036854775807. It grows at each change that a device must see. |
+| `key_name` | string | One line, 1 to 64 characters. |
+| `kind` | string | `agent` or `bucket`. |
+| `state` | string | `new`, `known`, `blocked` or `merged`. |
+| `label` | string | The text of the portal for this agent. The same rule as `from.label`. 1 to 64 characters. |
+| `named` | bool | True when the owner gave a name. Without a name, `label` is the key name and the number of the agent. |
+| `merged_into` | id, optional | With `merged` only, and then always. The agent that received the items. The device moves its items and follows the chain until an agent that is not `merged`. |
+| `created_at_ms`, `last_seen_ms` | time | |
+| `open` | u32 | The number of open items of the agent when the server built the frame. A change of `open` does not raise `rev`. The device counts the items that it holds. |
+| `lock_accept` | bool | True only with `new` and with `inbox.agents.lock_new` true. The server refuses `accept` for the items of this agent: the screen disables the button. |
+| `observed` | object, optional | The hints of the agent. A bucket has none. All text in it came from a client: it is not verified. |
+| `similar` | `{agent_id, label}`, optional | With `new` only. An agent of the same key that looks like this one. `label` follows the rule of `label`. It is a hint, and never a merge. |
+
+`observed` has these members:
+
+| Member | Type | Rule |
+|---|---|---|
+| `says` | string, optional | The last text that the agent said about itself. One line, 1 to 64 characters, with no control character, no format character and no line separator. |
+| `says_changed` | u32, optional | How many times `says` changed. 1 or more. Absent when it never changed. Only with `says`. |
+| `client` | string, optional | The name of the client. The same rule as `says`, with 1 to 64 characters. |
+| `user_agent` | string, optional | The header `User-Agent`. The same rule as `says`, with 1 to 128 characters. |
+| `net` | string, optional | The address range of the client: a /24 for IPv4 or a /48 for IPv6. The same rule as `says`, with 1 to 43 characters. |
+| `nets_seen` | u8 | The number of distinct ranges seen with the token of the agent, 0 to 8. Always present. |
+
+The server leaves out an `observed` text that does not follow the rule: a bad hint never stops the frame.
+It leaves out `observed` when there is nothing to show.
+The first text of the agent (`says_first` in the engine) is for the page of the owner and is not in the frame.
+The server never fills `similar` today: the member is part of the wire so that a later version needs no new amendment.
+
+A bucket has the state `known`, `named` false, no `observed`, no `similar` and no `merged_into`.
+The server sends the frame of a bucket in the answer to a `sync` only: it never changes.
+The label of a bucket depends on the mode of its key. The server computes it when it builds the frame.
+
+**When the server sends it.** The server writes one message for each device of the owner after each change that raises `rev`:
+a new agent, new hints and each action of the owner (a merge also writes one for the target).
+It sends the message from the queue, with a receipt, so the notice of a new agent is not lost.
+
+The frame holds the state of the agent when the server sends it. The server withdraws a message with an older `rev` when a newer message waits.
+A message goes to the devices of the owner of the agent and to no other device.
+
+An action that changes nothing writes no message. A portal without the block `inbox.agents` sends no `agent` frame.
+
+The device must notify the owner once, for a `new` agent that it did not hold before. A frame that comes again with the same `rev` must not notify again.
+
+### `agent_result`
+
+The result of an `agent_do`. It has no delivery id: the device sends no receipt.
+
+```json
+{"t":"agent_result","client_msg_id":"m-0010","agent_id":"d4d4...","status":"ok"}
+```
+
+| Member | Type | Rule |
+|---|---|---|
+| `client_msg_id` | string | The value of the frame of the device. |
+| `agent_id` | id | The agent of the frame of the device. |
+| `status` | string | See the table below. |
+
+| `status` | Result |
+|---|---|
+| `ok` | The action is done, or the agent was in the wanted state already. |
+| `not_found` | The agent does not exist, or it belongs to another owner. One answer for both cases. |
+| `invalid_name` | The name has a control character, a format character, a white space at an end, or a bad length. |
+| `name_taken` | Another agent of the same key has this name, after NFKC and lower case. |
+| `bad_state` | The state or the kind of the agent does not allow the action. Examples: the bucket, a rename of a `merged` agent, an `allow` of a `blocked` agent, a merge into itself. |
+| `cross_key` | A merge across two keys. |
+| `not_enabled` | The server has no block `inbox.agents`. |
+
+The server then sends the new `agent` frame to every device of the owner, the device that sent the action too.
 
 ## Frames of the device
 
@@ -462,10 +576,55 @@ The `request` frame has the state of the item now (`seq`, lease). An item that t
 
 ### `sync`
 
-`{"t":"sync","open":[{"request_id":"bbbb...","seq":2}]}`. At most 500 entries.
+`{"t":"sync","open":[{"request_id":"bbbb...","seq":2}],"agents":[{"agent_id":"a1a1...","rev":5}]}`.
+`open` has at most 500 entries. `agents` is optional and has at most 200 entries, with no repeated `agent_id`.
+An entry of `agents` has an id and a `rev` of 1 or more. An absent `agents` means that the device holds no agent.
+The device sends `sync` at each session, so the list of agents is the way to catch up.
+
 The server sends the `request` frames that the device lacks or knows in an older state.
 It sends a `settled` frame for each item that is final or that it does not hold any more.
 It sends nothing for an item that the device holds in the newest state.
+
+The server also sends the `agent` frames that the device lacks, before the items.
+It sends an agent that the device does not list, unless the agent is idle, `blocked` or `merged`.
+It sends an agent that the device lists with an older `rev`, whatever its state.
+It sends nothing for an agent that the device holds in the newest `rev`.
+
+An agent is idle when it has no open item and made no call for `inbox.agents.idle_after`. A bucket is never idle.
+These frames have a new delivery id that is in no queue.
+A phone that sends a list of 200 agents with 500 items still fits in one Noise message.
+
+### `agent_do`
+
+One action of the owner on an agent. The device asks for no biometric: only an approval needs one.
+
+```json
+{"t":"agent_do","agent_id":"d4d4...","client_msg_id":"m-0010","op":"allow","name":"Refund cleaner"}
+```
+
+| Member | Type | Rule |
+|---|---|---|
+| `agent_id` | id | |
+| `client_msg_id` | string | 1 to 64 characters of `A-Z a-z 0-9 _ -`. The device sends the same value again until it gets `agent_result`. |
+| `op` | string | `rename`, `allow`, `block`, `unblock` or `merge`. |
+| `name` | string, optional | With `rename` (always) and `allow` (optional). 1 to 32 characters, with no NUL. |
+| `into` | id, optional | With `merge` only, and then always. The agent that receives the items. |
+
+A `block` and an `unblock` have no other member. A frame with a member that its `op` does not take is a protocol error.
+The parser checks the length of `name` only. The server checks the other rules of a name and answers `invalid_name`.
+A merge into the agent itself is well formed: the server answers `bad_state`.
+
+The server answers `agent_result`. Every action is idempotent: the same frame again gives `ok` and writes nothing.
+The actions are:
+
+- `rename`: gives a name to the agent, or changes it.
+- `allow`: changes `new` to `known`. With a name, it also gives the name.
+- `block`: changes `new` or `known` to `blocked`. The server cancels the open items of the agent with the reason `agent_blocked`.
+  The calls of the agent get `agent_blocked`.
+- `unblock`: changes `blocked` to `known`. It brings nothing back to life.
+- `merge`: moves the items of the agent to `into`, in the same key. The agent becomes `merged`.
+
+The owner of the agent is the account of the device. An agent of another account gets `not_found`.
 
 ### `set_prefs`
 
@@ -686,7 +845,7 @@ The other devices of the owner get `settled`.
 
 - **Fan-out at acceptance.** When an alert is accepted, one delivery row is created for every device subscribed to the group at that instant.
   An alert of the portal about a service has a row only for the devices of the accounts that may open the service.
-  An item has a row for each device of its owner that is not revoked.
+  An item has a row for each device of its owner that is not revoked. A change of an agent has a row for the same devices.
 - **Retransmission.** The server sends rows whose receipt has not arrived yet,
   oldest first, with at most `max_inflight` rows in flight. A row that stays
   without receipt for `resend_after` is sent again, and the whole backlog is resent
@@ -700,6 +859,7 @@ The other devices of the owner get `settled`.
   `storage.delivery_ttl` does not apply to an item.
 - **Catch-up.** A device that enrolls after an item came gets the open items of its owner at its first session.
   The same holds at each reconnection. A device that is away gets the items that it lacks.
+  A device gets the agents that it lacks with its `sync`. See "sync".
 - **Order.** The server sends `request`, `message` and `settled` in the order of the queue.
   A device that was offline gets the `request` before its `settled`.
 - **Abandoned items.** An item that is `abandoned` when its first delivery is due does not go to a device that never got it.

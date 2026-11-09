@@ -1429,3 +1429,100 @@ fn the_format_characters_are_the_class_cf_of_unicode() {
         assert!(!is_format_char(c), "{c:?}");
     }
 }
+
+#[test]
+fn the_protocol_document_names_the_agent_members_and_its_examples_read_with_the_code() {
+    let doc = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/inbox/protocol.md"),
+    )
+    .expect("protocol.md");
+    // The limits of the text of an agent, in the order of the table of the document.
+    for (text, n) in [
+        ("at most 200 entries", MAX_SYNC_AGENTS),
+        ("1 to 32 characters, with no NUL", MAX_AGENT_NAME_CHARS),
+        ("with 1 to 64 characters", MAX_AGENT_CLIENT_CHARS),
+        ("with 1 to 128 characters", MAX_AGENT_USER_AGENT_CHARS),
+        ("with 1 to 43 characters", MAX_AGENT_NET_CHARS),
+        ("1 to 64 characters, one line", MAX_AGENT_LABEL_CHARS),
+        ("0 to 8", MAX_AGENT_NETS_SEEN as usize),
+    ] {
+        assert!(doc.contains(text), "{text}");
+        let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+        assert!(digits.contains(&n.to_string()), "{text} against {n}");
+    }
+    assert!(doc.contains("From 1 to 9223372036854775807"), "the largest rev");
+    assert_eq!(i64::MAX.to_string(), "9223372036854775807");
+    // Every value of every closed list of the agents is in the document, and the document has no other value in them.
+    for text in ["agent", "bucket", "new", "known", "blocked", "merged"] {
+        assert!(doc.contains(&format!("`{text}`")), "{text}");
+    }
+    for status in [
+        AgentResultStatus::Ok,
+        AgentResultStatus::NotFound,
+        AgentResultStatus::InvalidName,
+        AgentResultStatus::NameTaken,
+        AgentResultStatus::BadState,
+        AgentResultStatus::CrossKey,
+        AgentResultStatus::NotEnabled,
+    ] {
+        assert!(doc.contains(&format!("| `{}` |", status.as_str())), "{status:?}");
+    }
+    assert!(doc.contains("| `agent_locked` |"), "the status of an answer");
+    for op in [
+        AgentOpKind::Rename,
+        AgentOpKind::Allow,
+        AgentOpKind::Block,
+        AgentOpKind::Unblock,
+        AgentOpKind::Merge,
+    ] {
+        assert!(doc.contains(&format!("- `{}`:", op.as_str())), "{op:?}");
+    }
+    // The members of the new frames are in the document.
+    for member in [
+        "agent_id", "rev", "key_name", "kind", "state", "label", "named", "merged_into", "created_at_ms",
+        "last_seen_ms", "open", "lock_accept", "observed", "similar", "says", "says_changed", "client",
+        "user_agent", "net", "nets_seen", "client_msg_id", "op", "name", "into", "agent_kind", "agent_state",
+        "agent_label", "status",
+    ] {
+        assert!(doc.contains(&format!("`{member}`")), "{member}");
+    }
+    // The examples are frames that the parsers read, once their short ids are made whole.
+    let whole = |text: &str| -> String {
+        let mut out = String::new();
+        let mut rest = text;
+        while let Some(at) = rest.find("...\"") {
+            // `"aaaa..."`: a short id that stands for 32 hexadecimal characters.
+            let start = rest[..at].rfind('"').unwrap();
+            let hex = &rest[start + 1..at];
+            if hex.len() == 4 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                out.push_str(&rest[..start + 1]);
+                out.push_str(&hex.repeat(8));
+                out.push('"');
+            } else {
+                out.push_str(&rest[..at + 4]);
+            }
+            rest = &rest[at + 4..];
+        }
+        out.push_str(rest);
+        out
+    };
+    let example = |start: &str| -> String {
+        let at = doc.find(start).unwrap_or_else(|| panic!("no example {start}"));
+        let end = doc[at..].find("\n```").unwrap();
+        whole(&doc[at..at + end])
+    };
+    for start in [r#"{"t":"agent","#, r#"{"t":"agent_result","#] {
+        let frame = example(start);
+        ServerMsg::decode(frame.as_bytes()).unwrap_or_else(|e| panic!("{frame}: {e}"));
+    }
+    let frame = example(r#"{"t":"agent_do","#);
+    ClientMsg::decode(frame.as_bytes()).unwrap_or_else(|e| panic!("{frame}: {e}"));
+    // The example of `sync` is in a line of text: it ends at the full stop that follows it.
+    let at = doc.find(r#"`{"t":"sync","open":[{"request_id":"bbbb...","seq":2}],"agents""#).expect("the example of sync");
+    let line = &doc[at + 1..];
+    let frame = whole(&line[..line.find("`.").unwrap()]);
+    let ClientMsg::Sync { open, agents } = ClientMsg::decode(frame.as_bytes()).unwrap() else { panic!() };
+    assert_eq!((open.len(), agents.map(|a| a.len())), (1, Some(1)));
+    // The request example keeps its form and now has the agent in `from`.
+    assert!(doc.contains(r#""from":{"label":"claude-laptop","key_name":"claude-laptop","owner":"alice","via":"mcp","interaction":"conversational","agent_id":"#));
+}
