@@ -1037,6 +1037,7 @@ mod tests {
                 level: Level::All,
                 unread: 1,
                 cursor_ms: 2_000,
+                to_answer: 0,
             },
             rows: &rows,
             now_ms: 2_000,

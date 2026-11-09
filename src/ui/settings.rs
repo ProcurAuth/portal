@@ -3100,6 +3100,7 @@ mod tests {
             level: Level::All,
             unread: 4,
             cursor_ms: 1_700_000_000_000,
+            to_answer: 0,
         };
         let html = with(Some(header));
         let strip = &html[html.find("<nav").unwrap()..html.find("</nav>").unwrap()];

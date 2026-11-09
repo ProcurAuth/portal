@@ -1128,6 +1128,8 @@ The Inbox is a feature of the portal, and the portal has one internal scope for 
 | `phone.read` | the service | See all the phones. |
 | `phone.revoke` | the service | Revoke any phone. It needs `phone.read`. |
 | `phone.log` | the service | See the connection log. |
+| `approval.read` | the service | See the requests of all the accounts: the state, the key, the service and the times. It never gives a content. |
+| `approval.cancel` | the service | Cancel an open request of any account. It needs `approval.read`. |
 
 The text of a grant is, for example, `alert.send on service:portal/inbox_group:infra`. The superadmin has all of them. A permission on the whole service is not possible for the actions of a group: give one permission for each group.
 
@@ -1160,7 +1162,7 @@ A key reads and speaks only on the items that it made. An item of another key gi
 
 ### The tab Inbox
 
-The tab is one page, `/auth/settings/inbox`, with no sub-page. It works without script. The script only gives the Copy button, the close of a popover and the count of the bulk action. The page answers `403` to an account that holds no permission of the Inbox. Without the block `inbox`, each route answers `404`. Each other address under the prefix answers `404`. A `GET` of a form route answers `405`. A form is a POST with the `Origin` of the portal, the content type of a form and the field `csrf`. A refused form returns to the page with a notice. A session that "Log in as" opens can read the page and make a code. It does not send an alert and does not revoke a phone.
+The tab is the page `/auth/settings/inbox`. The pages of the requests are under it: see "Requests on the web". The pages work without script. The script only gives the Copy button, the close of a popover and the count of the bulk action. The page answers `403` to an account that holds no permission of the Inbox. Without the block `inbox`, each route answers `404`. Each other address under the prefix answers `404`. A `GET` of a form route answers `405`. A form is a POST with the `Origin` of the portal, the content type of a form and the field `csrf`. A refused form returns to the page with a notice. A session that "Log in as" opens can read the page and make a code. It does not send an alert and does not revoke a phone.
 
 The button **New alert** opens a popup. A switch of two chips, **Group** and **User**, chooses the recipient. The switch exists only when the account may send to a group (`alert.send`) and to an account (`alert.send_user`). With one kind of recipient, the popup shows only its form. The form of a group has a select with the number of members of each group. The form of an account has a list of the accounts with their active phones. An account with no phone is disabled, with the reason "no phone enrolled". The form sends the field `to`: `group:<id>` or `user:<login>`. The list **Sent** has a column **To** with a chip `group:infra` or `@alice`. The chip with the account icon keeps the alerts that went to one account. It is absent when there is none.
 
@@ -1182,6 +1184,31 @@ Each part of the page needs a permission. A part that the account may not use is
 - **New alert:** a form that the server refuses gives the page again with status 422. The popup is open, with the title, the recipient and the reason. A new alert opens its row, with no banner. A revoke shows no banner: the row of the phone shows the state.
 - **Phones:** the columns are the state (one icon), the phone, the owner and the app. The owner is in the zone **Phones** only. The last columns are the last time seen and the number of alerts that wait. **Revoke (N)** shows when a box is ticked. A click asks "Revoke N phones?" in the same place. The form sends the fields `id.<id>` with the value `1`.
 - **Connections:** the newest 200 connections. The search is a form with the method GET. The last column shows the reason, or "open".
+
+### Requests on the web
+
+An agent can ask the owner of its key to approve an action. The owner answers on the phone or on the web. The web pages need no script. Each page that shows a content has `Cache-Control: no-store`.
+
+| Page | Address | Needs |
+|---|---|---|
+| Panel **Open items** | `/auth/settings/inbox` | A request that waits for the account. The panel is absent when nothing waits. |
+| **History** | `/auth/settings/inbox/items` | The account owns keys, or it holds `approval.read`. |
+| One request | `/auth/settings/inbox/items/{id}` | The owner of the request, or `approval.read` for the metadata. |
+| Content for the administrator | `/auth/settings/inbox/items/{id}/body` | The superadmin, and `inbox.at_rest.admin_body_read = true`. Else the route answers `404`. |
+| **Inbox limits** | `/auth/settings/inbox/limits` | `approval.read`. The page is read only. |
+
+- **Order on the page Inbox:** the alerts come first, then the panel **Open items**, then the phones and the connections. The page scrolls when the panel is present.
+- **The page of a request:** the zone **Command** comes first. It shows the text of the service in a fixed font, with line numbers. It shows the fields of the view and the short hash of the effect. The hint `language` sets the colors.
+- **The explanation:** the zone **Agent explanation** comes below the command. It has the label "Not checked", a dashed edge and the note that it does not change what the service runs. An explanation in Markdown shows as a safe subset. A code block of the agent has muted colors and a copy button.
+- **Copy:** the button of the command copies the exact bytes of the command. The buttons need script, so they are hidden without it.
+- **Hidden characters:** a bidi control, a zero-width character and a control character show as a red mark such as `<U+202E>`. A letter of a script that looks like ASCII shows with an amber mark and its code. The page counts the non-ASCII characters and shows a banner. The server never removes a character.
+- **Decision:** the buttons **Approve** and **Decline** are in one form with `POST /auth/settings/inbox/items/answer`. The page gives no default choice. The server takes the effect from the stored request and checks that the page showed it. The page says that it cannot check that the owner read the whole command: only the phone has that gate.
+- **Old request:** after `inbox.items.stale_after` the page shows a banner and a box "I know this request is N days old". **Approve** needs the box. A refusal does not.
+- **Comment and question:** the field of a comment shows only when the agent set `allow_custom`. The form **Ask the agent a question** (`POST /auth/settings/inbox/items/reply`) shows only when the agent set `allow_ask_back`.
+- **`web_approval = false`:** the pages list the requests and show the content. They have no form that decides.
+- **History:** the filters are the state, the key, the service and the period (7, 30 or 90 days). A request that follows an abandoned or replaced one stands right after it. An owner sees only the own requests. An account with `approval.read` sees the metadata of all of them.
+- **Cancel:** an account with `approval.cancel` sees the button **Cancel this request** on an open request. The service sees a closed request.
+- **Rules of safety:** a form needs the session, the token `csrf` and the right `Origin`. A session that the superadmin opens as another account reads no request and answers nothing. Each read of the route of the administrator writes one row `body_read` and adds one to `portal_item_body_reads_total`. The row has no content.
 
 ### Notifications in the browser
 

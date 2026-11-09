@@ -1859,7 +1859,7 @@ mod tests {
         };
         let with_features = Registry::new(Duration::from_secs(3600))
             .with_portal(crate::portal_actions::document(&features));
-        assert_eq!(with_features.action_names("portal").len(), 1 + 15);
+        assert_eq!(with_features.action_names("portal").len(), 1 + 17);
         // The oldest age among some services.
         assert!(registry.oldest_age(["a", "b", "portal"].into_iter()) >= Duration::from_secs(3600));
     }

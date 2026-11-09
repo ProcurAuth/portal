@@ -1679,6 +1679,7 @@
     var KEY_ROWS = ["keys.own.read", "keys.own.edit", "keys.own.revoke", "users.read", "keys.all.read", "keys.all.revoke"];
     var DIRECT_ROWS = ["alert.send_user"];
     var PHONE_ROWS = ["phone.read", "phone.revoke", "phone.log"];
+    var APPROVAL_ROWS = ["approval.read", "approval.cancel"];
     var INBOX_COLUMNS = [
       ["inbox.receive", "Receive", "Receive the alerts of the group on the phones", ""],
       ["alert.send", "Send", "Send alerts to the group", "send"],
@@ -1979,6 +1980,7 @@
         // The row of the direct alerts exists only when the document of the portal has the action.
         flatSection("user", "Direct alerts", DIRECT_ROWS);
         flatSection("device-mobile", "Phones", PHONE_ROWS);
+        flatSection("shield-check", "Requests", APPROVAL_ROWS);
         if (again) {
           var boxes = ui.querySelectorAll("input[type=checkbox]");
           for (var b = 0; b < boxes.length; b += 1) {
@@ -2448,4 +2450,55 @@
 
   var roots = document.querySelectorAll("[data-expiry]");
   for (var at = 0; at < roots.length; at += 1) init(roots[at]);
+})();
+
+/* The copy buttons of the pages of the items. The command has a button with its exact text in the attribute
+   `data-copy-text` (base64 of the UTF-8 bytes), so the copy is the text of the service and not the text of the screen.
+   A code block of the agent gets a button from this code: it copies the text of the block, and a hidden character
+   shows as its mark `U+XXXX`. A button that needs this code has the attribute `hidden` until it runs. */
+(function () {
+  "use strict";
+  function done(button) {
+    button.classList.add("is-copied");
+    window.setTimeout(function () {
+      button.classList.remove("is-copied");
+    }, 2000);
+  }
+  function copy(text, button) {
+    try {
+      window.navigator.clipboard.writeText(text).then(function () {
+        done(button);
+      }, function () {});
+    } catch (e) {}
+  }
+  function decode(b64) {
+    var raw = window.atob(b64);
+    var bytes = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
+    return new window.TextDecoder("utf-8").decode(bytes);
+  }
+  if (!window.navigator.clipboard || !window.TextDecoder || !window.atob) return;
+  var commands = document.querySelectorAll("[data-copy-text]");
+  Array.prototype.forEach.call(commands, function (button) {
+    button.hidden = false;
+    button.addEventListener("click", function () {
+      copy(decode(button.getAttribute("data-copy-text")), button);
+    });
+  });
+  var blocks = document.querySelectorAll(".sec2--exp .md-code, .turn--agent .md-code");
+  Array.prototype.forEach.call(blocks, function (pre) {
+    var box = document.createElement("div");
+    box.className = "md-codebox";
+    pre.parentNode.insertBefore(box, pre);
+    box.appendChild(pre);
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "button button--small md-copy";
+    button.textContent = "Copy";
+    button.setAttribute("aria-label", "Copy this code block");
+    button.addEventListener("click", function () {
+      copy(pre.textContent, button);
+    });
+    box.appendChild(button);
+  });
 })();

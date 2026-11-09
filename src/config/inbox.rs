@@ -121,7 +121,6 @@ pub struct ItemsConfig {
     pub lease: LeaseConfig,
     pub max_chain: u32,
     pub max_turns: u32,
-    #[allow(dead_code)] // the screens of lots L8 and L10 read it
     pub stale_after: Duration,
     pub retention: Duration,
     pub body_purge_after: Duration,
@@ -184,7 +183,6 @@ pub struct ApprovalsConfig {
     /// The longest explanation of an agent, in characters. 0: none is accepted.
     pub max_explanation_chars: usize,
     pub require_explanation: bool,
-    #[allow(dead_code)] // the phone and the web screens of lots L8 and L10 read it
     pub max_comment_chars: usize,
     /// How long an intent (`approval_ref`) stays valid.
     pub intent_ttl: Duration,
@@ -192,7 +190,6 @@ pub struct ApprovalsConfig {
     /// Explicit refusals in a row before a key is muted. 0: never.
     pub mute_after_refusals: u32,
     pub mute_for: Duration,
-    #[allow(dead_code)] // the web page of lot L10 reads it
     pub web_approval: bool,
 }
 

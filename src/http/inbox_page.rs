@@ -13,6 +13,8 @@
 //! A session that "Log in as" opens can read the pages and make a code for the account. It does
 //! not send an alert and does not revoke a phone.
 
+mod items;
+
 use super::pdp::{decide_person_for, UseVerdict};
 use super::*;
 use crate::inbox::admin::{self, DeviceRow, Target};
@@ -56,6 +58,10 @@ pub(super) struct Held {
     named: Option<Vec<String>>,
     /// The services whose alerts the account may see: the services of its launcher.
     services: Services,
+    /// `approval.read`: the metadata of the requests of all the accounts.
+    approval_read: bool,
+    /// `approval.cancel`: an open request of any account can be cancelled.
+    approval_cancel: bool,
 }
 
 /// The rights of the viewer. `None`: the file has no block `inbox`.
@@ -88,10 +94,13 @@ fn held_with(state: &AppState, viewer: &Viewer, count_members: bool) -> Option<H
         ids.sort_by_key(|id| inbox.groups[id].critical);
         ids
     };
+    // The engine of the items runs: the file has the blocks `inbox.items` and `inbox.at_rest`.
+    let engine = inbox.items.is_some() && inbox.at_rest.is_some();
     let Some(grants) = &viewer.grants else {
         // The superadmin has every right.
         return Some(Held {
             ui: Rights {
+                items: engine,
                 sent: !ids.is_empty(),
                 phones: true,
                 revoke: true,
@@ -104,6 +113,8 @@ fn held_with(state: &AppState, viewer: &Viewer, count_members: bool) -> Option<H
             receive_groups: None,
             named: None,
             services: Services::of_grants(None),
+            approval_read: engine,
+            approval_cancel: engine,
         });
     };
     let document = state.actions.declared(actions::SERVICE)?;
@@ -116,11 +127,15 @@ fn held_with(state: &AppState, viewer: &Viewer, count_members: bool) -> Option<H
     let receive_ids = on(actions::INBOX_RECEIVE);
     let devices = at_service(actions::PHONE_READ);
     let send_user = at_service(actions::ALERT_SEND_USER);
+    let approval_read = engine && at_service(actions::APPROVAL_READ);
+    // An account that can use keys of its own can own requests.
+    let owns_keys = !actions::kinds_with(grants, actions::KEYS_OWN_USE).is_empty();
     let mut named: Vec<String> = read_ids.iter().chain(send_ids.iter()).cloned().collect();
     named.sort();
     named.dedup();
     Some(Held {
         ui: Rights {
+            items: engine && (approval_read || owns_keys),
             // An account that may alert any account sees the alerts that it sent.
             sent: !read_ids.is_empty() || send_user,
             phones: devices,
@@ -134,6 +149,8 @@ fn held_with(state: &AppState, viewer: &Viewer, count_members: bool) -> Option<H
         receive_groups: Some(receive_ids),
         named: Some(named),
         services: Services::of_grants(Some(grants)),
+        approval_read,
+        approval_cancel: approval_read && at_service(actions::APPROVAL_CANCEL),
     })
 }
 
@@ -412,6 +429,23 @@ fn query_pairs(uri: &str) -> Option<Vec<(String, String)>> {
 }
 
 async fn get(state: &Arc<AppState>, ctx: &Context<'_>, rest: &str) -> HttpResponse {
+    // The pages of the items have their own addresses.
+    if rest == "/limits" {
+        return items::limits(state, ctx).await;
+    }
+    if rest == "/items" {
+        return items::history(state, ctx).await;
+    }
+    if let Some(tail) = rest.strip_prefix("/items/") {
+        if matches!(tail, "answer" | "reply" | "cancel") {
+            return text_response(StatusCode::METHOD_NOT_ALLOWED, "Method Not Allowed\n");
+        }
+        let (id, body) = match tail.strip_suffix("/body") {
+            Some(id) => (id, true),
+            None => (tail, false),
+        };
+        return items::detail(state, ctx, id, body, None, StatusCode::OK).await;
+    }
     // The page has one address. Each other address under the prefix is gone.
     if !rest.is_empty() {
         return if matches!(rest, "/send" | "/revoke" | "/code" | "/read" | "/notify") {
@@ -587,7 +621,10 @@ async fn page(
         .as_ref()
         .map_or_else(random_key, |refused| refused.key.to_string());
     let header = header_for(&ctx.app, &ctx.held, &ctx.viewer.login).await;
+    let (open_items_html, _) = items::open_panel(state, ctx, now_ms).await;
     let view = InboxView {
+        open_items_html: &open_items_html,
+        items_link: rights.items && !ctx.viewer.session.impersonated,
         notify_level: header.map(|h| h.level),
         rights,
         notice,
@@ -615,7 +652,7 @@ async fn page(
     if view.send_error.is_some() {
         *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
     }
-    if view.code.is_some() || view.send_error.is_some() {
+    if view.code.is_some() || view.send_error.is_some() || !open_items_html.is_empty() {
         response.headers_mut().insert(
             HeaderName::from_static("cache-control"),
             HeaderValue::from_static("no-store"),
@@ -710,7 +747,17 @@ async fn post(
     client: &Client,
     rest: &str,
 ) -> HttpResponse {
-    if !matches!(rest, "/send" | "/revoke" | "/code" | "/read" | "/notify") {
+    if !matches!(
+        rest,
+        "/send"
+            | "/revoke"
+            | "/code"
+            | "/read"
+            | "/notify"
+            | "/items/answer"
+            | "/items/reply"
+            | "/items/cancel"
+    ) {
         return not_found();
     }
     let (ctx, fields, json) = match form(state, request, client).await {
@@ -722,6 +769,9 @@ async fn post(
         "/revoke" => revoke(state, &ctx, fields).await,
         "/read" => read(state, &ctx, fields, json).await,
         "/notify" => set_level(state, &ctx, fields, json).await,
+        "/items/answer" => items::answer(state, &ctx, fields).await,
+        "/items/reply" => items::reply(state, &ctx, fields).await,
+        "/items/cancel" => items::cancel(state, &ctx, fields).await,
         _ => code(state, &ctx, fields).await,
     }
 }
@@ -1020,7 +1070,26 @@ async fn header_for(app: &InboxApp, held: &Held, login: &str) -> Option<ui_notif
         level: view.prefs.level,
         unread: view.unread,
         cursor_ms: unix_now() * 1000,
+        to_answer: to_answer(app, held, login).await,
     })
+}
+
+/// The approvals of the account that wait for an answer. The count is for the badge of the tab.
+async fn to_answer(app: &InboxApp, held: &Held, login: &str) -> u32 {
+    use crate::inbox::page_items::{ListFilter, Loaded};
+    let (true, Some(items)) = (held.ui.items, app.items()) else {
+        return 0;
+    };
+    let filter = ListFilter {
+        owner: Some(login.to_string()),
+        open: Some(true),
+        limit: 100,
+        ..ListFilter::default()
+    };
+    let rows: Vec<Loaded> = items.list(filter).await.unwrap_or_default();
+    rows.iter()
+        .filter(|l| l.item.kind == inbox_core::proto::Kind::Approval)
+        .count() as u32
 }
 
 /// The data of the badge for a settings page.
@@ -1098,6 +1167,7 @@ pub(super) async fn launcher_bell(state: &AppState, viewer: &Viewer) -> Option<L
             level: view.prefs.level,
             unread: view.unread,
             cursor_ms: now_ms,
+            to_answer: to_answer(&app, &held, &viewer.login).await,
         },
         rows,
         csrf: sign_action_token(&state.signing_secret, INBOX_TOKEN, &viewer.token).ok()?,
