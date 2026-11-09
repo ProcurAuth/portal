@@ -298,7 +298,7 @@ The app also asks for the tick when the portal looks like a portal that you alre
 
 The list **Portals** shows the name, the host, the start of the key, the state and the last sync of each portal. Drag the handle of a row to change the order. A screen reader can use the actions **Move up** and **Move down**.
 
-Tap a row to open the screen of the portal. On this screen you can rename the portal, choose another color, change the address and enroll the portal again. The switch **Hide the name on the lock screen** is on this screen too.
+Tap a row to open the screen of the portal. On this screen you can rename the portal, choose another color, change the address and enroll the portal again. The row **Settings of this portal** opens the settings of the portal.
 
 Use **Change address** when the portal has a new address, for example when you are not at home. The key stays the same. The phone keeps one address for each portal.
 
@@ -307,6 +307,31 @@ Use **Change address** when the portal has a new address, for example when you a
 The app shows **Key changed** when the portal does not prove the key that the phone pinned. A new key is normal after a key rotation or a new install. An attacker at the same address gives the same sign.
 
 Ask the administrator for the new fingerprint by another channel. Then press **Enter a new code** on the screen of the portal. The phone keeps the name, the color and the history. Only the screen of a portal can start this step. A link cannot start it.
+
+### Settings of one portal
+
+The screen **Settings of this portal** has four groups. Open it from the screen of the portal.
+
+- **Notifications** stay on the phone. **Mute this portal** makes the notification of this portal silent, with no pop-up. The items stay in the list. An alarm still rings. **Show the name on the lock screen** is on by default. When the switch is off, the lock screen does not show the name of this portal.
+- **Quiet hours** and **Summary** go to the portal. The phone sends them with the frame `set_prefs`. They replace the preferences of your account at this portal. The page **Preferences** of the portal shows the same values.
+- **On this phone** has **Keep finished items**. It sets how long the phone keeps the local copy of a finished request of this portal. **Same as all** follows the setting of the app. A shorter value erases the older items at once. The app asks first and gives the number of items.
+- **Apply quiet hours and summary to all portals** opens a sheet. Read the next paragraphs before you use it.
+
+When the portal is not connected, the phone keeps the new values and sends them at the next connection. The screen says "Saved on this phone. The portal did not confirm it yet" until the portal has them. A newer change replaces the values that wait. If the portal refuses a value, the screen shows the text of the portal. The phone then drops the change, and the values of the portal apply.
+
+The sheet **Apply to all portals?** has one line for each other portal. The line tells what will happen before you decide.
+
+| Line | Meaning |
+|---|---|
+| **Sent now** | The portal is connected. The phone sends the values at once. |
+| **Offline. Sent when it is back.** | The phone keeps the values and sends them at the next connection. |
+| **Not connected. Not sent.** | The key changed or the device is revoked. Nothing can go to this portal. |
+
+Tick the portals. Press the button **Apply to** and the number of portals. The phone never does this on its own. Each portal keeps its own account. The values replace the preferences of the account at that portal, also when the login there is not the same. The sheet shows the other login. The sheet shows the time zone that the phone sends.
+
+### One notification for all portals
+
+The phone shows at most one notification for all items and alerts of all portals. The phone updates it in place. The summary of a portal does not make a second notification and does not make a sound. It adds one line to the same notification, for example "Production: 5 to answer · 3 waiting, oldest 6 days". The count leaves out the requests that you already closed. The line stays for 24 hours, or until the next summary of that portal. When you removed the notification, a new summary puts it on the screen again, with no sound.
 
 ### Test with the emulator
 

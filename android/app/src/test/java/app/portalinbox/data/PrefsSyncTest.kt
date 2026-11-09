@@ -132,6 +132,17 @@ class PrefsSyncTest {
     }
 
     @Test
+    fun theErrorFrameOfThePortalReachesTheRule() {
+        PrefsSync.edit(pending, server, mine)
+        val frame = app.portalinbox.proto.ServerFrames.decode(
+            """{"t":"error","code":"invalid_prefs","message":"prefs.quiet.tz: expected a zone of the database, got Europe/paris"}""",
+        ) as app.portalinbox.proto.ErrorFrame
+        val refusal = PrefsSync.onError(pending, server, frame.code, frame.message)!!
+        assertEquals("prefs.quiet.tz: expected a zone of the database, got Europe/paris", refusal.message)
+        assertNull(pending.get(server))
+    }
+
+    @Test
     fun anotherErrorKeepsTheEdit() {
         PrefsSync.edit(pending, server, mine)
         assertNull(PrefsSync.onError(pending, server, "not_enabled", "items are off"))
