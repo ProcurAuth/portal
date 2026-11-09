@@ -95,8 +95,10 @@ pub(crate) mod page_items {
 /// What the tests of the portal take from the inbox.
 #[cfg(test)]
 pub(crate) mod testing {
-    pub(crate) use super::agents_ops::AgentOp;
-    pub(crate) use super::device_items::{digest_for_test, Builder, Built};
+    pub(crate) use super::agents_ops::{AgentOp, OpError};
+    pub(crate) use super::device_items::{
+        agent_do_status, agent_frames_for_sync, digest_for_test, result_status, Builder, Built,
+    };
     pub(crate) use super::items::{owner_text_payload, Caller, Loaded, Wait};
     pub(crate) use super::items_ops::{AnswerVia, CancelBy, Cancelled, NewItem, TurnOut};
     pub(crate) use super::items_store::{Answer, Answered, Created, DigestMemo, ItemError, Items};

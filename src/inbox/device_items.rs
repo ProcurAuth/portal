@@ -556,26 +556,10 @@ pub(super) async fn agent_do(
     let Some(items) = app.items() else {
         return not_enabled(socket, session).await;
     };
-    let status = if !items.rules.agents.enabled {
-        AgentResultStatus::NotEnabled
-    } else {
-        // The parser checked which members the action has.
-        let op = match (a.op, a.name, a.into) {
-            (AgentOpKind::Rename, Some(name), None) => AgentOp::Rename { name },
-            (AgentOpKind::Allow, name, None) => AgentOp::Allow { name },
-            (AgentOpKind::Block, None, None) => AgentOp::Block,
-            (AgentOpKind::Unblock, None, None) => AgentOp::Unblock,
-            (AgentOpKind::Merge, None, Some(into)) => AgentOp::Merge { into },
-            _ => return Err(End::Protocol("agent_do")),
-        };
-        match items.agent_op(login, &a.agent_id, op, "phone").await {
-            Ok(Ok(_done)) => AgentResultStatus::Ok,
-            Ok(Err(e)) => result_status(e),
-            Err(ItemError::Degraded | ItemError::Replica) => {
-                return unavailable(socket, session).await
-            }
-            Err(e) => return Err(storage(e)),
-        }
+    let status = match agent_do_status(&items, login, &a).await {
+        Ok(status) => status,
+        Err(ItemError::Degraded | ItemError::Replica) => return unavailable(socket, session).await,
+        Err(e) => return Err(storage(e)),
     };
     log::info!(
         event = "phone_agent_do",
@@ -591,6 +575,33 @@ pub(super) async fn agent_do(
     send_msg(socket, session, &msg).await?;
     // The change wrote a message for each device: send it now.
     Ok(true)
+}
+
+/// What the engine says about an `agent_do`: the status of the frame `agent_result`. A server without the block
+/// `inbox.agents` answers `not_enabled`. A refusal changes nothing.
+pub(crate) async fn agent_do_status(
+    items: &Items<'_>,
+    login: &str,
+    a: &AgentDoMsg,
+) -> Result<AgentResultStatus, ItemError> {
+    if !items.rules.agents.enabled {
+        return Ok(AgentResultStatus::NotEnabled);
+    }
+    // The parser checked which members the action has.
+    let op = match (a.op, a.name.clone(), a.into.clone()) {
+        (AgentOpKind::Rename, Some(name), None) => AgentOp::Rename { name },
+        (AgentOpKind::Allow, name, None) => AgentOp::Allow { name },
+        (AgentOpKind::Block, None, None) => AgentOp::Block,
+        (AgentOpKind::Unblock, None, None) => AgentOp::Unblock,
+        (AgentOpKind::Merge, None, Some(into)) => AgentOp::Merge { into },
+        _ => return Ok(AgentResultStatus::BadState),
+    };
+    Ok(
+        match items.agent_op(login, &a.agent_id, op, "phone").await? {
+            Ok(_done) => AgentResultStatus::Ok,
+            Err(e) => result_status(e),
+        },
+    )
 }
 
 /// The status of the frame `agent_result` for a refusal of the engine.
@@ -719,25 +730,21 @@ pub(super) async fn refresh(
 
 /// The `agent` frames that a phone lacks, as an answer to its `sync`. The phone lists the agents that it holds with their
 /// `rev`. The server sends an agent that the phone does not list, unless it is idle or gone (`blocked`, `merged`), and an
-/// agent that the phone lists in an older `rev`, whatever its state. The frames have a new id that is in no queue.
-async fn send_agents(
+/// agent that the phone lists in an older `rev`, whatever its state. The frames have a new id that is in no queue. A
+/// portal without the block `inbox.agents` sends none.
+pub(crate) async fn agent_frames_for_sync(
     builder: &mut Builder<'_>,
-    socket: &mut Socket,
-    session: &mut Session,
     held: &[AgentRef],
-) -> Result<bool, End> {
+) -> Result<Vec<Vec<u8>>, ItemError> {
     if !builder.items.rules.agents.enabled {
-        return Ok(true);
+        return Ok(Vec::new());
     }
     let held: HashMap<&str, u64> = held.iter().map(|a| (a.agent_id.as_str(), a.rev)).collect();
-    let mut list: Vec<AgentSummary> = match builder.agents().await {
-        Ok(agents) => agents.values().cloned().collect(),
-        Err(ItemError::Degraded | ItemError::Replica) => return Ok(false),
-        Err(e) => return Err(storage(e)),
-    };
+    let mut list: Vec<AgentSummary> = builder.agents().await?.values().cloned().collect();
     list.sort_by(|a, b| {
         (a.agent.created_at, &a.agent.agent_id).cmp(&(b.agent.created_at, &b.agent.agent_id))
     });
+    let mut out = Vec::new();
     for s in list {
         let rev = u64::try_from(s.agent.rev).unwrap_or(0);
         let wanted = match held.get(s.agent.agent_id.as_str()) {
@@ -747,16 +754,15 @@ async fn send_agents(
         if !wanted {
             continue;
         }
-        match builder.agent_frame(&s, &random_id()).await {
-            Ok(Built::Frame(bytes)) => send_encoded(socket, session, &bytes).await?,
-            Ok(Built::Withdraw(why)) => {
+        match builder.agent_frame(&s, &random_id()).await? {
+            Built::Frame(bytes) => out.push(bytes),
+            Built::Withdraw(why) => {
                 log::info!(event = "agent_state_not_sent", agent.id = %s.agent.agent_id, reason = why)
             }
-            Ok(Built::Keep) | Err(ItemError::Degraded | ItemError::Replica) => {}
-            Err(e) => return Err(storage(e)),
+            Built::Keep => {}
         }
     }
-    Ok(true)
+    Ok(out)
 }
 
 /// `sync`: the phone says which items it holds open, and which agents it holds. The server sends the agents that it
@@ -773,15 +779,14 @@ pub(super) async fn sync(
         return not_enabled(socket, session).await;
     };
     // The agents come first: the phone groups the items by agent when they arrive.
-    if !send_agents(
-        &mut builder,
-        socket,
-        session,
-        agents.as_deref().unwrap_or_default(),
-    )
-    .await?
-    {
-        return unavailable(socket, session).await;
+    match agent_frames_for_sync(&mut builder, agents.as_deref().unwrap_or_default()).await {
+        Ok(frames) => {
+            for bytes in frames {
+                send_encoded(socket, session, &bytes).await?;
+            }
+        }
+        Err(ItemError::Degraded | ItemError::Replica) => return unavailable(socket, session).await,
+        Err(e) => return Err(storage(e)),
     }
     let held: HashMap<&str, u64> = open
         .iter()

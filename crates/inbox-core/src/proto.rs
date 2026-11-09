@@ -186,6 +186,13 @@ fn check_untrusted_line(text: &str, max: usize, what: &'static str) -> Result<()
     Ok(())
 }
 
+/// Whether a text is valid as a text that an agent or a client sent, in a frame: one line of 1 to `max` characters, with
+/// no control character, no format character and no line or paragraph separator. The server uses it to leave out a
+/// hint that the frame would not carry.
+pub fn is_untrusted_line(text: &str, max: usize) -> bool {
+    check_untrusted_line(text, max, "text").is_ok()
+}
+
 /// A free text of 1 to `max` characters. Control characters stay: the screen shows them.
 fn check_text(text: &str, max: usize, what: &'static str) -> Result<()> {
     let n = text.chars().count();
