@@ -51,6 +51,23 @@ object PrefsSync {
         return if (w.itemsEnabled) Action.Send(SetPrefsFrame(mine)) else Action.None
     }
 
+    /** The code of the frame `error` that answers a `set_prefs` with a value that the portal does not accept. */
+    const val INVALID_PREFS = "invalid_prefs"
+
+    /** The portal refused the last `set_prefs`. [message] is the text of the portal: a screen escapes and cuts it ([app.portalinbox.ui.PrefsForm.refusalLine]). */
+    data class Refusal(val message: String)
+
+    /**
+     * The frame `error` with the code `invalid_prefs` says the portal stored nothing. The pending edit would be sent again at
+     * each `welcome` and refused again for ever, so it goes away: the values of the portal apply. Returns the refusal, or null
+     * for any other code (`not_enabled` keeps the edit: the portal may get requests later).
+     */
+    fun onError(pending: PendingPrefs, serverId: Long, code: String, message: String): Refusal? {
+        if (code != INVALID_PREFS) return null
+        pending.clear(serverId)
+        return Refusal(message)
+    }
+
     /** The owner changed a value. The edit is pending until the server confirms it. The frame to send is returned. */
     fun edit(pending: PendingPrefs, serverId: Long, prefs: Prefs): SetPrefsFrame {
         pending.set(serverId, prefs)

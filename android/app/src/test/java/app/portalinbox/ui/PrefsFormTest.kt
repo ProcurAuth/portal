@@ -99,4 +99,39 @@ class PrefsFormTest {
         assertEquals(30, PrefsForm.minute("07:30"))
         assertEquals("07:05", PrefsForm.hhmm(7, 5))
     }
+
+    // ------------------------------------------------------------ status and texts of the settings screen
+
+    @Test
+    fun theStatusFollowsThePendingEditTheLinkAndTheRefusal() {
+        assertEquals(PrefsForm.Status.CONFIRMED, PrefsForm.status(pending = false, connected = true, refused = false))
+        assertEquals(PrefsForm.Status.WAITING, PrefsForm.status(pending = true, connected = true, refused = false))
+        assertEquals(PrefsForm.Status.WAITING_OFFLINE, PrefsForm.status(pending = true, connected = false, refused = false))
+        assertEquals(PrefsForm.Status.REFUSED, PrefsForm.status(pending = false, connected = true, refused = true))
+        // An edit after a refusal is pending again.
+        assertEquals(PrefsForm.Status.WAITING, PrefsForm.status(pending = true, connected = true, refused = true))
+    }
+
+    @Test
+    fun theRefusalOfThePortalIsOneSafeShortLine() {
+        assertEquals("prefs.quiet.tz: expected a zone, got Mars/Base", PrefsForm.refusalLine("prefs.quiet.tz: expected a zone,\n  got   Mars/Base \n"))
+        assertFalse(PrefsForm.refusalLine("ops\u202Eagent").contains('\u202E'))
+        val long = PrefsForm.refusalLine("x".repeat(500))
+        assertEquals(160, long.length)
+        assertTrue(long.endsWith("…"))
+    }
+
+    @Test
+    fun theRowsOfTheSettingsScreenSayWhatApplies() {
+        val q = QuietPrefs("22:00", "07:00", "Europe/Paris", true)
+        assertEquals("Quiet from 22:00 to 07:00", PrefsForm.quietTitle(q))
+        assertEquals("Europe/Paris. No sound. Items still arrive.", PrefsForm.quietDetail(q))
+        assertEquals("Daily at 09:00", PrefsForm.digestTitle(full.digest))
+        assertEquals("Europe/Paris", PrefsForm.digestDetail(full.digest))
+        assertEquals("Every 6 hours", PrefsForm.digestTitle(DigestPrefs(DigestMode.EVERY, null, null, 6)))
+        assertEquals("Every hour", PrefsForm.digestTitle(DigestPrefs(DigestMode.EVERY, null, null, 1)))
+        assertNull(PrefsForm.digestDetail(DigestPrefs(DigestMode.EVERY, null, null, 6)))
+        assertEquals("No summary", PrefsForm.digestTitle(DigestPrefs(DigestMode.OFF, null, null, null)))
+        assertEquals("Portal default", PrefsForm.digestTitle(null))
+    }
 }

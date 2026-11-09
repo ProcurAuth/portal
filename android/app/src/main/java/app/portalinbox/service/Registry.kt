@@ -29,6 +29,7 @@ object Registry {
     val connections = ConcurrentHashMap<Long, ServerConnection>()
     private val statuses = ConcurrentHashMap<Long, LinkStatus>()
     private val liveness = ConcurrentHashMap<Long, Liveness>()
+    private val refusals = ConcurrentHashMap<Long, String>()
     private val listeners = CopyOnWriteArraySet<() -> Unit>()
     private val main = Handler(Looper.getMainLooper())
 
@@ -58,7 +59,17 @@ object Registry {
         }
     }
 
+    /** The text of the last `invalid_prefs` of this portal, or null. It lives as long as the process: the pending edit is already gone. */
+    fun refusal(serverId: Long): String? = refusals[serverId]
+
+    /** Records the refusal of a `set_prefs` (a text), or clears it (null). */
+    fun setRefusal(serverId: Long, message: String?) {
+        if (message == null) refusals.remove(serverId) else refusals[serverId] = message
+        changed()
+    }
+
     fun forget(serverId: Long) {
+        refusals.remove(serverId)
         statuses.remove(serverId)
         liveness.remove(serverId)
         changed()

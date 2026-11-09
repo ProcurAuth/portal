@@ -144,4 +144,73 @@ class LocalRetentionTest {
         assertEquals("6 months", LocalRetention.label(180))
         assertEquals("1 year", LocalRetention.label(365))
     }
+
+    // ------------------------------------------------------------ the own value of a portal (lot MP5)
+
+    @Test
+    fun aPortalFollowsTheGlobalValueUnlessItHasItsOwn() {
+        assertEquals(30, LocalRetention.daysFor(30, null))
+        assertEquals(7, LocalRetention.daysFor(30, 7))
+        assertEquals(365, LocalRetention.daysFor(30, 365))
+        // The own value can be longer or shorter than the global one.
+        assertEquals(90, LocalRetention.daysFor(7, 90))
+    }
+
+    @Test
+    fun anOwnValueThatIsNotAnOptionIsNotReadAndTheGlobalValueApplies() {
+        assertEquals(30, LocalRetention.daysFor(30, 12))
+        assertEquals(90, LocalRetention.daysFor(90, 0))
+        assertEquals(90, LocalRetention.daysFor(90, -5))
+        // A global value that is not an option gives the default, as before.
+        assertEquals(30, LocalRetention.daysFor(12, null))
+    }
+
+    @Test
+    fun onlyNoValueOrAnOptionCanBeStoredAsTheOwnValue() {
+        assertTrue(LocalRetention.validOverride(null))
+        for (d in LocalRetention.OPTIONS_DAYS) assertTrue(LocalRetention.validOverride(d))
+        assertFalse(LocalRetention.validOverride(12))
+        assertFalse(LocalRetention.validOverride(0))
+    }
+
+    @Test
+    fun theChoicesAreSameAsAllThenTheOptions() {
+        assertEquals(listOf(null, 7, 30, 90, 180, 365), LocalRetention.overrideChoices())
+        assertEquals("Same as all (30 days)", LocalRetention.overrideLabel(null, 30))
+        assertEquals("Same as all (1 year)", LocalRetention.overrideLabel(null, 365))
+        assertEquals("90 days", LocalRetention.overrideLabel(90, 30))
+        assertEquals("1 year", LocalRetention.overrideLabel(365, 30))
+        assertEquals("Same as all (30 days)", LocalRetention.overrideLabel(12, 30))
+    }
+
+    @Test
+    fun eachPortalErasesAtItsOwnAgeAndOneOverrideDoesNotTouchTheOther() {
+        val a = open(1)
+        settle(a, 1, now)
+        val b = open(2)
+        engine.onRequest(2L, Make.approval(Make.hex(0x700), Make.hex(0x701), createdAtMs = now))
+        engine.onSettled(2L, Make.settled(Make.hex(0x700), Make.hex(0x702), "settled-answered.json", now))
+        now += 20 * day
+        // Portal 1 keeps 7 days, portal 2 follows the global 30.
+        assertEquals(1, LocalRetention.purge(repo, 1L, now, LocalRetention.daysFor(30, 7)))
+        assertEquals(0, LocalRetention.purge(repo, 2L, now, LocalRetention.daysFor(30, null)))
+        assertNull(repo.item(1L, a))
+        assertNotNull(repo.item(2L, Make.hex(0x700)))
+        assertNotNull(b)
+    }
+
+    @Test
+    fun theCountOfWhatAShorterValueWouldEraseChangesNothing() {
+        val a = open(1)
+        settle(a, 1, now)
+        val b = open(2)
+        now += 10 * day
+        settle(b, 2, now)
+        now += 10 * day
+        // At 20 and 10 days of age, 7 days would erase both, 30 none.
+        assertEquals(2, LocalRetention.wouldErase(repo, server, now, 7))
+        assertEquals(0, LocalRetention.wouldErase(repo, server, now, 30))
+        assertNotNull(repo.item(server, a))
+        assertNotNull(repo.item(server, b))
+    }
 }

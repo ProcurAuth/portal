@@ -117,4 +117,34 @@ class PrefsSyncTest {
         assertEquals(PrefsSync.Action.None, PrefsSync.onWelcome(pending, 2, welcome))
         assertEquals(mine, pending.get(1))
     }
+
+    // ------------------------------------------------------------ the portal refuses a value
+
+    @Test
+    fun aRefusedEditIsDroppedSoItIsNotSentAgainAtEachWelcome() {
+        PrefsSync.edit(pending, server, mine)
+        val refusal = PrefsSync.onError(pending, server, "invalid_prefs", "prefs.quiet.tz: unknown zone")
+        assertEquals(PrefsSync.Refusal("prefs.quiet.tz: unknown zone"), refusal)
+        assertNull(pending.get(server))
+        // The next welcome has nothing to send: the values of the portal apply.
+        assertEquals(PrefsSync.Action.None, PrefsSync.onWelcome(pending, server, welcome))
+        assertEquals(welcome.prefs, PrefsSync.effective(welcome.prefs, pending.get(server)))
+    }
+
+    @Test
+    fun anotherErrorKeepsTheEdit() {
+        PrefsSync.edit(pending, server, mine)
+        assertNull(PrefsSync.onError(pending, server, "not_enabled", "items are off"))
+        assertNull(PrefsSync.onError(pending, server, "unavailable", "later"))
+        assertEquals(mine, pending.get(server))
+    }
+
+    @Test
+    fun aRefusalDropsTheEditOfThatPortalOnly() {
+        pending.set(1, mine)
+        pending.set(2, mine)
+        PrefsSync.onError(pending, 1, "invalid_prefs", "x")
+        assertNull(pending.get(1))
+        assertEquals(mine, pending.get(2))
+    }
 }
