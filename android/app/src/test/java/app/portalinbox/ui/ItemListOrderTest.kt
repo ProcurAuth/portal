@@ -108,7 +108,7 @@ class ItemListOrderTest {
         val r = ItemListOrder.row(approval(1, t0), now)
         assertEquals(ItemListOrder.Chip.APPROVAL, r.chip)
         assertEquals("ClickHouse write", r.title)
-        assertEquals("claude-laptop · datastore", r.subtitle)
+        assertEquals("Billing bot · datastore", r.subtitle)
         assertEquals("6 d", r.age)
         assertEquals("K7QF", r.code)
         assertEquals("Asked 6 d ago · agent active 6 d ago", r.detail)

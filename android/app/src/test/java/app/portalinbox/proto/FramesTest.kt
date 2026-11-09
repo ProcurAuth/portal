@@ -59,11 +59,14 @@ class FramesTest {
     @Test
     fun theGoldenFilesCoverEveryFrameInBothDirections() {
         assertEquals(
-            setOf("welcome", "alert", "request", "message", "settled", "digest", "answer_result", "subscriptions", "pong", "error"),
+            setOf(
+                "welcome", "alert", "request", "message", "settled", "digest", "answer_result", "agent", "agent_result",
+                "subscriptions", "pong", "error",
+            ),
             Fixtures.frames("server").map { it.tag }.toSet(),
         )
         assertEquals(
-            setOf("ready", "ack", "subscribe", "unsubscribe", "ping", "answer", "reply", "refresh", "sync", "set_prefs"),
+            setOf("ready", "ack", "subscribe", "unsubscribe", "ping", "answer", "reply", "refresh", "sync", "set_prefs", "agent_do"),
             Fixtures.frames("client").map { it.tag }.toSet(),
         )
         assertTrue(Fixtures.frames("invalid/server").map { it.tag }.toSet().size >= 7)
@@ -77,7 +80,14 @@ class FramesTest {
         assertEquals("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", r.requestId)
         assertEquals("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", r.id)
         assertEquals(0L, r.seq)
-        assertEquals(Sender("claude-laptop", "claude-laptop", "alice", Via.MCP, Interaction.CONVERSATIONAL), r.from)
+        assertEquals(
+            Sender(
+                "Billing bot", "claude-laptop", "alice", Via.MCP, Interaction.CONVERSATIONAL,
+                "a1".repeat(16), AgentKind.AGENT, AgentState.KNOWN,
+            ),
+            r.from,
+        )
+        assertEquals("billing-bot", r.agentLabel)
         assertEquals(Urgency.HIGH, r.urgency)
         assertFalse(r.quiet)
         assertEquals(LeaseMode.LEASE, r.leaseMode)
@@ -645,5 +655,374 @@ class FramesTest {
         val bytes = StrictJson.compact(json).toByteArray()
         assertTrue("${bytes.size} bytes", bytes.size <= MAX_PLAINTEXT)
         ServerFrames.decode(bytes)
+    }
+
+    // ------------------------------------------------------------ agents (lot G2)
+
+    private fun server(name: String): JSONObject = Fixtures.golden("server", name).json
+
+    private fun client(name: String): JSONObject = Fixtures.golden("client", name).json
+
+    private fun String.hex(): String = repeat(16)
+
+    @Test
+    fun theRequestFromHasTheAgentMembersAndRefusesUnknown() {
+        val form = Fixtures.server("request-question-form.json") as RequestFrame
+        assertEquals(
+            Sender("claude-laptop #4", "claude-laptop", "alice", Via.MCP, Interaction.CONVERSATIONAL, "d4".hex(), AgentKind.AGENT, AgentState.NEW),
+            form.from,
+        )
+        assertEquals("billing-bot", form.agentLabel)
+        val bucket = Fixtures.server("request-question-confirm-one-shot.json") as RequestFrame
+        assertEquals(AgentKind.BUCKET, bucket.from.agentKind)
+        assertEquals(AgentState.KNOWN, bucket.from.agentState)
+        assertNull(bucket.agentLabel)
+        val base = server("request-approval.json")
+        // Each new member of `from` is mandatory.
+        for (key in listOf("agent_id", "agent_kind", "agent_state")) {
+            val v = server("request-approval.json")
+            v.getJSONObject("from").remove(key)
+            assertFalse("from without $key", decodes(v))
+        }
+        // `agent_label` is optional, and a null is an absent member.
+        assertTrue(decodes(JSONObject(base.toString()).also { it.remove("agent_label") }))
+        assertTrue(decodes(JSONObject(base.toString()).put("agent_label", JSONObject.NULL)))
+        // An open request has no `blocked` or `merged` agent, and a bucket is `known`.
+        for (state in listOf("blocked", "merged")) {
+            assertFalse(state, decodes(server("request-approval.json").also { it.getJSONObject("from").put("agent_state", state) }))
+        }
+        val asBucket = server("request-approval.json").also { it.getJSONObject("from").put("agent_kind", "bucket") }
+        assertTrue(decodes(asBucket))
+        assertFalse(decodes(asBucket.also { it.getJSONObject("from").put("agent_state", "new") }))
+        assertFalse(decodes(server("request-approval.json").also { it.getJSONObject("from").put("agent_id", "A1".hex()) }))
+    }
+
+    @Test
+    fun theTextThatAnAgentSaysIsOneLineWithoutHiddenCharacters() {
+        fun ok(text: String): Boolean = decodes(server("request-approval.json").put("agent_label", text))
+        assertTrue(ok("x"))
+        assertTrue(ok("x".repeat(64)))
+        assertTrue(ok("é".repeat(64)))
+        assertTrue("a character outside the BMP counts once", ok("😀".repeat(64)))
+        assertFalse(ok(""))
+        assertFalse(ok("x".repeat(65)))
+        assertFalse(ok("😀".repeat(65)))
+        for (bad in listOf("a\nb", "a\rb", "a\tb", "a\u0007b", "a\u0000b", "a\u0085b", "a\u202eb", "a\u2066b", "a\u200bb", "a\u200db", "a\ufeffb", "a\u00adb", "a\u2028b", "a\u2029b", "a\udb40\udc41b")) {
+            assertFalse("agent_label ${bad.map { it.code }}", ok(bad))
+        }
+        assertTrue(ok("billing bot"))
+        assertTrue(ok("billing-bot "))
+        assertFalse(decodes(server("request-approval.json").put("agent_label", 7)))
+        // The check of a character of the class Cf is the list of the core crate.
+        for (cp in listOf(0xAD, 0x200B, 0x200D, 0x200E, 0x202E, 0x2060, 0x2066, 0xFEFF, 0xE0001)) assertTrue(cp.toString(16), Check.isFormatChar(cp))
+        for (cp in listOf('a'.code, ' '.code, 0xE9, '-'.code, 0xB7, 0x2028, '\n'.code, 0x4E2D)) assertFalse(cp.toString(16), Check.isFormatChar(cp))
+    }
+
+    @Test
+    fun theAgentFramesReadToTheTypedValues() {
+        val a = Fixtures.server("agent-new.json") as AgentFrame
+        assertEquals(Triple(3L, AgentKind.AGENT, AgentState.NEW), Triple(a.rev, a.kind, a.state))
+        assertTrue(a.lockAccept && !a.named)
+        assertEquals("claude-laptop #4", a.label)
+        assertEquals("claude-laptop", a.keyName)
+        assertEquals(1L, a.open)
+        assertEquals(Observed("billing-bot", 1, "claude-code/2.1.0", "claude-code/2.1.0 (linux; x64)", "203.0.113.0/24", 2), a.observed)
+        assertEquals(Similar("a1".hex(), "Billing bot"), a.similar)
+        val known = Fixtures.server("agent-known.json") as AgentFrame
+        assertEquals(Observed(null, null, "claude-code/2.1.0", null, null, 1), known.observed)
+        assertTrue(known.named && !known.lockAccept)
+        assertNull(known.similar)
+        assertEquals(AgentState.BLOCKED, (Fixtures.server("agent-blocked.json") as AgentFrame).state)
+        val merged = Fixtures.server("agent-merged.json") as AgentFrame
+        assertEquals(AgentState.MERGED, merged.state)
+        assertEquals("a1".hex(), merged.mergedInto)
+        val bucket = Fixtures.server("agent-bucket.json") as AgentFrame
+        assertEquals(Triple(AgentKind.BUCKET, AgentState.KNOWN, null), Triple(bucket.kind, bucket.state, bucket.observed))
+        assertEquals("Unattributed · claude-laptop", bucket.label)
+        val r = Fixtures.server("agent-result.json") as AgentResultFrame
+        assertEquals(AgentResultStatus.OK, r.status)
+        assertEquals("m-0010", r.clientMsgId)
+        assertEquals(AgentResultStatus.NAME_TAKEN, (Fixtures.server("agent-result-name-taken.json") as AgentResultFrame).status)
+        val locked = Fixtures.server("answer-result-agent-locked.json") as AnswerResultFrame
+        assertEquals(AnswerStatus.AGENT_LOCKED, locked.status)
+        assertEquals(ItemState.PENDING, locked.state)
+    }
+
+    @Test
+    fun theAgentFrameRulesAndLimitsAreExact() {
+        val base = "agent-new.json"
+        fun ok(f: (JSONObject) -> Unit): Boolean = decodes(server(base).also(f))
+        // The mandatory members, and the two optional ones.
+        for (key in listOf("id", "agent_id", "rev", "key_name", "kind", "state", "label", "named", "created_at_ms", "last_seen_ms", "open", "lock_accept")) {
+            assertFalse("without $key", ok { it.remove(key) })
+        }
+        assertTrue(ok { it.remove("observed") })
+        assertTrue(ok { it.remove("similar") })
+        assertTrue(ok { it.put("observed", JSONObject().put("nets_seen", 0)) })
+        assertFalse(ok { it.put("observed", JSONObject()) })
+        // The texts count characters, not bytes, and refuse a hidden character.
+        for ((name, max) in listOf("says" to 64, "client" to 64, "user_agent" to 128, "net" to 43)) {
+            assertTrue("$name at the limit", ok { it.getJSONObject("observed").put(name, "é".repeat(max)) })
+            assertFalse("$name above the limit", ok { it.getJSONObject("observed").put(name, "é".repeat(max + 1)) })
+            assertFalse("$name empty", ok { it.getJSONObject("observed").put(name, "") })
+            assertFalse("$name bidi", ok { it.getJSONObject("observed").put(name, "a\u202eb") })
+            assertFalse("$name zero width", ok { it.getJSONObject("observed").put(name, "a\u200bb") })
+            assertFalse("$name line end", ok { it.getJSONObject("observed").put(name, "a\nb") })
+            assertFalse("$name as a number", ok { it.getJSONObject("observed").put(name, 7) })
+        }
+        for (name in listOf("label", "key_name")) {
+            assertTrue(ok { it.put(name, "é".repeat(64)) })
+            assertFalse(ok { it.put(name, "é".repeat(65)) })
+            assertFalse(ok { it.put(name, "") })
+        }
+        assertFalse(ok { it.getJSONObject("similar").put("label", "é".repeat(65)) })
+        // `nets_seen` is 0 to 8. `says_changed` is 1 or more, and needs `says`.
+        for (n in 0..8) assertTrue("$n", ok { it.getJSONObject("observed").put("nets_seen", n) })
+        for (bad in listOf<Any>(9, -1, 256, 1.5, "2")) assertFalse("$bad", ok { it.getJSONObject("observed").put("nets_seen", bad) })
+        assertTrue(ok { it.getJSONObject("observed").put("says_changed", 4294967295L) })
+        assertFalse(ok { it.getJSONObject("observed").put("says_changed", 0) })
+        assertFalse(ok { it.getJSONObject("observed").put("says_changed", 4294967296L) })
+        assertFalse(ok { it.getJSONObject("observed").remove("says") })
+        // `rev` is 1 to the largest signed 64-bit integer.
+        assertTrue(ok { it.put("rev", 1) })
+        assertTrue(ok { it.put("rev", Long.MAX_VALUE) })
+        assertFalse(ok { it.put("rev", 0) })
+        assertFalse(ok { it.put("rev", -1) })
+        assertFalse(decodes(JSONObject(StrictJson.compact(server(base)).replace(Regex("\"rev\":3"), "\"rev\":9223372036854775808"))))
+        assertFalse(ok { it.put("rev", 1.5) })
+        // `open` is a u32. The times are 0 or more.
+        assertTrue(ok { it.put("open", 4294967295L) })
+        assertFalse(ok { it.put("open", 4294967296L) })
+        assertFalse(ok { it.put("open", -1) })
+        assertTrue(ok { it.put("last_seen_ms", 0) })
+        assertFalse(ok { it.put("last_seen_ms", -1) })
+        assertFalse(ok { it.put("created_at_ms", -1) })
+        // The states. `merged` needs its target and only `merged` has one. `lock_accept` and `similar` go with `new` only.
+        val known = "agent-known.json"
+        fun okKnown(f: (JSONObject) -> Unit): Boolean = decodes(server(known).also(f))
+        assertTrue(okKnown { it.put("state", "blocked") })
+        assertFalse(okKnown { it.put("state", "merged") })
+        assertTrue(okKnown { it.put("state", "merged").put("merged_into", "c".repeat(32)) })
+        assertFalse(okKnown { it.put("state", "merged").put("merged_into", it.getString("agent_id")) })
+        assertFalse(okKnown { it.put("merged_into", "c".repeat(32)) })
+        assertFalse(okKnown { it.put("lock_accept", true) })
+        assertFalse(okKnown { it.put("similar", JSONObject().put("agent_id", "d4".hex()).put("label", "x")) })
+        assertFalse(ok { it.getJSONObject("similar").put("agent_id", it.getString("agent_id")) })
+        assertTrue(ok { it.put("lock_accept", false) })
+        // The bucket is `known`, has no name, no hints and no lock.
+        val bucket = "agent-bucket.json"
+        fun okBucket(f: (JSONObject) -> Unit): Boolean = decodes(server(bucket).also(f))
+        assertTrue(okBucket { })
+        assertFalse(okBucket { it.put("state", "new") })
+        assertFalse(okBucket { it.put("state", "blocked") })
+        assertFalse(okBucket { it.put("named", true) })
+        assertFalse(okBucket { it.put("observed", JSONObject().put("nets_seen", 0)) })
+        assertFalse(okBucket { it.put("merged_into", "c".repeat(32)) })
+        // The value of each closed list.
+        for (state in listOf("new", "known", "blocked")) assertTrue(state, okKnown { it.put("state", state).remove("lock_accept").also { _ -> it.put("lock_accept", false) } })
+        for (bad in listOf("gone", "New", "")) assertFalse(bad, ok { it.put("state", bad) })
+        for (bad in listOf("robot", "Agent", "")) assertFalse(bad, ok { it.put("kind", bad) })
+    }
+
+    @Test
+    fun theAgentResultStatusIsClosedAndTheFrameHasNoDeliveryId() {
+        val base = "agent-result.json"
+        for (status in AgentResultStatus.entries) {
+            val f = ServerFrames.decode(StrictJson.compact(server(base).put("status", status.wire))) as AgentResultFrame
+            assertEquals(status, f.status)
+        }
+        assertEquals(
+            listOf("ok", "not_found", "invalid_name", "name_taken", "bad_state", "cross_key", "not_enabled"),
+            AgentResultStatus.entries.map { it.wire },
+        )
+        for (bad in listOf("", "OK", "Ok", "done", "agent_locked", "accepted", "not-found", "unknown")) {
+            assertFalse(bad, decodes(server(base).put("status", bad)))
+        }
+        assertFalse(decodes(server(base).put("state", "known")))
+        assertFalse(decodes(server(base).put("id", "a".repeat(32))))
+        assertFalse(decodes(server(base).put("agent_id", "abc")))
+        assertFalse(decodes(server(base).put("client_msg_id", "")))
+        assertFalse(decodes(server(base).also { it.remove("agent_id") }))
+        // `agent_locked` is a status of an answer, and not of an agent result.
+        assertTrue(AnswerStatus.entries.any { it.wire == "agent_locked" })
+    }
+
+    @Test
+    fun agentDoHasFiveOpsAndEachTakesItsMembers() {
+        val a = "d4".hex()
+        val to = "a1".hex()
+        fun ok(op: String, vararg extra: Pair<String, Any>): Boolean = try {
+            val o = JSONObject().put("t", "agent_do").put("agent_id", a).put("client_msg_id", "m-0010").put("op", op)
+            for ((k, v) in extra) o.put(k, v)
+            ClientFrames.decode(StrictJson.compact(o))
+            true
+        } catch (e: FrameException) {
+            false
+        }
+        assertTrue(ok("rename", "name" to "Refund cleaner"))
+        assertTrue(ok("allow"))
+        assertTrue(ok("allow", "name" to "Refund cleaner"))
+        assertTrue(ok("block"))
+        assertTrue(ok("unblock"))
+        assertTrue(ok("merge", "into" to to))
+        assertTrue("a merge into the agent itself is well formed: the server answers bad_state", ok("merge", "into" to a))
+        assertFalse(ok("rename"))
+        assertFalse(ok("rename", "name" to "x", "into" to to))
+        assertFalse(ok("allow", "into" to to))
+        assertFalse(ok("block", "name" to "x"))
+        assertFalse(ok("block", "into" to to))
+        assertFalse(ok("unblock", "name" to "x"))
+        assertFalse(ok("merge"))
+        assertFalse(ok("merge", "name" to "x", "into" to to))
+        assertFalse(ok("merge", "into" to "A1".hex()))
+        assertFalse(ok("merge", "into" to "a1"))
+        for (bad in listOf("delete", "Rename", "")) assertFalse(bad, ok(bad))
+        // The name has 1 to 32 characters, with no NUL. The other rules of a name are the rules of the server.
+        for (op in listOf("rename", "allow")) {
+            assertTrue(ok(op, "name" to "n"))
+            assertTrue(ok(op, "name" to "n".repeat(32)))
+            assertTrue("characters, not bytes", ok(op, "name" to "é".repeat(32)))
+            assertTrue(ok(op, "name" to "😀".repeat(32)))
+            assertFalse(ok(op, "name" to "n".repeat(33)))
+            assertFalse(ok(op, "name" to "é".repeat(33)))
+            assertFalse(ok(op, "name" to ""))
+            assertFalse(ok(op, "name" to "a\u0000b"))
+            assertFalse(ok(op, "name" to 7))
+            assertTrue(ok(op, "name" to "a\u202eb"))
+            assertTrue(ok(op, "name" to " padded "))
+        }
+        assertTrue(ok("allow", "name" to JSONObject.NULL, "into" to JSONObject.NULL))
+        // `client_msg_id` follows the rule of `answer`.
+        for ((id, valid) in listOf("m" to true, "M-1_z" to true, "m".repeat(64) to true, "" to false, "m".repeat(65) to false, "a b" to false, "a/b" to false)) {
+            val o = client("agent-do-block.json").put("client_msg_id", id)
+            assertEquals(id, valid, try { ClientFrames.decode(StrictJson.compact(o)); true } catch (e: FrameException) { false })
+        }
+        // The typed value, and the writer refuses what the reader refuses.
+        val f = ClientFrames.decode(Fixtures.golden("client", "agent-do-merge.json").text)
+        assertEquals(AgentDoFrame(a, "m-0010", AgentOp.MERGE, null, to), f)
+        assertEquals(f, ClientFrames.decode(ClientFrames.encode(f)))
+        refused { ClientFrames.encode(AgentDoFrame(a, "m-1", AgentOp.RENAME)) }
+        refused { ClientFrames.encode(AgentDoFrame(a, "m-1", AgentOp.BLOCK, name = "x")) }
+        refused { ClientFrames.encode(AgentDoFrame(a, "m-1", AgentOp.MERGE)) }
+        refused { ClientFrames.encode(AgentDoFrame(a, "", AgentOp.BLOCK)) }
+        refused { ClientFrames.encode(AgentDoFrame("abc", "m-1", AgentOp.BLOCK)) }
+        refused { ClientFrames.encode(AgentDoFrame(a, "m-1", AgentOp.RENAME, name = "n".repeat(33))) }
+        assertNotNull(ClientFrames.encode(AgentDoFrame(a, "m-1", AgentOp.ALLOW, name = "Refund cleaner")))
+        assertFalse(decodesClient(client("agent-do-block.json").put("force", true)))
+    }
+
+    private fun decodesClient(frame: JSONObject): Boolean = try {
+        ClientFrames.decode(StrictJson.compact(frame))
+        true
+    } catch (e: FrameException) {
+        false
+    }
+
+    @Test
+    fun syncHasTheAgentsThatTheDeviceHoldsAndTheLimitsAreExact() {
+        val item = "bb".hex()
+        val a1 = "a1".hex()
+        val a2 = "d4".hex()
+        fun wire(agents: Any?): JSONObject {
+            val o = JSONObject().put("t", "sync").put("open", JSONArray().put(JSONObject().put("request_id", item).put("seq", 2)))
+            if (agents != null) o.put("agents", agents)
+            return o
+        }
+        fun entry(id: String, rev: Any) = JSONObject().put("agent_id", id).put("rev", rev)
+        // Absent, null and empty: the device holds no agent. An absent list and an empty list read back as they came.
+        assertTrue(decodesClient(wire(null)))
+        assertTrue(decodesClient(wire(JSONArray())))
+        assertTrue(decodesClient(wire(null).put("agents", JSONObject.NULL)))
+        assertNull((ClientFrames.decode(StrictJson.compact(wire(null))) as SyncFrame).agents)
+        assertEquals(emptyList<AgentRef>(), (ClientFrames.decode(StrictJson.compact(wire(JSONArray()))) as SyncFrame).agents)
+        assertTrue(decodesClient(wire(JSONArray().put(entry(a1, 1)).put(entry(a2, Long.MAX_VALUE)))))
+        for (bad in listOf<Any>(
+            JSONArray().put(entry(a1, 0)), JSONArray().put(entry(a1, -1)), JSONArray().put(JSONObject().put("agent_id", a1)),
+            JSONArray().put(JSONObject().put("rev", 1)), JSONArray().put(entry("A1".hex(), 1)), JSONArray().put(entry(a1, 1).put("zz", 1)),
+            JSONArray().put(entry(a1, 1)).put(entry(a1, 2)), JSONObject(), "a1",
+        )) {
+            assertFalse("$bad", decodesClient(wire(bad)))
+        }
+        assertFalse(decodesClient(wire(JSONArray().put(entry(a1, 1.5)))))
+        // At most 200 entries.
+        fun list(n: Int) = JSONArray().also { l -> for (i in 1..n) l.put(entry("%032x".format(i), 1)) }
+        assertTrue(decodesClient(wire(list(MAX_SYNC_AGENTS))))
+        assertFalse(decodesClient(wire(list(MAX_SYNC_AGENTS + 1))))
+        // The most items and the most agents together fit in one Noise message, and the writer refuses one more of each.
+        val full = SyncFrame(
+            List(MAX_SYNC_ENTRIES) { OpenRef(item, Long.MAX_VALUE shr 11) },
+            List(MAX_SYNC_AGENTS) { AgentRef("%032x".format(it), Long.MAX_VALUE) },
+        )
+        assertTrue(ClientFrames.encode(full).size <= MAX_PLAINTEXT)
+        refused { ClientFrames.encode(full.copy(agents = full.agents!! + AgentRef("f".repeat(32), 1))) }
+        refused { ClientFrames.encode(full.copy(open = full.open + OpenRef(item, 0))) }
+        refused { ClientFrames.encode(SyncFrame(emptyList(), listOf(AgentRef(a1, 0)))) }
+        refused { ClientFrames.encode(SyncFrame(emptyList(), listOf(AgentRef(a1, 1), AgentRef(a1, 2)))) }
+        // The golden frame.
+        val g = ClientFrames.decode(Fixtures.golden("client", "sync-agents.json").text) as SyncFrame
+        assertEquals(listOf(AgentRef(a1, 5), AgentRef(a2, 1)), g.agents)
+        assertEquals(1, g.open.size)
+    }
+
+    @Test
+    fun theAgentFixturesAreRefusedWithTheNamedRule() {
+        // The invalid frames of the agents name the rule that they break, as `agent_invalid_frames_fail_for_the_named_reason`
+        // of `inbox-core/tests/frames.rs` does. A few of each family: the full table is on the Rust side.
+        val server = mapOf(
+            "request-from-agent-state-blocked" to "from.agent_state",
+            "request-from-bucket-state-new" to "from.agent_state",
+            "request-from-agent-id-uppercase" to "from.agent_id",
+            "request-agent-label-bidi" to "request.agent_label",
+            "request-agent-label-65-chars" to "request.agent_label",
+            "agent-rev-zero" to "agent.rev",
+            "agent-merged-without-target" to "agent.merged_into",
+            "agent-lock-accept-on-known" to "agent.lock_accept",
+            "agent-bucket-named" to "agent.kind",
+            "agent-observed-says-bidi" to "agent.observed.says",
+            "agent-observed-user-agent-129-chars" to "agent.observed.user_agent",
+            "agent-observed-nets-seen-9" to "agent.observed.nets_seen",
+            "agent-observed-says-changed-zero" to "agent.observed.says_changed",
+            "agent-similar-on-known" to "agent.similar",
+            "agent-result-status-unknown" to "status",
+            "answer-result-agent-locked-uppercase" to "status",
+        )
+        for ((name, reason) in server) {
+            val e = assertThrows("$name was accepted", FrameException::class.java) {
+                ServerFrames.decode(Fixtures.golden("invalid/server", "$name.json").text)
+            }
+            assertTrue("$name: '${e.message}' does not name '$reason'", e.message!!.contains(reason))
+        }
+        val client = mapOf(
+            "agent-do-rename-without-name" to "agent_do.op",
+            "agent-do-block-with-name" to "agent_do.op",
+            "agent-do-merge-without-into" to "agent_do.op",
+            "agent-do-name-33-chars" to "agent_do.name",
+            "agent-do-name-with-nul" to "agent_do.name",
+            "agent-do-merge-into-not-hex" to "agent_do.into",
+            "agent-do-op-unknown" to "op",
+            "sync-agents-rev-zero" to "sync.agents",
+            "sync-agents-duplicate-agent" to "sync.agents",
+            "sync-agents-201-entries" to "sync.agents",
+            "sync-agents-extra-member" to "unknown member",
+        )
+        for ((name, reason) in client) {
+            val e = assertThrows("$name was accepted", FrameException::class.java) {
+                ClientFrames.decode(Fixtures.golden("invalid/client", "$name.json").text)
+            }
+            assertTrue("$name: '${e.message}' does not name '$reason'", e.message!!.contains(reason))
+        }
+    }
+
+    @Test
+    fun theLargestAgentFrameFitsOneNoiseMessage() {
+        val observed = JSONObject().put("says", "é".repeat(64)).put("says_changed", 4294967295L).put("client", "é".repeat(64))
+            .put("user_agent", "é".repeat(128)).put("net", "n".repeat(43)).put("nets_seen", 8)
+        val frame = server("agent-new.json").put("rev", Long.MAX_VALUE).put("key_name", "k".repeat(64)).put("label", "l".repeat(64))
+            .put("open", 4294967295L).put("observed", observed)
+        frame.getJSONObject("similar").put("label", "s".repeat(64))
+        val bytes = StrictJson.compact(frame).toByteArray()
+        assertTrue("${bytes.size} bytes", bytes.size <= MAX_PLAINTEXT)
+        val read = ServerFrames.decode(bytes) as AgentFrame
+        same(frame, read.toJson(), "the largest agent")
     }
 }

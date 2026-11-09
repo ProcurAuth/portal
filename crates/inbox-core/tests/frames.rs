@@ -67,6 +67,8 @@ fn the_golden_files_cover_every_frame_in_both_directions() {
         "settled",
         "digest",
         "answer_result",
+        "agent",
+        "agent_result",
         "subscriptions",
         "pong",
         "error",
@@ -85,6 +87,7 @@ fn the_golden_files_cover_every_frame_in_both_directions() {
         "refresh",
         "sync",
         "set_prefs",
+        "agent_do",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -237,6 +240,9 @@ fn max_question() -> RequestMsg {
             owner: "o".repeat(64),
             via: Via::Mcp,
             interaction: Interaction::Conversational,
+            agent_id: "a".repeat(32),
+            agent_kind: AgentKind::Agent,
+            agent_state: AgentState::New,
         },
         urgency: Urgency::High,
         quiet: true,
@@ -250,6 +256,7 @@ fn max_question() -> RequestMsg {
         allow_ask_back: true,
         supersedes: Some("c".repeat(32)),
         previous_id: Some("d".repeat(32)),
+        agent_label: Some("l".repeat(MAX_AGENT_LABEL_CHARS)),
         title: Some("t".repeat(MAX_TITLE_CHARS)),
         explanation: Some("e".repeat(MAX_EXPLANATION_CHARS)),
         explanation_format: Some(ExplanationFormat::Markdown),
@@ -280,6 +287,37 @@ fn max_question() -> RequestMsg {
         }),
         as_of_ms: Some(i64::MAX),
         approval: None,
+    }
+}
+
+/// An `agent` frame with every member at its limit. Characters of two bytes make the longest text.
+fn max_agent() -> AgentMsg {
+    AgentMsg {
+        id: "a".repeat(32),
+        agent_id: "b".repeat(32),
+        rev: i64::MAX as u64,
+        key_name: "k".repeat(MAX_AGENT_LABEL_CHARS),
+        kind: AgentKind::Agent,
+        state: AgentState::New,
+        label: "l".repeat(MAX_AGENT_LABEL_CHARS),
+        named: true,
+        merged_into: None,
+        created_at_ms: i64::MAX,
+        last_seen_ms: i64::MAX,
+        open: u32::MAX,
+        lock_accept: true,
+        observed: Some(Observed {
+            says: Some("\u{e9}".repeat(MAX_AGENT_LABEL_CHARS)),
+            says_changed: Some(u32::MAX),
+            client: Some("\u{e9}".repeat(MAX_AGENT_CLIENT_CHARS)),
+            user_agent: Some("\u{e9}".repeat(MAX_AGENT_USER_AGENT_CHARS)),
+            net: Some("n".repeat(MAX_AGENT_NET_CHARS)),
+            nets_seen: MAX_AGENT_NETS_SEEN,
+        }),
+        similar: Some(Similar {
+            agent_id: "c".repeat(32),
+            label: "s".repeat(MAX_AGENT_LABEL_CHARS),
+        }),
     }
 }
 
@@ -357,6 +395,12 @@ fn request_fits_one_noise_message_at_max_sizes() {
             oldest_created_at_ms: i64::MAX,
             ids: vec!["f".repeat(32); MAX_DIGEST_IDS],
         }),
+        ServerMsg::Agent(Box::new(max_agent())),
+        ServerMsg::AgentResult(AgentResultMsg {
+            client_msg_id: "m".repeat(64),
+            agent_id: "a".repeat(32),
+            status: AgentResultStatus::NotEnabled,
+        }),
     ];
     for frame in frames {
         let bytes = frame.encode().unwrap_or_else(|e| panic!("{e}"));
@@ -371,7 +415,13 @@ fn request_fits_one_noise_message_at_max_sizes() {
         open: (0..MAX_SYNC_ENTRIES)
             .map(|_| OpenRef { request_id: "a".repeat(32), seq: u64::MAX >> 11 })
             .collect(),
+        agents: Some(
+            (0..MAX_SYNC_AGENTS)
+                .map(|i| AgentRef { agent_id: format!("{i:032x}"), rev: i64::MAX as u64 })
+                .collect(),
+        ),
     };
+    // The most items and the most agents together fit in one Noise message.
     assert!(sync.encode().unwrap().len() <= MAX_PLAINTEXT);
     let answer = ClientMsg::Answer(AnswerMsg {
         request_id: "a".repeat(32),
@@ -385,9 +435,13 @@ fn request_fits_one_noise_message_at_max_sizes() {
     });
     assert!(answer.encode().unwrap().len() <= MAX_PLAINTEXT);
     // One more entry, one more character: refused.
-    let ClientMsg::Sync { mut open } = sync else { unreachable!() };
+    let ClientMsg::Sync { mut open, agents } = sync else { unreachable!() };
     open.push(OpenRef { request_id: "a".repeat(32), seq: 0 });
-    assert!(ClientMsg::Sync { open }.encode().is_err());
+    assert!(ClientMsg::Sync { open, agents: agents.clone() }.encode().is_err());
+    // One more agent: refused too.
+    let mut agents = agents.unwrap();
+    agents.push(AgentRef { agent_id: "f".repeat(32), rev: 1 });
+    assert!(ClientMsg::Sync { open: vec![], agents: Some(agents) }.encode().is_err());
 }
 
 #[test]
@@ -719,4 +773,784 @@ fn the_protocol_document_names_what_the_code_names() {
     assert_eq!(inbox_core::render::markdown::MAX_NODES, 2000);
     assert_eq!(inbox_core::render::markdown::MAX_DEPTH, 4);
     assert_eq!(inbox_core::render::markdown::MAX_LIST_DEPTH, 3);
+}
+
+// ---------------------------------------------------------------- agents (lot G2)
+
+fn golden(sub: &str, name: &str) -> Value {
+    files(sub).into_iter().find(|f| f.0 == name).unwrap_or_else(|| panic!("{sub}/{name}")).2
+}
+
+fn server_ok(v: &Value) -> bool {
+    ServerMsg::decode(&serde_json::to_vec(v).unwrap()).is_ok()
+}
+
+fn client_ok(v: &Value) -> bool {
+    ClientMsg::decode(&serde_json::to_vec(v).unwrap()).is_ok()
+}
+
+#[test]
+fn request_from_has_agent_members_and_refuses_unknown() {
+    let ServerMsg::Request(r) =
+        ServerMsg::decode(&std::fs::read(dir("server/request-approval.json")).unwrap()).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(r.from.label, "Billing bot");
+    assert_eq!(r.from.agent_id, "a1".repeat(16));
+    assert_eq!((r.from.agent_kind, r.from.agent_state), (AgentKind::Agent, AgentState::Known));
+    assert_eq!(r.agent_label.as_deref(), Some("billing-bot"));
+    // The text of the agent is outside `from`: a question frame has it in the same place.
+    let ServerMsg::Request(q) =
+        ServerMsg::decode(&std::fs::read(dir("server/request-question-form.json")).unwrap())
+            .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!((q.from.agent_kind, q.from.agent_state), (AgentKind::Agent, AgentState::New));
+    assert_eq!(q.from.label, "claude-laptop #4");
+    assert_eq!(q.agent_label.as_deref(), Some("billing-bot"));
+    // The bucket, in key mode: the label is the key name, and the state is `known`.
+    let ServerMsg::Request(b) = ServerMsg::decode(
+        &std::fs::read(dir("server/request-question-confirm-one-shot.json")).unwrap(),
+    )
+    .unwrap() else {
+        panic!()
+    };
+    assert_eq!((b.from.agent_kind, b.from.agent_state), (AgentKind::Bucket, AgentState::Known));
+    assert_eq!(b.agent_label, None);
+    // Each new member is mandatory in `from`, and `from` stays a closed object.
+    let base = golden("server", "request-approval.json");
+    for key in ["agent_id", "agent_kind", "agent_state"] {
+        let mut v = base.clone();
+        v["from"].as_object_mut().unwrap().remove(key);
+        assert!(!server_ok(&v), "from without {key}");
+    }
+    // `agent_label` is optional, and a null is an absent member.
+    let mut v = base.clone();
+    v.as_object_mut().unwrap().remove("agent_label");
+    assert!(server_ok(&v));
+    v["agent_label"] = Value::Null;
+    assert!(server_ok(&v));
+    // The states that an open request cannot have.
+    for state in ["blocked", "merged"] {
+        let mut v = base.clone();
+        v["from"]["agent_state"] = json!(state);
+        assert!(!server_ok(&v), "{state}");
+    }
+    // A bucket is `known`. An agent can be `new` or `known`.
+    let mut v = base.clone();
+    v["from"]["agent_kind"] = json!("bucket");
+    v["from"]["agent_state"] = json!("new");
+    assert!(!server_ok(&v));
+    v["from"]["agent_state"] = json!("known");
+    assert!(server_ok(&v));
+}
+
+#[test]
+fn agent_label_limits_are_exact_and_it_refuses_hidden_characters() {
+    let base = golden("server", "request-approval.json");
+    let with = |text: &str| {
+        let mut v = base.clone();
+        v["agent_label"] = json!(text);
+        server_ok(&v)
+    };
+    assert!(with("x"));
+    assert!(with(&"x".repeat(64)));
+    assert!(with(&"\u{e9}".repeat(64)), "a character counts once, whatever its size in bytes");
+    assert!(!with(""));
+    assert!(!with(&"x".repeat(65)));
+    assert!(!with(&"\u{e9}".repeat(65)));
+    for bad in [
+        "a\nb",
+        "a\rb",
+        "a\tb",
+        "a\u{7}b",
+        "a\u{0}b",
+        "a\u{85}b",
+        "a\u{202e}b",
+        "a\u{2066}b",
+        "a\u{200b}b",
+        "a\u{200d}b",
+        "a\u{feff}b",
+        "a\u{ad}b",
+        "a\u{2028}b",
+        "a\u{2029}b",
+        "a\u{e0041}b",
+    ] {
+        assert!(!with(bad), "{bad:?}");
+    }
+    // A space inside is a normal character. A text that equals the name of another agent is a matter for the screen.
+    assert!(with("billing bot"));
+    assert!(with("billing-bot "));
+}
+
+#[test]
+fn agent_frame_roundtrip_values_and_rules() {
+    let ServerMsg::Agent(a) =
+        ServerMsg::decode(&std::fs::read(dir("server/agent-new.json")).unwrap()).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!((a.kind, a.state, a.rev), (AgentKind::Agent, AgentState::New, 3));
+    assert!(a.lock_accept && !a.named);
+    assert_eq!(a.label, "claude-laptop #4");
+    let o = a.observed.as_ref().unwrap();
+    assert_eq!(o.says.as_deref(), Some("billing-bot"));
+    assert_eq!((o.says_changed, o.nets_seen), (Some(1), 2));
+    assert_eq!(a.similar.as_ref().unwrap().label, "Billing bot");
+    // A merged agent names its target. A blocked agent and a known agent have no other member.
+    let ServerMsg::Agent(m) =
+        ServerMsg::decode(&std::fs::read(dir("server/agent-merged.json")).unwrap()).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        (m.state, m.merged_into.as_deref()),
+        (AgentState::Merged, Some("a1".repeat(16).as_str()))
+    );
+    let ServerMsg::Agent(b) =
+        ServerMsg::decode(&std::fs::read(dir("server/agent-bucket.json")).unwrap()).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        (b.kind, b.state, b.observed.is_none()),
+        (AgentKind::Bucket, AgentState::Known, true)
+    );
+    // The members `observed`, `similar` and `merged_into` are optional. The others are mandatory.
+    let base = golden("server", "agent-new.json");
+    for key in [
+        "id",
+        "agent_id",
+        "rev",
+        "key_name",
+        "kind",
+        "state",
+        "label",
+        "named",
+        "created_at_ms",
+        "last_seen_ms",
+        "open",
+        "lock_accept",
+    ] {
+        let mut v = base.clone();
+        v.as_object_mut().unwrap().remove(key);
+        assert!(!server_ok(&v), "agent without {key}");
+    }
+    for key in ["observed", "similar"] {
+        let mut v = base.clone();
+        v.as_object_mut().unwrap().remove(key);
+        assert!(server_ok(&v), "agent without {key}");
+    }
+    // `nets_seen` is the only mandatory member of `observed`.
+    let mut v = base.clone();
+    v["observed"] = json!({"nets_seen": 0});
+    assert!(server_ok(&v));
+    v["observed"] = json!({});
+    assert!(!server_ok(&v));
+    // `lock_accept` only with `new`. `similar` only with `new`.
+    let known = golden("server", "agent-known.json");
+    let mut v = known.clone();
+    v["lock_accept"] = json!(true);
+    assert!(!server_ok(&v));
+    let mut v = known.clone();
+    v["similar"] = base["similar"].clone();
+    assert!(!server_ok(&v));
+    let mut v = base.clone();
+    v["lock_accept"] = json!(false);
+    assert!(server_ok(&v), "a new agent with the lock off: the server lets the owner approve");
+    // Every state parses, and nothing else does.
+    for state in ["new", "known", "blocked"] {
+        let mut v = known.clone();
+        v["state"] = json!(state);
+        assert!(server_ok(&v), "{state}");
+    }
+    let mut v = known.clone();
+    v["state"] = json!("merged");
+    assert!(!server_ok(&v), "merged needs merged_into");
+    v["merged_into"] = json!("c".repeat(32));
+    assert!(server_ok(&v));
+}
+
+#[test]
+fn agent_text_and_number_limits_are_exact() {
+    let base = golden("server", "agent-new.json");
+    let ok = |f: &dyn Fn(&mut Value)| {
+        let mut v = base.clone();
+        f(&mut v);
+        server_ok(&v)
+    };
+    // Characters of two bytes: the limits count characters.
+    let e = |n: usize| json!("\u{e9}".repeat(n));
+    for (name, max) in [("says", 64), ("client", 64), ("user_agent", 128), ("net", 43)] {
+        assert!(ok(&|v| v["observed"][name] = e(max)), "{name} at the limit");
+        assert!(!ok(&|v| v["observed"][name] = e(max + 1)), "{name} above the limit");
+        assert!(!ok(&|v| v["observed"][name] = json!("")), "{name} empty");
+        assert!(!ok(&|v| v["observed"][name] = json!("a\u{202e}b")), "{name} with a bidi control");
+        assert!(
+            !ok(&|v| v["observed"][name] = json!("a\u{200b}b")),
+            "{name} with a zero-width character"
+        );
+        assert!(!ok(&|v| v["observed"][name] = json!("a\nb")), "{name} with a line end");
+        assert!(!ok(&|v| v["observed"][name] = json!(7)), "{name} as a number");
+    }
+    for name in ["label", "key_name"] {
+        assert!(ok(&|v| v[name] = e(64)), "{name}");
+        assert!(!ok(&|v| v[name] = e(65)), "{name}");
+        assert!(!ok(&|v| v[name] = json!("")), "{name}");
+    }
+    assert!(ok(&|v| v["similar"]["label"] = e(64)));
+    assert!(!ok(&|v| v["similar"]["label"] = e(65)));
+    // `nets_seen` is 0 to 8. `says_changed` is 1 or more and needs `says`.
+    for n in 0..=8 {
+        assert!(ok(&|v| v["observed"]["nets_seen"] = json!(n)), "{n}");
+    }
+    for bad in [json!(9), json!(-1), json!(256), json!(1.5), json!("2")] {
+        assert!(!ok(&|v| v["observed"]["nets_seen"] = bad.clone()), "{bad}");
+    }
+    assert!(ok(&|v| v["observed"]["says_changed"] = json!(u32::MAX)));
+    assert!(!ok(&|v| v["observed"]["says_changed"] = json!(0)));
+    assert!(!ok(&|v| v["observed"]["says_changed"] = json!(u64::from(u32::MAX) + 1)));
+    assert!(!ok(&|v| {
+        v["observed"].as_object_mut().unwrap().remove("says");
+    }));
+    // `rev` is 1 to the largest signed 64-bit integer: a device that reads a signed integer reads it.
+    assert!(ok(&|v| v["rev"] = json!(1)));
+    assert!(ok(&|v| v["rev"] = json!(i64::MAX)));
+    assert!(!ok(&|v| v["rev"] = json!(0)));
+    assert!(!ok(&|v| v["rev"] = json!(i64::MAX as u64 + 1)));
+    assert!(!ok(&|v| v["rev"] = json!(-1)));
+    assert!(!ok(&|v| v["rev"] = json!(1.5)));
+    // `open` is a u32. The times are 0 or more.
+    assert!(ok(&|v| v["open"] = json!(0)));
+    assert!(ok(&|v| v["open"] = json!(u32::MAX)));
+    assert!(!ok(&|v| v["open"] = json!(u64::from(u32::MAX) + 1)));
+    assert!(!ok(&|v| v["open"] = json!(-1)));
+    assert!(ok(&|v| v["last_seen_ms"] = json!(0)));
+    assert!(!ok(&|v| v["last_seen_ms"] = json!(-1)));
+    assert!(!ok(&|v| v["created_at_ms"] = json!(-1)));
+    // A bucket has no hints, no name, no lock and is `known`.
+    let bucket = golden("server", "agent-bucket.json");
+    let bad_bucket = |f: &dyn Fn(&mut Value)| {
+        let mut v = bucket.clone();
+        f(&mut v);
+        !server_ok(&v)
+    };
+    assert!(server_ok(&bucket));
+    assert!(bad_bucket(&|v| v["state"] = json!("new")));
+    assert!(bad_bucket(&|v| v["state"] = json!("blocked")));
+    assert!(bad_bucket(&|v| v["named"] = json!(true)));
+    assert!(bad_bucket(&|v| v["observed"] = json!({"nets_seen": 0})));
+    assert!(bad_bucket(&|v| v["merged_into"] = json!("c".repeat(32))));
+}
+
+#[test]
+fn agent_do_ops_and_limits() {
+    let a = "d4".repeat(16);
+    let to = "a1".repeat(16);
+    let frame = |op: &str, extra: Value| {
+        let mut v = json!({"t": "agent_do", "agent_id": a, "client_msg_id": "m-0010", "op": op});
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    };
+    // The five ops, with the members that each one takes.
+    assert!(client_ok(&frame("rename", json!({"name": "Refund cleaner"}))));
+    assert!(client_ok(&frame("allow", json!({}))));
+    assert!(client_ok(&frame("allow", json!({"name": "Refund cleaner"}))));
+    assert!(client_ok(&frame("block", json!({}))));
+    assert!(client_ok(&frame("unblock", json!({}))));
+    assert!(client_ok(&frame("merge", json!({"into": to}))));
+    // A merge into the agent itself is well formed: the server answers `bad_state`, and the session stays open.
+    assert!(client_ok(&frame("merge", json!({"into": a}))));
+    // A member that the op does not take, and a missing member that it needs.
+    for (op, extra) in [
+        ("rename", json!({})),
+        ("rename", json!({"name": "x", "into": to})),
+        ("allow", json!({"into": to})),
+        ("allow", json!({"name": "x", "into": to})),
+        ("block", json!({"name": "x"})),
+        ("block", json!({"into": to})),
+        ("unblock", json!({"name": "x"})),
+        ("unblock", json!({"into": to})),
+        ("merge", json!({})),
+        ("merge", json!({"name": "x", "into": to})),
+        ("merge", json!({"into": "A1".repeat(16)})),
+        ("merge", json!({"into": "a1"})),
+        ("delete", json!({})),
+        ("Rename", json!({"name": "x"})),
+        ("", json!({})),
+    ] {
+        assert!(!client_ok(&frame(op, extra.clone())), "{op} {extra}");
+    }
+    // The name: 1 to 32 characters. The other rules of a name are the rules of the server (`invalid_name`).
+    for op in ["rename", "allow"] {
+        assert!(client_ok(&frame(op, json!({"name": "n"}))));
+        assert!(client_ok(&frame(op, json!({"name": "n".repeat(32)}))));
+        assert!(
+            client_ok(&frame(op, json!({"name": "\u{e9}".repeat(32)}))),
+            "{op}: characters, not bytes"
+        );
+        assert!(!client_ok(&frame(op, json!({"name": "n".repeat(33)}))));
+        assert!(!client_ok(&frame(op, json!({"name": "\u{e9}".repeat(33)}))));
+        assert!(!client_ok(&frame(op, json!({"name": ""}))));
+        assert!(!client_ok(&frame(op, json!({"name": "a\u{0}b"}))), "NUL");
+        assert!(!client_ok(&frame(op, json!({"name": 7}))));
+        // A name with a control or a format character is a matter for the server: it answers `invalid_name`.
+        assert!(client_ok(&frame(op, json!({"name": "a\u{202e}b"}))));
+        assert!(client_ok(&frame(op, json!({"name": " padded "}))));
+    }
+    // A null member is an absent member.
+    assert!(client_ok(&frame("allow", json!({"name": null, "into": null}))));
+    // `client_msg_id` follows the rule of `answer`: 1 to 64 characters of `A-Z a-z 0-9 _ -`.
+    for (id, ok) in [
+        ("m", true),
+        ("M-1_z", true),
+        ("m".repeat(64).as_str(), true),
+        ("", false),
+        ("m".repeat(65).as_str(), false),
+        ("a b", false),
+        ("a/b", false),
+    ] {
+        let mut v = frame("block", json!({}));
+        v["client_msg_id"] = json!(id);
+        assert_eq!(client_ok(&v), ok, "{id:?}");
+    }
+    for key in ["agent_id", "client_msg_id", "op"] {
+        let mut v = frame("block", json!({}));
+        v.as_object_mut().unwrap().remove(key);
+        assert!(!client_ok(&v), "without {key}");
+    }
+    let mut v = frame("block", json!({}));
+    v["force"] = json!(true);
+    assert!(!client_ok(&v));
+    // The typed value round trips.
+    let msg = ClientMsg::decode(&serde_json::to_vec(&frame("merge", json!({"into": to}))).unwrap())
+        .unwrap();
+    assert_eq!(
+        msg,
+        ClientMsg::AgentDo(AgentDoMsg {
+            agent_id: a,
+            client_msg_id: "m-0010".into(),
+            op: AgentOpKind::Merge,
+            name: None,
+            into: Some(to)
+        })
+    );
+}
+
+#[test]
+fn agent_result_status_closed() {
+    let base = golden("server", "agent-result.json");
+    let all = [
+        AgentResultStatus::Ok,
+        AgentResultStatus::NotFound,
+        AgentResultStatus::InvalidName,
+        AgentResultStatus::NameTaken,
+        AgentResultStatus::BadState,
+        AgentResultStatus::CrossKey,
+        AgentResultStatus::NotEnabled,
+    ];
+    let texts =
+        ["ok", "not_found", "invalid_name", "name_taken", "bad_state", "cross_key", "not_enabled"];
+    for (s, text) in all.iter().zip(texts) {
+        assert_eq!(s.as_str(), text);
+        let mut v = base.clone();
+        v["status"] = json!(text);
+        let ServerMsg::AgentResult(r) =
+            ServerMsg::decode(&serde_json::to_vec(&v).unwrap()).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(r.status, *s);
+    }
+    for bad in ["", "OK", "Ok", "done", "agent_locked", "accepted", "not-found", "unknown"] {
+        let mut v = base.clone();
+        v["status"] = json!(bad);
+        assert!(!server_ok(&v), "{bad:?}");
+    }
+    // The frame has no delivery id and no state: it is not in the queue and it is not acknowledged.
+    let mut v = base.clone();
+    v["state"] = json!("known");
+    assert!(!server_ok(&v));
+    let mut v = base;
+    v["id"] = json!("a".repeat(32));
+    assert!(!server_ok(&v));
+}
+
+#[test]
+fn agent_locked_is_a_status_of_an_answer() {
+    let ServerMsg::AnswerResult(r) =
+        ServerMsg::decode(&std::fs::read(dir("server/answer-result-agent-locked.json")).unwrap())
+            .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!((r.status, r.state), (AnswerStatus::AgentLocked, Some(ItemState::Pending)));
+    assert_eq!(serde_json::to_value(r.status).unwrap(), json!("agent_locked"));
+}
+
+#[test]
+fn sync_with_agents() {
+    let item = "bb".repeat(16);
+    let a1 = "a1".repeat(16);
+    let a2 = "d4".repeat(16);
+    let wire = |agents: Value| {
+        let mut v = json!({"t": "sync", "open": [{"request_id": item, "seq": 2}]});
+        if !agents.is_null() {
+            v["agents"] = agents;
+        }
+        v
+    };
+    // Absent, null and empty: the device holds no agent.
+    for ok in [wire(Value::Null), wire(json!([]))] {
+        assert!(client_ok(&ok), "{ok}");
+    }
+    let mut v = wire(Value::Null);
+    v["agents"] = Value::Null;
+    assert!(client_ok(&v));
+    // An absent list and an empty list are two spellings of one frame: each one reads back as it came.
+    let ClientMsg::Sync { agents, .. } =
+        ClientMsg::decode(&serde_json::to_vec(&wire(Value::Null)).unwrap()).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(agents, None);
+    let ClientMsg::Sync { agents, .. } =
+        ClientMsg::decode(&serde_json::to_vec(&wire(json!([]))).unwrap()).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(agents, Some(vec![]));
+    // Entries: an id, and a `rev` of 1 or more. No duplicate.
+    assert!(client_ok(&wire(
+        json!([{"agent_id": a1, "rev": 1}, {"agent_id": a2, "rev": i64::MAX}])
+    )));
+    for bad in [
+        json!([{"agent_id": a1, "rev": 0}]),
+        json!([{"agent_id": a1, "rev": -1}]),
+        json!([{"agent_id": a1, "rev": i64::MAX as u64 + 1}]),
+        json!([{"agent_id": a1}]),
+        json!([{"rev": 1}]),
+        json!([{"agent_id": "A1".repeat(16), "rev": 1}]),
+        json!([{"agent_id": a1, "rev": 1, "zz": 1}]),
+        json!([{"agent_id": a1, "rev": 1}, {"agent_id": a1, "rev": 2}]),
+        json!({}),
+        json!("a1"),
+    ] {
+        assert!(!client_ok(&wire(bad.clone())), "{bad}");
+    }
+    // At most 200 entries.
+    let list = |n: usize| -> Value {
+        (1..=n).map(|i| json!({"agent_id": format!("{i:032x}"), "rev": 1})).collect()
+    };
+    assert!(client_ok(&wire(list(200))));
+    assert!(!client_ok(&wire(list(201))));
+    // The entries of `open` keep their rules.
+    let mut v = wire(json!([]));
+    v["open"][0]["zz"] = json!(1);
+    assert!(!client_ok(&v));
+}
+
+#[test]
+fn agent_invalid_frames_fail_for_the_named_reason() {
+    // (folder, file, the rule that the error names)
+    let table: &[(&str, &str, &str)] = &[
+        ("server", "request-from-without-agent-id", "frame"),
+        ("server", "request-from-without-agent-kind", "frame"),
+        ("server", "request-from-without-agent-state", "frame"),
+        ("server", "request-from-agent-id-uppercase", "from.agent_id"),
+        ("server", "request-from-agent-id-short", "from.agent_id"),
+        ("server", "request-from-agent-kind-unknown", "frame"),
+        ("server", "request-from-agent-state-blocked", "from.agent_state"),
+        ("server", "request-from-agent-state-merged", "from.agent_state"),
+        ("server", "request-from-bucket-state-new", "from.agent_state"),
+        ("server", "request-question-from-without-agent-id", "frame"),
+        ("server", "request-agent-label-empty", "request.agent_label"),
+        ("server", "request-agent-label-65-chars", "request.agent_label"),
+        ("server", "request-agent-label-newline", "request.agent_label"),
+        ("server", "request-agent-label-bidi", "request.agent_label"),
+        ("server", "request-agent-label-zero-width", "request.agent_label"),
+        ("server", "request-agent-label-line-separator", "request.agent_label"),
+        ("server", "request-agent-label-not-a-string", "frame"),
+        ("server", "agent-without-id", "frame"),
+        ("server", "agent-without-rev", "frame"),
+        ("server", "agent-rev-zero", "agent.rev"),
+        ("server", "agent-rev-above-i64", "agent.rev"),
+        ("server", "agent-rev-negative", "frame"),
+        ("server", "agent-agent-id-not-hex", "agent.agent_id"),
+        ("server", "agent-state-unknown", "frame"),
+        ("server", "agent-state-uppercase", "frame"),
+        ("server", "agent-kind-unknown", "frame"),
+        ("server", "agent-label-empty", "agent.label"),
+        ("server", "agent-label-65-chars", "agent.label"),
+        ("server", "agent-label-newline", "agent.label"),
+        ("server", "agent-key-name-empty", "agent.key_name"),
+        ("server", "agent-key-name-65-chars", "agent.key_name"),
+        ("server", "agent-created-negative", "agent.created_at_ms"),
+        ("server", "agent-last-seen-negative", "agent.last_seen_ms"),
+        ("server", "agent-open-negative", "frame"),
+        ("server", "agent-open-above-u32", "frame"),
+        ("server", "agent-named-as-text", "frame"),
+        ("server", "agent-merged-without-target", "agent.merged_into"),
+        ("server", "agent-merged-into-itself", "agent.merged_into"),
+        ("server", "agent-merged-into-not-hex", "agent.merged_into"),
+        ("server", "agent-target-without-merged-state", "agent.merged_into"),
+        ("server", "agent-lock-accept-on-known", "agent.lock_accept"),
+        ("server", "agent-bucket-new", "agent.kind"),
+        ("server", "agent-bucket-named", "agent.kind"),
+        ("server", "agent-bucket-with-observed", "agent.kind"),
+        ("server", "agent-bucket-with-similar", "agent.similar"),
+        ("server", "agent-observed-says-empty", "agent.observed.says"),
+        ("server", "agent-observed-says-65-chars", "agent.observed.says"),
+        ("server", "agent-observed-says-bidi", "agent.observed.says"),
+        ("server", "agent-observed-says-newline", "agent.observed.says"),
+        ("server", "agent-observed-client-65-chars", "agent.observed.client"),
+        ("server", "agent-observed-client-control", "agent.observed.client"),
+        ("server", "agent-observed-user-agent-129-chars", "agent.observed.user_agent"),
+        ("server", "agent-observed-user-agent-zero-width", "agent.observed.user_agent"),
+        ("server", "agent-observed-net-44-chars", "agent.observed.net"),
+        ("server", "agent-observed-nets-seen-9", "agent.observed.nets_seen"),
+        ("server", "agent-observed-nets-seen-negative", "frame"),
+        ("server", "agent-observed-without-nets-seen", "frame"),
+        ("server", "agent-observed-says-changed-zero", "agent.observed.says_changed"),
+        ("server", "agent-observed-says-changed-without-says", "agent.observed.says_changed"),
+        ("server", "agent-observed-says-changed-as-text", "frame"),
+        ("server", "agent-similar-on-known", "agent.similar"),
+        ("server", "agent-similar-itself", "agent.similar"),
+        ("server", "agent-similar-label-empty", "agent.similar"),
+        ("server", "agent-similar-without-label", "frame"),
+        ("server", "agent-result-status-unknown", "frame"),
+        ("server", "agent-result-status-uppercase", "frame"),
+        ("server", "agent-result-without-agent-id", "frame"),
+        ("server", "agent-result-agent-id-short", "agent_result.agent_id"),
+        ("server", "agent-result-client-msg-id-empty", "client_msg_id"),
+        ("server", "agent-result-with-id", "frame"),
+        ("server", "answer-result-agent-locked-uppercase", "frame"),
+        ("client", "agent-do-without-agent-id", "frame"),
+        ("client", "agent-do-agent-id-short", "agent_do.agent_id"),
+        ("client", "agent-do-client-msg-id-empty", "client_msg_id"),
+        ("client", "agent-do-client-msg-id-65-chars", "client_msg_id"),
+        ("client", "agent-do-without-op", "frame"),
+        ("client", "agent-do-op-unknown", "frame"),
+        ("client", "agent-do-op-uppercase", "frame"),
+        ("client", "agent-do-rename-without-name", "agent_do.op"),
+        ("client", "agent-do-rename-with-into", "agent_do.op"),
+        ("client", "agent-do-name-empty", "agent_do.name"),
+        ("client", "agent-do-name-33-chars", "agent_do.name"),
+        ("client", "agent-do-name-with-nul", "agent_do.name"),
+        ("client", "agent-do-name-as-number", "frame"),
+        ("client", "agent-do-allow-with-into", "agent_do.op"),
+        ("client", "agent-do-allow-name-33-chars", "agent_do.name"),
+        ("client", "agent-do-block-with-name", "agent_do.op"),
+        ("client", "agent-do-block-with-into", "agent_do.op"),
+        ("client", "agent-do-unblock-with-name", "agent_do.op"),
+        ("client", "agent-do-merge-without-into", "agent_do.op"),
+        ("client", "agent-do-merge-with-name", "agent_do.op"),
+        ("client", "agent-do-merge-into-not-hex", "agent_do.into"),
+        ("client", "agent-do-unknown-member", "frame"),
+        ("client", "sync-agents-bad-id", "sync.agents"),
+        ("client", "sync-agents-rev-zero", "sync.agents"),
+        ("client", "sync-agents-rev-negative", "frame"),
+        ("client", "sync-agents-without-rev", "frame"),
+        ("client", "sync-agents-duplicate-agent", "sync.agents"),
+        ("client", "sync-agents-extra-member", "frame"),
+        ("client", "sync-agents-not-a-list", "frame"),
+        ("client", "sync-agents-201-entries", "sync.agents"),
+    ];
+    for (side, name, rule) in table {
+        let path = dir(&format!("invalid/{side}/{name}.json"));
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let err = if *side == "server" {
+            ServerMsg::decode(&bytes).err()
+        } else {
+            ClientMsg::decode(&bytes).err()
+        }
+        .unwrap_or_else(|| panic!("{name} was accepted"))
+        .to_string();
+        assert!(err.contains(rule), "{name}: the error is '{err}', expected '{rule}'");
+    }
+    // Each file of the agents is in the table: a new file without a named reason does not pass unseen.
+    let listed: BTreeSet<String> = table.iter().map(|(s, n, _)| format!("{s}/{n}")).collect();
+    for side in ["server", "client"] {
+        for (name, _, _) in files(&format!("invalid/{side}")) {
+            let stem = name.trim_end_matches(".json");
+            let is_agent = stem.starts_with("agent")
+                || stem.starts_with("request-from-")
+                || stem.starts_with("request-agent-")
+                || stem.starts_with("sync-agents")
+                || stem == "request-question-from-without-agent-id"
+                || stem == "answer-result-agent-locked-uppercase";
+            if is_agent {
+                assert!(
+                    listed.contains(&format!("{side}/{stem}")),
+                    "{side}/{stem} has no named reason"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn every_agent_frame_rejects_a_duplicate_member() {
+    for name in ["agent-new.json", "agent-result.json"] {
+        let text = std::fs::read_to_string(dir(&format!("server/{name}"))).unwrap();
+        // Repeat the line of `agent_id`.
+        let line = text.lines().find(|l| l.contains("\"agent_id\"")).unwrap().to_string();
+        let dup = text.replacen(&line, &format!("{line}\n{line}"), 1);
+        assert_ne!(dup, text);
+        assert!(ServerMsg::decode(dup.as_bytes()).is_err(), "{name}");
+    }
+    let text = std::fs::read_to_string(dir("client/agent-do-rename.json")).unwrap();
+    let dup = text.replacen("\"op\": \"rename\"", "\"op\": \"rename\", \"op\": \"rename\"", 1);
+    assert_ne!(dup, text);
+    assert!(ClientMsg::decode(dup.as_bytes()).is_err());
+}
+
+#[test]
+fn the_format_characters_are_the_class_cf_of_unicode() {
+    // The list of the core is the list that the server uses to refuse a name: one function, one answer.
+    for c in [
+        '\u{ad}',
+        '\u{200b}',
+        '\u{200d}',
+        '\u{200e}',
+        '\u{202e}',
+        '\u{2060}',
+        '\u{2066}',
+        '\u{feff}',
+        '\u{e0001}',
+    ] {
+        assert!(is_format_char(c), "{c:?}");
+    }
+    for c in ['a', ' ', '\u{e9}', '-', '\u{b7}', '\u{2028}', '\n', '\u{4e2d}'] {
+        assert!(!is_format_char(c), "{c:?}");
+    }
+}
+
+#[test]
+fn the_protocol_document_names_the_agent_members_and_its_examples_read_with_the_code() {
+    let doc = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/inbox/protocol.md"),
+    )
+    .expect("protocol.md");
+    // The limits of the text of an agent, in the order of the table of the document.
+    for (text, n) in [
+        ("at most 200 entries", MAX_SYNC_AGENTS),
+        ("1 to 32 characters, with no NUL", MAX_AGENT_NAME_CHARS),
+        ("with 1 to 64 characters", MAX_AGENT_CLIENT_CHARS),
+        ("with 1 to 128 characters", MAX_AGENT_USER_AGENT_CHARS),
+        ("with 1 to 43 characters", MAX_AGENT_NET_CHARS),
+        ("1 to 64 characters, one line", MAX_AGENT_LABEL_CHARS),
+        ("0 to 8", MAX_AGENT_NETS_SEEN as usize),
+    ] {
+        assert!(doc.contains(text), "{text}");
+        let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+        assert!(digits.contains(&n.to_string()), "{text} against {n}");
+    }
+    assert!(doc.contains("From 1 to 9223372036854775807"), "the largest rev");
+    assert_eq!(i64::MAX.to_string(), "9223372036854775807");
+    // Every value of every closed list of the agents is in the document, and the document has no other value in them.
+    for text in ["agent", "bucket", "new", "known", "blocked", "merged"] {
+        assert!(doc.contains(&format!("`{text}`")), "{text}");
+    }
+    for status in [
+        AgentResultStatus::Ok,
+        AgentResultStatus::NotFound,
+        AgentResultStatus::InvalidName,
+        AgentResultStatus::NameTaken,
+        AgentResultStatus::BadState,
+        AgentResultStatus::CrossKey,
+        AgentResultStatus::NotEnabled,
+    ] {
+        assert!(doc.contains(&format!("| `{}` |", status.as_str())), "{status:?}");
+    }
+    assert!(doc.contains("| `agent_locked` |"), "the status of an answer");
+    for op in [
+        AgentOpKind::Rename,
+        AgentOpKind::Allow,
+        AgentOpKind::Block,
+        AgentOpKind::Unblock,
+        AgentOpKind::Merge,
+    ] {
+        assert!(doc.contains(&format!("- `{}`:", op.as_str())), "{op:?}");
+    }
+    // The members of the new frames are in the document.
+    for member in [
+        "agent_id",
+        "rev",
+        "key_name",
+        "kind",
+        "state",
+        "label",
+        "named",
+        "merged_into",
+        "created_at_ms",
+        "last_seen_ms",
+        "open",
+        "lock_accept",
+        "observed",
+        "similar",
+        "says",
+        "says_changed",
+        "client",
+        "user_agent",
+        "net",
+        "nets_seen",
+        "client_msg_id",
+        "op",
+        "name",
+        "into",
+        "agent_kind",
+        "agent_state",
+        "agent_label",
+        "status",
+    ] {
+        assert!(doc.contains(&format!("`{member}`")), "{member}");
+    }
+    // The examples are frames that the parsers read, once their short ids are made whole.
+    let whole = |text: &str| -> String {
+        let mut out = String::new();
+        let mut rest = text;
+        while let Some(at) = rest.find("...\"") {
+            // `"aaaa..."`: a short id that stands for 32 hexadecimal characters.
+            let start = rest[..at].rfind('"').unwrap();
+            let hex = &rest[start + 1..at];
+            if hex.len() == 4 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                out.push_str(&rest[..start + 1]);
+                out.push_str(&hex.repeat(8));
+                out.push('"');
+            } else {
+                out.push_str(&rest[..at + 4]);
+            }
+            rest = &rest[at + 4..];
+        }
+        out.push_str(rest);
+        out
+    };
+    let example = |start: &str| -> String {
+        let at = doc.find(start).unwrap_or_else(|| panic!("no example {start}"));
+        let end = doc[at..].find("\n```").unwrap();
+        whole(&doc[at..at + end])
+    };
+    for start in [r#"{"t":"agent","#, r#"{"t":"agent_result","#] {
+        let frame = example(start);
+        ServerMsg::decode(frame.as_bytes()).unwrap_or_else(|e| panic!("{frame}: {e}"));
+    }
+    let frame = example(r#"{"t":"agent_do","#);
+    ClientMsg::decode(frame.as_bytes()).unwrap_or_else(|e| panic!("{frame}: {e}"));
+    // The example of `sync` is in a line of text: it ends at the full stop that follows it.
+    let at = doc
+        .find(r#"`{"t":"sync","open":[{"request_id":"bbbb...","seq":2}],"agents""#)
+        .expect("the example of sync");
+    let line = &doc[at + 1..];
+    let frame = whole(&line[..line.find("`.").unwrap()]);
+    let ClientMsg::Sync { open, agents } = ClientMsg::decode(frame.as_bytes()).unwrap() else {
+        panic!()
+    };
+    assert_eq!((open.len(), agents.map(|a| a.len())), (1, Some(1)));
+    // The request example keeps its form and now has the agent in `from`.
+    assert!(doc.contains(r#""from":{"label":"claude-laptop","key_name":"claude-laptop","owner":"alice","via":"mcp","interaction":"conversational","agent_id":"#));
 }

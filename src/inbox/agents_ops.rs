@@ -10,6 +10,9 @@
 //!   database is the last defence: an item cannot name an agent of another key, whatever the code does.
 //! - [`human_op`] is the core of the actions of the owner: rename, allow, block, unblock and merge. Each action
 //!   checks the owner, writes one row in `agent_events` and raises `rev`.
+//!
+//! Each change that raises `rev` also writes a message for the devices of the owner (lot G2): the phones get the frame
+//! `agent` from the queue of deliveries, with a receipt, so the notice of a new agent is not lost. See [`agent_notice`].
 
 // The channel (G1b), the phones (G2) and the web (G3) call this API in the next lots.
 #![allow(dead_code)]
@@ -23,7 +26,7 @@ use super::agents::{
     AgentState, AgentStatus, Resolved, TextError, FLOOD_ALERT_MS, SEEN_STEP_MS,
 };
 use super::db::DbError;
-use super::items::{Effects, OwnerAlert};
+use super::items::{Effects, Notice, OwnerAlert};
 use super::items_ops::{self as ops, CancelBy, Cancelled, Cx, Done, ItemTx, ListFilter, Sealed};
 use super::util::random_id;
 
@@ -108,6 +111,29 @@ pub trait AgentTx {
     ) -> impl Future<Output = Result<u64, DbError>>;
     /// Erases the agents with no item, no intent, no alias and no call since `cutoff`. The result is their number.
     fn purge_agents(&mut self, cutoff: i64) -> impl Future<Output = Result<u64, DbError>>;
+}
+
+// ---------------------------------------------------------------- the message to the phones
+
+/// Writes the message `agent` for the devices of the owner: one row of `alerts` that names the agent and its `rev`, and a
+/// delivery for each device that is not revoked. The phone gets the frame `agent` when the server sends the row. The
+/// frame holds the state of the row at that time, so a row of an older `rev` is withdrawn when a newer row waits (see
+/// `device_items.rs`). The key of the row is `<agent_id>:agent:<rev>`: two instances that write one change write one row.
+///
+/// The bucket has no message: its frame never changes, and the request of its first item carries what the phone needs.
+/// The phone gets it with `sync`. A portal without the block `inbox.agents` sends no frame of an agent.
+pub fn agent_notice(fx: &mut Effects, cx: &Cx, a: &AgentRow) {
+    if !cx.rules.agents.enabled || a.kind == AgentKind::Bucket {
+        return;
+    }
+    fx.notices.push(Notice {
+        kind: "agent",
+        request_id: a.agent_id.clone(),
+        seq: u64::try_from(a.rev).unwrap_or(1),
+        title: "Agent".into(),
+        owner: a.owner.clone(),
+        except_device: None,
+    });
 }
 
 // ---------------------------------------------------------------- the bucket and the agent of an item
@@ -458,6 +484,7 @@ pub async fn resolve<T: ItemTx>(
                 Some(&format!("ordinal={ordinal}")),
             )
             .await?;
+            agent_notice(&mut fx, cx, &row);
             Ok(Some(Outcome {
                 resolved: Resolved {
                     agent_id: row.agent_id.clone(),
@@ -476,22 +503,30 @@ pub async fn resolve<T: ItemTx>(
 
 /// Writes the sealed hints of an agent when nobody changed the row since it was read, and the events that the change
 /// raised. The result is false when the row moved: the caller drops the update, because a hint is never worth a retry.
+/// The write raises `rev`, so the phones get the frame `agent` with the new hints.
 pub async fn write_hints<T: ItemTx>(
     tx: &mut T,
     cx: &Cx,
-    agent_id: &str,
-    expected_rev: i64,
+    agent: &AgentRow,
     hints: &Sealed,
     events: &[&'static str],
-) -> Result<bool, DbError> {
-    if !tx.set_hints(agent_id, expected_rev, hints, cx.now).await? {
-        return Ok(false);
+) -> Result<Done<bool>, DbError> {
+    let mut fx = Effects::default();
+    if !tx
+        .set_hints(&agent.agent_id, agent.rev, hints, cx.now)
+        .await?
+    {
+        return ops::done(tx, cx, false, fx).await;
     }
     for event in events {
-        tx.insert_agent_event(agent_id, cx.now, event, "agent", None)
+        tx.insert_agent_event(&agent.agent_id, cx.now, event, "agent", None)
             .await?;
     }
-    Ok(true)
+    // `set_hints` raised `rev` by one.
+    let mut now = agent.clone();
+    now.rev += 1;
+    agent_notice(&mut fx, cx, &now);
+    ops::done(tx, cx, true, fx).await
 }
 
 /// The id of the agent that a creating call would get now, and nothing is written. `Some(None)` means that the call
@@ -767,7 +802,7 @@ pub async fn human_op<T: ItemTx>(
             if target.key_id != a.key_id {
                 return Ok(refuse(OpError::CrossKey));
             }
-            // The same merge again: the agent is already in the target.
+            // The same merge again: the agent is already in the target. Nothing changed, so nothing is sent.
             if a.state == AgentState::Merged && a.merged_into.as_deref() == Some(into.as_str()) {
                 out.other = Some(target);
                 return Ok(Done { value: Ok(out), fx });
@@ -808,6 +843,20 @@ pub async fn human_op<T: ItemTx>(
             out.other = Some(target);
             out.changed = true;
         }
+    }
+    // The phones of the owner see each change: one `agent` frame for the agent, and one for the target of a merge. An
+    // action that changed nothing sends nothing. The notices are written apart from the effects of the cancellations
+    // of a block: those were written already.
+    if out.changed {
+        let mut notices = Effects::default();
+        agent_notice(&mut notices, cx, &a);
+        if let Some(target) = &out.other {
+            agent_notice(&mut notices, cx, target);
+        }
+        let written = ops::done(tx, cx, (), notices).await?;
+        fx.woken.extend(written.fx.woken);
+        fx.woken.sort();
+        fx.woken.dedup();
     }
     out.agent = a;
     Ok(Done { value: Ok(out), fx })

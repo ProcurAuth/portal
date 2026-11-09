@@ -165,8 +165,9 @@ class ItemEngine(
             AnswerStatus.SUPERSEDED -> ItemState.SUPERSEDED
             AnswerStatus.EXPIRED -> ItemState.EXPIRED
             AnswerStatus.CANCELLED -> ItemState.CANCELLED
+            // `AGENT_LOCKED`: the agent is new and the server locks it. The item stays open (lot G4 shows the lock).
             AnswerStatus.CLOSED, AnswerStatus.EFFECT_MISMATCH, AnswerStatus.DEVICE_REVOKED,
-            AnswerStatus.CUSTOM_NOT_ALLOWED, AnswerStatus.ASK_BACK_NOT_ALLOWED -> null
+            AnswerStatus.CUSTOM_NOT_ALLOWED, AnswerStatus.ASK_BACK_NOT_ALLOWED, AnswerStatus.AGENT_LOCKED -> null
         }
         val state = f.state ?: byStatus
         var next = item

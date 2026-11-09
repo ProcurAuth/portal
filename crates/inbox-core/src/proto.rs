@@ -44,6 +44,20 @@ pub const MAX_FORM_TEXT_CHARS: usize = 600;
 pub const MAX_SYNC_ENTRIES: usize = 500;
 /// Maximum number of ids in a `digest` frame.
 pub const MAX_DIGEST_IDS: usize = 200;
+/// Maximum number of agents in a `sync` frame. A `sync` with the most items and the most agents fits in one Noise message.
+pub const MAX_SYNC_AGENTS: usize = 200;
+/// Maximum length of the name that the owner gives to an agent, in characters.
+pub const MAX_AGENT_NAME_CHARS: usize = 32;
+/// Maximum length of a label of the portal for an agent, of a key name and of a text that an agent says, in characters.
+pub const MAX_AGENT_LABEL_CHARS: usize = 64;
+/// Maximum length of the `client` hint of an agent, in characters.
+pub const MAX_AGENT_CLIENT_CHARS: usize = 64;
+/// Maximum length of the `user_agent` hint of an agent, in characters.
+pub const MAX_AGENT_USER_AGENT_CHARS: usize = 128;
+/// Maximum length of the `net` hint of an agent (an address range), in characters.
+pub const MAX_AGENT_NET_CHARS: usize = 43;
+/// Maximum value of `nets_seen`, the number of address ranges seen with one agent.
+pub const MAX_AGENT_NETS_SEEN: u8 = 8;
 
 /// The kind of a message.
 ///
@@ -150,6 +164,33 @@ fn check_title(text: &str) -> Result<()> {
         return bad("title");
     }
     Ok(())
+}
+
+/// Whether a character is of the class Cf (format) of Unicode: the bidirectional controls, the zero-width characters,
+/// the invisible operators and the tag characters. They make a text read in another way than it is written.
+pub fn is_format_char(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD | 0x0600..=0x0605 | 0x061C | 0x06DD | 0x070F | 0x0890..=0x0891 | 0x08E2 | 0x180E
+        | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F | 0xFEFF
+        | 0xFFF9..=0xFFFB | 0x110BD | 0x110CD | 0x13430..=0x1343F | 0x1BCA0..=0x1BCA3
+        | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F)
+}
+
+/// A text that an agent or a client sent, as a frame carries it: one line of 1 to `max` characters, with no control
+/// character, no format character and no line or paragraph separator.
+fn check_untrusted_line(text: &str, max: usize, what: &'static str) -> Result<()> {
+    check_line(text, max, what)?;
+    if text.chars().any(|c| is_format_char(c) || c == '\u{2028}' || c == '\u{2029}') {
+        return bad(what);
+    }
+    Ok(())
+}
+
+/// Whether a text is valid as a text that an agent or a client sent, in a frame: one line of 1 to `max` characters, with
+/// no control character, no format character and no line or paragraph separator. The server uses it to leave out a
+/// hint that the frame would not carry.
+pub fn is_untrusted_line(text: &str, max: usize) -> bool {
+    check_untrusted_line(text, max, "text").is_ok()
 }
 
 /// A free text of 1 to `max` characters. Control characters stay: the screen shows them.
@@ -346,11 +387,52 @@ pub enum Via {
     Api,
 }
 
+/// What an agent is. The bucket is the pseudo agent "Unattributed" of a key: the items that no agent claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentKind {
+    Agent,
+    Bucket,
+}
+
+impl AgentKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentKind::Agent => "agent",
+            AgentKind::Bucket => "bucket",
+        }
+    }
+}
+
+/// The state of an agent. The owner changes it. `new`: the call made it and the owner did not allow it yet. `known`:
+/// the owner allowed it. `blocked`: its calls are refused. `merged`: the owner moved its items to another agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentState {
+    New,
+    Known,
+    Blocked,
+    Merged,
+}
+
+impl AgentState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentState::New => "new",
+            AgentState::Known => "known",
+            AgentState::Blocked => "blocked",
+            AgentState::Merged => "merged",
+        }
+    }
+}
+
 /// Who asks. The portal computes each value. None of it is text of the agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sender {
-    /// Name to show, 1 to 64 characters, one line. The portal computes it.
+    /// Name to show, 1 to 64 characters, one line. The portal computes it: the name that the owner gave to the agent,
+    /// else the key name and the number of the agent ("ops-key #4"). For the bucket: the key name, or "Unattributed"
+    /// and the key name.
     pub label: String,
     /// Name of the key, 1 to 64 characters, one line.
     pub key_name: String,
@@ -358,6 +440,12 @@ pub struct Sender {
     pub owner: String,
     pub via: Via,
     pub interaction: Interaction,
+    /// The agent that the item belongs to: 32 hexadecimal characters. It is the key of a group. For the bucket: the id
+    /// of its row.
+    pub agent_id: String,
+    pub agent_kind: AgentKind,
+    /// `new` or `known`. An item of a `blocked` or `merged` agent is never an open request. A bucket is `known`.
+    pub agent_state: AgentState,
 }
 
 /// A command: the exact text to run or to confirm. It is plain text, shown in a fixed font.
@@ -771,6 +859,11 @@ pub struct RequestMsg {
     pub supersedes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_id: Option<String>,
+    /// What the agent says that it is. Text of the agent, not verified: 1 to 64 characters, one line, with no control
+    /// character, no format character and no line separator. It is outside `from` on purpose: nothing in `from` is
+    /// text of the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
     // Question.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -802,6 +895,17 @@ impl RequestMsg {
         check_line(&self.from.label, 64, "from.label")?;
         check_line(&self.from.key_name, 64, "from.key_name")?;
         check_line(&self.from.owner, 64, "from.owner")?;
+        check_id(&self.from.agent_id, "from.agent_id")?;
+        // The open requests of a `blocked` or a `merged` agent do not exist: the owner action cancels them or moves them.
+        // The bucket cannot be `new`.
+        match (self.from.agent_kind, self.from.agent_state) {
+            (AgentKind::Agent, AgentState::New | AgentState::Known)
+            | (AgentKind::Bucket, AgentState::Known) => {}
+            _ => return bad("from.agent_state"),
+        }
+        if let Some(label) = &self.agent_label {
+            check_untrusted_line(label, MAX_AGENT_LABEL_CHARS, "request.agent_label")?;
+        }
         check_time(self.created_at_ms, "request.created_at_ms")?;
         check_time(self.chain_created_at_ms, "request.chain_created_at_ms")?;
         check_time(self.agent_seen_at_ms, "request.agent_seen_at_ms")?;
@@ -1080,6 +1184,9 @@ pub enum AnswerStatus {
     CustomNotAllowed,
     /// The item does not allow a reply (`allow_ask_back` is false).
     AskBackNotAllowed,
+    /// The agent of the item is `new` and the server locks the new agents: the owner can decline and reply, but cannot
+    /// accept until the owner allows the agent.
+    AgentLocked,
 }
 
 /// Server to device: the result of an `answer` or of a `reply`. The device keeps the frame in
@@ -1093,6 +1200,275 @@ pub struct AnswerResultMsg {
     /// The state of the item at the time of the result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<ItemState>,
+}
+
+// ---------------------------------------------------------------- agents
+
+/// What the portal remembers of the hints of an agent. All text in it is text that a client sent: it is not verified,
+/// and anyone who holds the key can send the same text. A screen shows it in a box marked "Not verified".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Observed {
+    /// The last text that the agent said about itself (`agent_label`), 1 to 64 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub says: Option<String>,
+    /// How many times the text changed, 1 or more. Absent when it never changed. Only with `says`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub says_changed: Option<u32>,
+    /// The name of the client (`clientInfo`, else the `User-Agent`), 1 to 64 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
+    /// The `User-Agent` header, 1 to 128 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+    /// The address range of the client (`203.0.113.0/24`, or a /48 for IPv6), 1 to 43 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net: Option<String>,
+    /// The number of distinct address ranges seen with the token of the agent, 0 to 8.
+    pub nets_seen: u8,
+}
+
+impl Observed {
+    fn validate(&self) -> Result<()> {
+        if let Some(t) = &self.says {
+            check_untrusted_line(t, MAX_AGENT_LABEL_CHARS, "agent.observed.says")?;
+        }
+        match self.says_changed {
+            Some(0) => return bad("agent.observed.says_changed"),
+            Some(_) if self.says.is_none() => return bad("agent.observed.says_changed"),
+            _ => {}
+        }
+        if let Some(t) = &self.client {
+            check_untrusted_line(t, MAX_AGENT_CLIENT_CHARS, "agent.observed.client")?;
+        }
+        if let Some(t) = &self.user_agent {
+            check_untrusted_line(t, MAX_AGENT_USER_AGENT_CHARS, "agent.observed.user_agent")?;
+        }
+        if let Some(t) = &self.net {
+            check_untrusted_line(t, MAX_AGENT_NET_CHARS, "agent.observed.net")?;
+        }
+        if self.nets_seen > MAX_AGENT_NETS_SEEN {
+            return bad("agent.observed.nets_seen");
+        }
+        Ok(())
+    }
+}
+
+/// An agent of the same key that looks like a new agent: the same text, or the same client and range. It is a hint,
+/// never a merge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Similar {
+    pub agent_id: String,
+    /// The label of that agent, as for `label` of the frame, 1 to 64 characters, one line.
+    pub label: String,
+}
+
+/// Server to device: the state of one agent. The device keeps one agent for each `agent_id` and ignores a frame with a
+/// lower `rev` than the one that it holds.
+///
+/// The server sends it in the queue of deliveries (with a receipt) after each change that raises `rev`: a new agent,
+/// a change of the hints and each action of the owner. It sends it again, with a new `id` that is in no queue, as an
+/// answer to a `sync` that lacks the agent or holds it in an older `rev`. `open` and `last_seen_ms` are the values at the
+/// time that the server built the frame: they do not raise `rev`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentMsg {
+    /// Id of the delivery. The receipt `ack` names it in its field `id`.
+    pub id: String,
+    pub agent_id: String,
+    /// 1 or more. It grows at each change that a device must see.
+    pub rev: u64,
+    /// Name of the key, 1 to 64 characters, one line.
+    pub key_name: String,
+    pub kind: AgentKind,
+    pub state: AgentState,
+    /// The text of the portal for this agent: the same rules as `from.label` of a `request`. 1 to 64 characters.
+    pub label: String,
+    /// The owner gave a name to the agent. Without a name, `label` is the key name and the number of the agent.
+    pub named: bool,
+    /// With `merged` only, and then always: the agent that the items went to. The device moves its items.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_into: Option<String>,
+    pub created_at_ms: i64,
+    pub last_seen_ms: i64,
+    /// The number of open items of the agent.
+    pub open: u32,
+    /// True when the state is `new` and the server locks the new agents: the owner cannot accept an item of this agent
+    /// until the owner allows it. The server decides: the flag tells the screen to disable the button.
+    pub lock_accept: bool,
+    /// The hints of the agent. A bucket has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed: Option<Observed>,
+    /// With `new` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similar: Option<Similar>,
+}
+
+impl AgentMsg {
+    fn validate(&self) -> Result<()> {
+        check_id(&self.id, "agent.id")?;
+        check_id(&self.agent_id, "agent.agent_id")?;
+        if self.rev < 1 || self.rev > i64::MAX as u64 {
+            return bad("agent.rev");
+        }
+        check_line(&self.key_name, MAX_AGENT_LABEL_CHARS, "agent.key_name")?;
+        check_line(&self.label, MAX_AGENT_LABEL_CHARS, "agent.label")?;
+        check_time(self.created_at_ms, "agent.created_at_ms")?;
+        check_time(self.last_seen_ms, "agent.last_seen_ms")?;
+        match (&self.merged_into, self.state) {
+            (Some(into), AgentState::Merged) => {
+                check_id(into, "agent.merged_into")?;
+                if *into == self.agent_id {
+                    return bad("agent.merged_into");
+                }
+            }
+            (None, AgentState::Merged) | (Some(_), _) => return bad("agent.merged_into"),
+            (None, _) => {}
+        }
+        if self.lock_accept && self.state != AgentState::New {
+            return bad("agent.lock_accept");
+        }
+        if let Some(o) = &self.observed {
+            o.validate()?;
+        }
+        if let Some(s) = &self.similar {
+            check_id(&s.agent_id, "agent.similar")?;
+            check_line(&s.label, MAX_AGENT_LABEL_CHARS, "agent.similar")?;
+            if self.state != AgentState::New || s.agent_id == self.agent_id {
+                return bad("agent.similar");
+            }
+        }
+        // The bucket cannot be named, merged, blocked or locked, and it has no token, so it has no hints.
+        if self.kind == AgentKind::Bucket
+            && (self.state != AgentState::Known
+                || self.named
+                || self.observed.is_some()
+                || self.similar.is_some())
+        {
+            return bad("agent.kind");
+        }
+        Ok(())
+    }
+}
+
+/// What an owner action did. `ok`: the action is done, or the agent was in the wanted state already (every action is
+/// idempotent). The other values name the refusal. A refusal changes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentResultStatus {
+    Ok,
+    /// The agent does not exist, or it belongs to another owner. One answer for each case.
+    NotFound,
+    /// The name has a control character, a format character, a white space at an end, or a bad length.
+    InvalidName,
+    /// Another agent of the same key has this name, after the fold (NFKC, lower case).
+    NameTaken,
+    /// The state or the kind of the agent does not allow the action: the bucket, a blocked agent that is renamed, a
+    /// merge of an agent into itself or into an agent that is not `new` or `known`.
+    BadState,
+    /// A merge across two keys.
+    CrossKey,
+    /// The server has no block `inbox.agents`: each key is one agent.
+    NotEnabled,
+}
+
+impl AgentResultStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentResultStatus::Ok => "ok",
+            AgentResultStatus::NotFound => "not_found",
+            AgentResultStatus::InvalidName => "invalid_name",
+            AgentResultStatus::NameTaken => "name_taken",
+            AgentResultStatus::BadState => "bad_state",
+            AgentResultStatus::CrossKey => "cross_key",
+            AgentResultStatus::NotEnabled => "not_enabled",
+        }
+    }
+}
+
+/// Server to device: the result of an `agent_do`. It has no delivery id: the device does not acknowledge it. The device
+/// keeps its `agent_do` in its outbox and sends it again until it gets this result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentResultMsg {
+    /// The value of the frame of the device.
+    pub client_msg_id: String,
+    pub agent_id: String,
+    pub status: AgentResultStatus,
+}
+
+/// What the owner does with an agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentOpKind {
+    /// Gives a name, or changes it. With `name`.
+    Rename,
+    /// `new` to `known`. With an optional `name`.
+    Allow,
+    /// The agent is `blocked`: its open items are cancelled and its calls are refused.
+    Block,
+    /// `blocked` to `known`. It revives nothing.
+    Unblock,
+    /// Moves the items of the agent to the agent `into`, of the same key.
+    Merge,
+}
+
+impl AgentOpKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentOpKind::Rename => "rename",
+            AgentOpKind::Allow => "allow",
+            AgentOpKind::Block => "block",
+            AgentOpKind::Unblock => "unblock",
+            AgentOpKind::Merge => "merge",
+        }
+    }
+}
+
+/// `agent_do`: one action of the owner on an agent. The device asks for no biometric for it: only an approval does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentDoMsg {
+    pub agent_id: String,
+    /// Made by the device for this action, 1 to 64 characters of `A-Z a-z 0-9 _ -`. The device sends the same value
+    /// again until it gets `agent_result`.
+    pub client_msg_id: String,
+    pub op: AgentOpKind,
+    /// With `rename` (always) and `allow` (optional): the name, 1 to 32 characters, with no NUL. The server checks the
+    /// other rules of a name and answers `invalid_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// With `merge` only, and then always: the id of the agent that receives the items.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
+}
+
+impl AgentDoMsg {
+    fn validate(&self) -> Result<()> {
+        check_id(&self.agent_id, "agent_do.agent_id")?;
+        check_client_msg_id(&self.client_msg_id)?;
+        let check_name = |name: &String| {
+            check_text(name, MAX_AGENT_NAME_CHARS, "agent_do.name")?;
+            if name.contains('\0') { bad("agent_do.name") } else { Ok(()) }
+        };
+        match (self.op, &self.name, &self.into) {
+            (AgentOpKind::Rename, Some(name), None) => check_name(name),
+            (AgentOpKind::Allow, name, None) => name.as_ref().map_or(Ok(()), check_name),
+            (AgentOpKind::Block | AgentOpKind::Unblock, None, None) => Ok(()),
+            // A merge into the agent itself is well formed: the server answers `bad_state`.
+            (AgentOpKind::Merge, None, Some(into)) => check_id(into, "agent_do.into"),
+            _ => bad("agent_do.op"),
+        }
+    }
+}
+
+/// An agent that the device holds, with the `rev` that it knows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRef {
+    pub agent_id: String,
+    pub rev: u64,
 }
 
 // ---------------------------------------------------------------- preferences
@@ -1384,8 +1760,14 @@ pub enum ClientMsg {
     /// device lacks or knows in an older state, and a `settled` for each one that is final.
     Sync {
         open: Vec<OpenRef>,
+        /// The agents that the device holds, with their `rev`. The server sends the `agent` frames that the device
+        /// lacks or holds in an older `rev`. An absent list means that the device holds no agent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agents: Option<Vec<AgentRef>>,
     },
     SetPrefs(Prefs),
+    /// One action of the owner on an agent. The server answers `agent_result`.
+    AgentDo(AgentDoMsg),
 }
 
 impl ClientMsg {
@@ -1424,13 +1806,26 @@ impl ClientMsg {
                 Ok(())
             }
             ClientMsg::Refresh { request_id } => check_id(request_id, "refresh.request_id"),
-            ClientMsg::Sync { open } => {
+            ClientMsg::Sync { open, agents } => {
                 if open.len() > MAX_SYNC_ENTRIES {
                     return bad("sync.open");
                 }
-                open.iter().try_for_each(|o| check_id(&o.request_id, "sync.open"))
+                open.iter().try_for_each(|o| check_id(&o.request_id, "sync.open"))?;
+                let agents = agents.as_deref().unwrap_or_default();
+                if agents.len() > MAX_SYNC_AGENTS {
+                    return bad("sync.agents");
+                }
+                let mut seen = std::collections::HashSet::new();
+                for a in agents {
+                    check_id(&a.agent_id, "sync.agents")?;
+                    if a.rev < 1 || a.rev > i64::MAX as u64 || !seen.insert(a.agent_id.as_str()) {
+                        return bad("sync.agents");
+                    }
+                }
+                Ok(())
             }
             ClientMsg::SetPrefs(p) => p.validate(),
+            ClientMsg::AgentDo(a) => a.validate(),
             ClientMsg::Ready
             | ClientMsg::Subscribe { .. }
             | ClientMsg::Unsubscribe { .. }
@@ -1467,6 +1862,10 @@ pub enum ServerMsg {
     Settled(SettledMsg),
     Digest(DigestMsg),
     AnswerResult(AnswerResultMsg),
+    /// The state of one agent.
+    Agent(Box<AgentMsg>),
+    /// The result of an `agent_do`.
+    AgentResult(AgentResultMsg),
     Subscriptions {
         subscriptions: Vec<String>,
     },
@@ -1511,6 +1910,11 @@ impl ServerMsg {
             ServerMsg::Digest(d) => d.validate(),
             ServerMsg::AnswerResult(r) => {
                 check_id(&r.request_id, "answer_result.request_id")?;
+                check_client_msg_id(&r.client_msg_id)
+            }
+            ServerMsg::Agent(a) => a.validate(),
+            ServerMsg::AgentResult(r) => {
+                check_id(&r.agent_id, "agent_result.agent_id")?;
                 check_client_msg_id(&r.client_msg_id)
             }
             ServerMsg::Subscriptions { .. } | ServerMsg::Pong { .. } | ServerMsg::Error { .. } => {

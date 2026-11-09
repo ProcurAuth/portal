@@ -4,11 +4,14 @@
   "chain_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "seq": 0,
   "from": {
-    "label": "claude-laptop",
+    "label": "Billing bot",
     "key_name": "claude-laptop",
     "owner": "alice",
     "via": "mcp",
-    "interaction": "conversational"
+    "interaction": "conversational",
+    "agent_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "agent_kind": "agent",
+    "agent_state": "known"
   },
   "urgency": "high",
   "created_at_ms": 1788000000000,

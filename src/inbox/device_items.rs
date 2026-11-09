@@ -1,5 +1,5 @@
 //! The items on the side of a phone: the frames that the server builds when it sends a delivery, and the handling of
-//! `answer`, `reply`, `refresh`, `sync` and `set_prefs`.
+//! `answer`, `reply`, `refresh`, `sync`, `set_prefs` and `agent_do`.
 //!
 //! The rows of `alerts` for an item hold metadata only (kind, number of the turn). When the session sends such a
 //! delivery, this module reads the item, unseals the body or the turn, and builds the frame (`frames.rs`). The
@@ -10,6 +10,15 @@
 //! The queue of a device is ordered by the number of the delivery. A `request` comes before the `settled` of its item,
 //! and a phone that is offline gets both in this order at its next session. A phone that gets a `settled` before its
 //! `request` (a lost receipt, a retransmission) keeps the `settled` and applies it when the `request` arrives.
+//!
+//! # The agents
+//!
+//! A change of an agent that raises its `rev` writes one row of the queue for each device of the owner (see
+//! `agents_ops::agent_notice`). The row holds the id of the agent and the `rev`. The frame `agent` is built from the row
+//! of the agent when the session sends it, so it holds the state of that time. A row whose `rev` is older than the row of
+//! the agent is withdrawn: a newer row waits in the queue. A phone that lacks an agent, or holds it in an older `rev`,
+//! says so in `sync`, and the server sends the frames that it lacks. Those frames have a new id that is in no queue.
+//! `agent_do` is the action of the owner on an agent: the engine decides and the server answers `agent_result`.
 //!
 //! # What the server does not send
 //!
@@ -22,12 +31,15 @@ use std::time::Duration;
 
 use inbox_core::noise::Session;
 use inbox_core::proto::{
-    close, Action, AnswerMsg, AnswerResultMsg, AnswerStatus, ItemState, Prefs, ReplyMsg, ServerMsg,
+    close, Action, AgentDoMsg, AgentOpKind, AgentRef, AgentResultMsg, AgentResultStatus, AnswerMsg,
+    AnswerResultMsg, AnswerStatus, ItemState, Prefs, ReplyMsg, ServerMsg,
 };
 use zeroize::Zeroizing;
 
+use super::agents::{AgentMode, AgentState, AgentSummary};
+use super::agents_ops::{AgentOp, OpError};
 use super::device::{send_encoded, send_msg, End};
-use super::frames::{self, ApprovalFacts, OwnerAnswer};
+use super::frames::{self, AgentFacts, ApprovalFacts, OwnerAnswer};
 use super::items::{closed_status, Caller, Loaded};
 use super::items_ops::{AnswerVia, ItemDelivery, ListFilter, TurnOut};
 use super::items_store::{Answer, Answered, ItemError, Items, Served, TurnPlain};
@@ -63,6 +75,8 @@ pub(crate) struct Builder<'a> {
     unseen: HashSet<String>,
     /// The preferences of the owner, read once for the flush.
     prefs: Option<Prefs>,
+    /// The agents of the owner with the number of their open items, read once for the flush.
+    agents: Option<HashMap<String, AgentSummary>>,
 }
 
 fn encode(msg: &ServerMsg) -> Built {
@@ -90,7 +104,78 @@ impl<'a> Builder<'a> {
                 .map(|d| d.request_id.clone())
                 .collect(),
             prefs: None,
+            agents: None,
         })
+    }
+
+    /// The agents of the owner, by id. An agent of another owner is not in it, so no frame names it.
+    async fn agents(&mut self) -> Result<&HashMap<String, AgentSummary>, ItemError> {
+        if self.agents.is_none() {
+            let list = self.items.list_agents(self.login, None).await?;
+            self.agents = Some(
+                list.into_iter()
+                    .map(|s| (s.agent.agent_id.clone(), s))
+                    .collect(),
+            );
+        }
+        Ok(self.agents.as_ref().expect("the agents were read"))
+    }
+
+    /// What the key of an agent does with the agents. The portal without the block `inbox.agents` treats each key as the
+    /// mode `key`, and so does a key that the portal cannot read.
+    fn mode_of(&self, key_id: &str) -> AgentMode {
+        let mode = self
+            .app
+            .authorizer()
+            .and_then(|a| a.key_agent_mode(key_id))
+            .unwrap_or_default();
+        self.items.rules.agents.effective(mode)
+    }
+
+    /// The frame `agent` of an agent, with the id of the delivery.
+    pub(crate) async fn agent_frame(
+        &mut self,
+        s: &AgentSummary,
+        id: &str,
+    ) -> Result<Built, ItemError> {
+        if !self.items.rules.agents.enabled {
+            return Ok(Built::Withdraw("agents_not_enabled"));
+        }
+        let row = &s.agent;
+        let key_name = frames::key_display(
+            &row.key_id,
+            self.app
+                .authorizer()
+                .and_then(|a| a.key_name(&row.key_id))
+                .as_deref(),
+        );
+        let observed = self.items.observed(row);
+        let facts = AgentFacts {
+            key_name: &key_name,
+            mode: self.mode_of(&row.key_id),
+            observed: observed.as_ref(),
+            open: s.open,
+            lock_new: self.items.rules.agents.lock_new,
+        };
+        match frames::agent_frame(id, row, &facts) {
+            Ok(frame) => Ok(encode(&ServerMsg::Agent(Box::new(frame)))),
+            Err(e) => {
+                log::error!(event = "agent_frame_refused", agent.id = %row.agent_id, error = %e);
+                Ok(Built::Withdraw("frame_not_built"))
+            }
+        }
+    }
+
+    /// The delivery of a message `agent`: the row of the queue names the agent and the `rev` of the change.
+    async fn agent_delivery(&mut self, d: &ItemDelivery) -> Result<Built, ItemError> {
+        let Some(summary) = self.agents().await?.get(&d.request_id).cloned() else {
+            return Ok(Built::Withdraw("agent_gone"));
+        };
+        // The agent changed again: the row of the new `rev` waits in the queue of this device, and it gives the state.
+        if u64::try_from(summary.agent.rev).unwrap_or(0) > d.item_seq {
+            return Ok(Built::Withdraw("agent_rev_replaced"));
+        }
+        self.agent_frame(&summary, &d.alert_id).await
     }
 
     /// The preferences of the owner: the quiet hours decide the flag `quiet` of a request.
@@ -117,6 +202,10 @@ impl<'a> Builder<'a> {
 
     /// The frame of one delivery of the queue.
     pub(crate) async fn delivery(&mut self, d: &ItemDelivery) -> Result<Built, ItemError> {
+        // The row of an agent names the agent, not an item.
+        if d.kind == "agent" {
+            return self.agent_delivery(d).await;
+        }
         let Some(l) = self.load(&d.request_id).await? else {
             return Ok(Built::Withdraw("item_gone"));
         };
@@ -149,7 +238,20 @@ impl<'a> Builder<'a> {
             .app
             .authorizer()
             .and_then(|a| a.key_name(&l.item.requester_key_id));
-        let from = frames::sender(&l.item, key_name.as_deref());
+        // The agent of the item gives the label and the state of the line "from".
+        let Some(agent) = self
+            .agents()
+            .await?
+            .get(&l.item.agent_id)
+            .map(|s| s.agent.clone())
+        else {
+            return Ok(Built::Withdraw("agent_not_found"));
+        };
+        let mode = self.mode_of(&agent.key_id);
+        // An item of a blocked agent is final, and the phone gets its `settled`.
+        let Some(from) = frames::sender(&l.item, key_name.as_deref(), &agent, mode) else {
+            return Ok(Built::Withdraw("agent_not_open"));
+        };
         let quiet = frames::arrived_quiet(&self.prefs().await?, l.item.created_at);
         match frames::request_frame(id, l, &plain, from, &facts) {
             Ok(mut frame) => {
@@ -415,9 +517,8 @@ pub(super) async fn answer(
         Ok(Answered::Accepted { loaded, .. }) => (AnswerStatus::Accepted, Some(loaded.item.state)),
         Ok(Answered::Refused { status, loaded }) => (status, Some(loaded.item.state)),
         Ok(Answered::NotFound) => (AnswerStatus::Closed, None),
-        // The agent is new and `lock_new` is true. The status `agent_locked` of the frame `answer_result` comes with
-        // the protocol amendment (lot G2): until then the phone gets `closed`.
-        Ok(Answered::AgentLocked(loaded)) => (AnswerStatus::Closed, Some(loaded.item.state)),
+        // The agent is new and `lock_new` is true: the owner can decline and reply, not accept. The item stays open.
+        Ok(Answered::AgentLocked(loaded)) => (AnswerStatus::AgentLocked, Some(loaded.item.state)),
         Err(ItemError::Degraded | ItemError::Replica) => return unavailable(socket, session).await,
         Err(e) => return Err(storage(e)),
     };
@@ -438,6 +539,80 @@ pub(super) async fn answer(
     )
     .await?;
     after(status)
+}
+
+/// `agent_do`: one action of the owner on an agent. The engine decides, and the server answers `agent_result`. The
+/// phone sends the frame again until it gets the result, and every action is idempotent. The owner is the account of
+/// the phone: an agent of another owner is `not_found`, as an agent that does not exist. A change reaches every device of
+/// the owner as a frame `agent`, the acting device too.
+pub(super) async fn agent_do(
+    app: &App,
+    socket: &mut Socket,
+    session: &mut Session,
+    device_id: &str,
+    login: &str,
+    a: AgentDoMsg,
+) -> Result<bool, End> {
+    let Some(items) = app.items() else {
+        return not_enabled(socket, session).await;
+    };
+    let status = match agent_do_status(&items, login, &a).await {
+        Ok(status) => status,
+        Err(ItemError::Degraded | ItemError::Replica) => return unavailable(socket, session).await,
+        Err(e) => return Err(storage(e)),
+    };
+    log::info!(
+        event = "phone_agent_do",
+        device.id = %device_id,
+        agent.id = %a.agent_id,
+        status = status.as_str()
+    );
+    let msg = ServerMsg::AgentResult(AgentResultMsg {
+        client_msg_id: a.client_msg_id,
+        agent_id: a.agent_id,
+        status,
+    });
+    send_msg(socket, session, &msg).await?;
+    // The change wrote a message for each device: send it now.
+    Ok(true)
+}
+
+/// What the engine says about an `agent_do`: the status of the frame `agent_result`. A server without the block
+/// `inbox.agents` answers `not_enabled`. A refusal changes nothing.
+pub(crate) async fn agent_do_status(
+    items: &Items<'_>,
+    login: &str,
+    a: &AgentDoMsg,
+) -> Result<AgentResultStatus, ItemError> {
+    if !items.rules.agents.enabled {
+        return Ok(AgentResultStatus::NotEnabled);
+    }
+    // The parser checked which members the action has.
+    let op = match (a.op, a.name.clone(), a.into.clone()) {
+        (AgentOpKind::Rename, Some(name), None) => AgentOp::Rename { name },
+        (AgentOpKind::Allow, name, None) => AgentOp::Allow { name },
+        (AgentOpKind::Block, None, None) => AgentOp::Block,
+        (AgentOpKind::Unblock, None, None) => AgentOp::Unblock,
+        (AgentOpKind::Merge, None, Some(into)) => AgentOp::Merge { into },
+        _ => return Ok(AgentResultStatus::BadState),
+    };
+    Ok(
+        match items.agent_op(login, &a.agent_id, op, "phone").await? {
+            Ok(_done) => AgentResultStatus::Ok,
+            Err(e) => result_status(e),
+        },
+    )
+}
+
+/// The status of the frame `agent_result` for a refusal of the engine.
+pub(crate) fn result_status(e: OpError) -> AgentResultStatus {
+    match e {
+        OpError::NotFound => AgentResultStatus::NotFound,
+        OpError::InvalidName(_) => AgentResultStatus::InvalidName,
+        OpError::NameTaken => AgentResultStatus::NameTaken,
+        OpError::BadState => AgentResultStatus::BadState,
+        OpError::CrossKey => AgentResultStatus::CrossKey,
+    }
 }
 
 /// `reply`: the owner asks the agent. The item stays open and moves to `replied`.
@@ -553,18 +728,66 @@ pub(super) async fn refresh(
     Ok(false)
 }
 
-/// `sync`: the phone says which items it holds open. The server sends the open items that it lacks or knows in an
-/// older state, and the `settled` frame of each item that is final.
+/// The `agent` frames that a phone lacks, as an answer to its `sync`. The phone lists the agents that it holds with their
+/// `rev`. The server sends an agent that the phone does not list, unless it is idle or gone (`blocked`, `merged`), and an
+/// agent that the phone lists in an older `rev`, whatever its state. The frames have a new id that is in no queue. A
+/// portal without the block `inbox.agents` sends none.
+pub(crate) async fn agent_frames_for_sync(
+    builder: &mut Builder<'_>,
+    held: &[AgentRef],
+) -> Result<Vec<Vec<u8>>, ItemError> {
+    if !builder.items.rules.agents.enabled {
+        return Ok(Vec::new());
+    }
+    let held: HashMap<&str, u64> = held.iter().map(|a| (a.agent_id.as_str(), a.rev)).collect();
+    let mut list: Vec<AgentSummary> = builder.agents().await?.values().cloned().collect();
+    list.sort_by(|a, b| {
+        (a.agent.created_at, &a.agent.agent_id).cmp(&(b.agent.created_at, &b.agent.agent_id))
+    });
+    let mut out = Vec::new();
+    for s in list {
+        let rev = u64::try_from(s.agent.rev).unwrap_or(0);
+        let wanted = match held.get(s.agent.agent_id.as_str()) {
+            Some(known) => *known < rev,
+            None => !s.idle && !matches!(s.agent.state, AgentState::Blocked | AgentState::Merged),
+        };
+        if !wanted {
+            continue;
+        }
+        match builder.agent_frame(&s, &random_id()).await? {
+            Built::Frame(bytes) => out.push(bytes),
+            Built::Withdraw(why) => {
+                log::info!(event = "agent_state_not_sent", agent.id = %s.agent.agent_id, reason = why)
+            }
+            Built::Keep => {}
+        }
+    }
+    Ok(out)
+}
+
+/// `sync`: the phone says which items it holds open, and which agents it holds. The server sends the agents that it
+/// lacks, the open items that it lacks or knows in an older state, and the `settled` frame of each item that is final.
 pub(super) async fn sync(
     app: &App,
     socket: &mut Socket,
     session: &mut Session,
     login: &str,
     open: Vec<inbox_core::proto::OpenRef>,
+    agents: Option<Vec<AgentRef>>,
 ) -> Result<bool, End> {
     let Some(mut builder) = Builder::new(app, login, &[]) else {
         return not_enabled(socket, session).await;
     };
+    // The agents come first: the phone groups the items by agent when they arrive.
+    match agent_frames_for_sync(&mut builder, agents.as_deref().unwrap_or_default()).await {
+        Ok(frames) => {
+            for bytes in frames {
+                send_encoded(socket, session, &bytes).await?;
+            }
+        }
+        Err(ItemError::Degraded | ItemError::Replica) => return unavailable(socket, session).await,
+        Err(e) => return Err(storage(e)),
+    }
     let held: HashMap<&str, u64> = open
         .iter()
         .map(|o| (o.request_id.as_str(), o.seq))

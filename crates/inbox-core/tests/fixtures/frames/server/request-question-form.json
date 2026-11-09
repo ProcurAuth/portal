@@ -5,11 +5,14 @@
   "chain_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "seq": 0,
   "from": {
-    "label": "claude-laptop",
+    "label": "claude-laptop #4",
     "key_name": "claude-laptop",
     "owner": "alice",
     "via": "mcp",
-    "interaction": "conversational"
+    "interaction": "conversational",
+    "agent_id": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+    "agent_kind": "agent",
+    "agent_state": "new"
   },
   "urgency": "normal",
   "created_at_ms": 1788000000000,
@@ -113,5 +116,6 @@
     ]
   },
   "as_of_ms": 1788000000000,
-  "previous_id": "dddddddddddddddddddddddddddddddd"
+  "previous_id": "dddddddddddddddddddddddddddddddd",
+  "agent_label": "billing-bot"
 }

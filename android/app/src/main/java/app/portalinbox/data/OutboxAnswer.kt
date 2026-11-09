@@ -65,13 +65,15 @@ object OutboxAnswer {
         AnswerStatus.DEVICE_REVOKED.wire -> "This phone is no longer allowed to answer. Add the server again."
         AnswerStatus.CUSTOM_NOT_ALLOWED.wire -> "The agent does not take a text with a decline."
         AnswerStatus.ASK_BACK_NOT_ALLOWED.wire -> "The agent does not take questions here."
+        AnswerStatus.AGENT_LOCKED.wire -> "This agent is new. Allow it first, then approve."
         ItemEngine.RESULT_SETTLED -> null
         else -> null
     }
 
     /** True for a result that ended the try without an answer: the owner can answer again. */
     fun canTryAgain(p: AnswerProgress.Done): Boolean = when (p.status) {
-        AnswerStatus.CUSTOM_NOT_ALLOWED, AnswerStatus.ASK_BACK_NOT_ALLOWED, AnswerStatus.DEVICE_REVOKED -> true
+        AnswerStatus.CUSTOM_NOT_ALLOWED, AnswerStatus.ASK_BACK_NOT_ALLOWED, AnswerStatus.DEVICE_REVOKED,
+        AnswerStatus.AGENT_LOCKED -> true
         else -> false
     }
 

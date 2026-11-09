@@ -163,14 +163,16 @@ impl Items<'_> {
         }
         let sealed = self.seal_hints(&row.agent_id, &now)?;
         let cx = self.cx();
-        let (id, rev) = (row.agent_id.clone(), row.rev);
-        // The result is false when another call wrote a newer record first: this update is dropped.
-        in_tx!(
+        let agent = row.clone();
+        // The result is false when another call wrote a newer record first: this update is dropped. A change raises
+        // `rev`, and the phones of the owner get the new hints.
+        let done = in_tx!(
             self,
-            [cx, id, rev, sealed, events],
+            [cx, agent, sealed, events],
             tx,
-            ops::write_hints(tx, &cx, &id, rev, &sealed, &events)
+            ops::write_hints(tx, &cx, &agent, &sealed, &events)
         )?;
+        self.after(&done.fx);
         Ok(())
     }
 

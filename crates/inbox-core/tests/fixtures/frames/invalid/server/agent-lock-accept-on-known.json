@@ -1,0 +1,1 @@
+{"t":"agent","id":"cccccccccccccccccccccccccccccccc","agent_id":"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1","rev":5,"key_name":"claude-laptop","kind":"agent","state":"known","label":"Billing bot","named":true,"created_at_ms":1787000000000,"last_seen_ms":1788000400000,"open":2,"lock_accept":true,"observed":{"client":"claude-code/2.1.0","nets_seen":1}}
