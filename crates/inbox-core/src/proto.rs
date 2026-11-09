@@ -1456,10 +1456,8 @@ impl AgentDoMsg {
             (AgentOpKind::Rename, Some(name), None) => check_name(name),
             (AgentOpKind::Allow, name, None) => name.as_ref().map_or(Ok(()), check_name),
             (AgentOpKind::Block | AgentOpKind::Unblock, None, None) => Ok(()),
-            (AgentOpKind::Merge, None, Some(into)) => {
-                check_id(into, "agent_do.into")?;
-                if *into == self.agent_id { bad("agent_do.into") } else { Ok(()) }
-            }
+            // A merge into the agent itself is well formed: the server answers `bad_state`.
+            (AgentOpKind::Merge, None, Some(into)) => check_id(into, "agent_do.into"),
             _ => bad("agent_do.op"),
         }
     }

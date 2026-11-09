@@ -1063,6 +1063,8 @@ fn agent_do_ops_and_limits() {
     assert!(client_ok(&frame("block", json!({}))));
     assert!(client_ok(&frame("unblock", json!({}))));
     assert!(client_ok(&frame("merge", json!({"into": to}))));
+    // A merge into the agent itself is well formed: the server answers `bad_state`, and the session stays open.
+    assert!(client_ok(&frame("merge", json!({"into": a}))));
     // A member that the op does not take, and a missing member that it needs.
     for (op, extra) in [
         ("rename", json!({})),
@@ -1075,7 +1077,6 @@ fn agent_do_ops_and_limits() {
         ("unblock", json!({"into": to})),
         ("merge", json!({})),
         ("merge", json!({"name": "x", "into": to})),
-        ("merge", json!({"into": a})),
         ("merge", json!({"into": "A1".repeat(16)})),
         ("merge", json!({"into": "a1"})),
         ("delete", json!({})),
@@ -1348,7 +1349,6 @@ fn agent_invalid_frames_fail_for_the_named_reason() {
         ("client", "agent-do-unblock-with-name", "agent_do.op"),
         ("client", "agent-do-merge-without-into", "agent_do.op"),
         ("client", "agent-do-merge-with-name", "agent_do.op"),
-        ("client", "agent-do-merge-into-itself", "agent_do.into"),
         ("client", "agent-do-merge-into-not-hex", "agent_do.into"),
         ("client", "agent-do-unknown-member", "frame"),
         ("client", "sync-agents-bad-id", "sync.agents"),
