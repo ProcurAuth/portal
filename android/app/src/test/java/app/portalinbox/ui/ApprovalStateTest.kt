@@ -197,4 +197,54 @@ class ApprovalStateTest {
         val r = engine.decline(server, rid, d.text, d.intent)
         assertTrue(r is app.portalinbox.data.Submit.Queued)
     }
+
+    // ------------------------------------------------------------ the link to the portal (lot MP4)
+
+    private fun linked(i: Item, link: ApprovalState.Link) =
+        ApprovalState.of(ApprovalState.Input(i, now, read, false, AnswerProgress.None, true, true, link, "Homelab"))
+
+    @Test
+    fun anOnlinePortalHasNoLinkLineAndTheButtonSaysApprove() {
+        val s = linked(item(), ApprovalState.Link.ONLINE)
+        assertNull(s.linkLine)
+        assertFalse(s.queued)
+        assertTrue(s.approveEnabled)
+    }
+
+    @Test
+    fun anOfflinePortalStillAllowsApproveAndDeclineAndQueuesTheAnswer() {
+        val s = linked(item(), ApprovalState.Link.OFFLINE)
+        assertEquals("Offline. Your answer is sent when Homelab is back.", s.linkLine)
+        assertTrue(s.queued)
+        assertTrue(s.approveEnabled)
+        assertTrue(s.declineEnabled)
+    }
+
+    @Test
+    fun aBlockedPortalTurnsApproveAndDeclineOff() {
+        val s = linked(item(), ApprovalState.Link.BLOCKED)
+        assertEquals("Not connected. Nothing is sent to Homelab.", s.linkLine)
+        assertFalse(s.approveEnabled)
+        assertEquals(ApprovalState.Lock.PORTAL_BLOCKED, s.approveLock)
+        assertFalse(s.declineEnabled)
+        assertFalse(s.queued)
+        assertEquals("Nothing can be sent to this portal now.", s.hint)
+    }
+
+    @Test
+    fun aClosedItemShowsNoLinkLine() {
+        val closed = item().copy(state = app.portalinbox.proto.ItemState.ANSWERED)
+        assertNull(linked(closed, ApprovalState.Link.OFFLINE).linkLine)
+    }
+
+    @Test
+    fun theLinkStateMapsToWhatTheScreenCanDo() {
+        use(app.portalinbox.service.LinkState.CONNECTED, ApprovalState.Link.ONLINE)
+        use(app.portalinbox.service.LinkState.CONNECTING, ApprovalState.Link.ONLINE)
+        use(app.portalinbox.service.LinkState.DISCONNECTED, ApprovalState.Link.OFFLINE)
+        use(app.portalinbox.service.LinkState.REENROLL, ApprovalState.Link.BLOCKED)
+        use(app.portalinbox.service.LinkState.KEY_CHANGED, ApprovalState.Link.BLOCKED)
+    }
+
+    private fun use(state: app.portalinbox.service.LinkState, expected: ApprovalState.Link) = assertEquals(expected, ApprovalState.linkOf(state))
 }

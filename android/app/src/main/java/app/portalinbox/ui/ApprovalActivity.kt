@@ -28,8 +28,12 @@ import app.portalinbox.data.AnswerProgress
 import app.portalinbox.data.Item
 import app.portalinbox.data.ItemRepository
 import app.portalinbox.data.OutboxAnswer
+import app.portalinbox.data.Server
 import app.portalinbox.data.ShownEffect
+import app.portalinbox.data.Store
 import app.portalinbox.data.Submit
+import app.portalinbox.portal.PortalIdentity
+import app.portalinbox.portal.PortalLabels
 import app.portalinbox.proto.Language
 import app.portalinbox.render.CodeSpans
 import app.portalinbox.render.MarkdownSpans
@@ -90,11 +94,15 @@ class ApprovalActivity : BaseFragmentActivity() {
     private var promptEffect: String? = null
     private var item: Item? = null
 
+    /** The portal of the item. The banner, the footer, the prompt and the clipboard label name it: the portal never names itself. */
+    private var server: Server? = null
+
     // views
     private lateinit var scroller: ScrollView
     private lateinit var content: LinearLayout
     private lateinit var codeLabel: TextView
     private lateinit var hintView: TextView
+    private lateinit var linkView: TextView
     private lateinit var declineButton: TextView
     private lateinit var approveButton: TextView
     private lateinit var prompt: BiometricPrompt
@@ -120,6 +128,7 @@ class ApprovalActivity : BaseFragmentActivity() {
         serverId = intent.getLongExtra(EXTRA_SERVER, -1)
         requestId = intent.getStringExtra(EXTRA_REQUEST) ?: ""
         repo = Items.repository(this)
+        server = Store.get(this).server(serverId)
         savedInstanceState?.let {
             savedGateKey = it.getString("gate_key")
             savedGateRead = it.getBoolean("gate_read")
@@ -137,6 +146,7 @@ class ApprovalActivity : BaseFragmentActivity() {
         content = lin(padH = 10, padV = 4)
         scroller = scroll(content)
         main.addView(scroller, lp(MATCH, 0, 1f))
+        server?.let { main.addView(PortalBanner.footer(this, it)) }
         main.addView(bottomBar())
         setScreen(main)
 
@@ -167,8 +177,6 @@ class ApprovalActivity : BaseFragmentActivity() {
         super.onResume()
         Registry.addListener(onChange)
         handler.post(tick)
-        // The owner is reading it: the notification has done its job.
-        repo.item(serverId, requestId)?.let { ItemAlerter.withdrawNow(this, it) }
     }
 
     override fun onPause() {
@@ -194,6 +202,8 @@ class ApprovalActivity : BaseFragmentActivity() {
     private fun bottomBar(): View {
         val bar = lin(padH = 10, padV = 8)
         bar.addView(divider(), lp(MATCH, 1).margins(this, b = 6))
+        linkView = label("", SP_S, color(R.color.warning), MEDIUM).apply { gravity = Gravity.CENTER; visibility = View.GONE }
+        bar.addView(linkView, lp().margins(this, b = 4))
         hintView = label("", SP_S, color(R.color.text_muted)).apply { gravity = Gravity.CENTER }
         bar.addView(hintView, lp().margins(this, b = 8))
         val row = lin(vertical = false)
@@ -247,6 +257,7 @@ class ApprovalActivity : BaseFragmentActivity() {
             ApprovalState.Input(
                 item = i, nowMs = now(), gate = gate, staleConfirmed = staleConfirmed, answer = progress,
                 canAuthenticate = canAuthenticate(), askAvailable = Nav.ask != null,
+                link = ApprovalState.linkOf(Registry.status(serverId).state), portal = server?.nickname ?: "this portal",
             ),
         )
     }
@@ -305,6 +316,9 @@ class ApprovalActivity : BaseFragmentActivity() {
         // The bottom bar.
         hintView.text = s.hint ?: ""
         hintView.visibility = if (s.hint == null) View.GONE else View.VISIBLE
+        linkView.text = s.linkLine ?: ""
+        linkView.visibility = if (s.linkLine == null) View.GONE else View.VISIBLE
+        linkView.setTextColor(color(if (s.approveLock == ApprovalState.Lock.PORTAL_BLOCKED) R.color.danger else R.color.warning))
         val bottom = s.mode != ApprovalState.Mode.CLOSED
         declineButton.visibility = if (bottom) View.VISIBLE else View.GONE
         approveButton.visibility = if (s.approveShown) View.VISIBLE else View.GONE
@@ -322,7 +336,24 @@ class ApprovalActivity : BaseFragmentActivity() {
             null, null, null,
         )
         approveButton.compoundDrawablePadding = dp(8)
-        approveButton.contentDescription = if (on) getString(R.string.approval_approve) else getString(R.string.approval_approve) + ". " + (s.hint ?: "")
+        approveButton.text = approveText(s)
+        val spoken = getString(if (s.queued) R.string.approval_queue else R.string.approval_approve) + " " + onPortal()
+        approveButton.contentDescription = if (on) spoken else spoken + ". " + (s.hint ?: "")
+    }
+
+    /** "on Production": the portal that the answer goes to. */
+    private fun onPortal(): String = server?.let { getString(R.string.approval_on_portal, PortalIdentity.of(it).nickname) } ?: ""
+
+    /** The label of Approve: "Approve" (or "Queue approval" while the portal is offline), and on a second, smaller line "on Production". */
+    private fun approveText(s: ApprovalState.Screen): CharSequence {
+        val first = getString(if (s.queued) R.string.approval_queue else R.string.approval_approve)
+        val second = onPortal()
+        if (second.isEmpty()) return first
+        return android.text.SpannableStringBuilder(first).append('\n').append(
+            android.text.SpannableString(second).apply {
+                setSpan(android.text.style.RelativeSizeSpan(0.8f), 0, length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            },
+        )
     }
 
     // ------------------------------------------------------------ content
@@ -336,6 +367,8 @@ class ApprovalActivity : BaseFragmentActivity() {
         val now = now()
         val zone = ZoneId.systemDefault()
 
+        // The identity of the portal comes first, above the title, for every state of the item.
+        server?.let { content.addView(PortalBanner.banner(this, it), lp().margins(this, l = -10, r = -10, t = 4)) }
         content.addView(label(ItemTexts.title(i), SP_XL, color(R.color.text_strong), MEDIUM).apply {
             if (Build.VERSION.SDK_INT >= 28) isAccessibilityHeading = true
         }, lp().margins(this, t = 8, l = 4, r = 4))
@@ -426,7 +459,7 @@ class ApprovalActivity : BaseFragmentActivity() {
         head.addView(caption(getString(R.string.approval_from_service), color(R.color.primary)), lp(0, WRAP, 1f).margins(this, l = 8))
         head.addView(copyButton(getString(R.string.approval_copy_description)) {
             // The command goes to the clipboard as it came, byte for byte: never the marked text.
-            copyToClipboard("command", view.body)
+            copyToClipboard(server?.let { PortalLabels.clipboardLabel(PortalIdentity.of(it)) } ?: "command", view.body)
             snackbar(getString(R.string.approval_copied))
         })
         card.addView(head)
@@ -723,8 +756,8 @@ class ApprovalActivity : BaseFragmentActivity() {
         promptEffect = i.computedEffect
         val approval = i.request.approval ?: return
         val info = BiometricPrompt.PromptInfo.Builder()
-            .setTitle(BiometricPolicy.title(approval.code))
-            .setSubtitle(BiometricPolicy.subtitle(approval.service, ShownEffect.short(i.computedEffect ?: "")))
+            .setTitle(BiometricPolicy.title(server?.nickname ?: "this portal"))
+            .setSubtitle(BiometricPolicy.subtitle(approval.code, approval.service, ShownEffect.short(i.computedEffect ?: "")))
             .setAllowedAuthenticators(authenticators())
             .build()
         prompt.authenticate(info)
