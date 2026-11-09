@@ -1033,6 +1033,38 @@ mod tests {
     }
 
     #[test]
+    fn the_guide_names_the_six_codes_and_says_the_grouping_is_not_a_sandbox() {
+        let guide = include_str!("../../docs/inbox/agents.md");
+        for code in [
+            "agent_unknown",
+            "agent_blocked",
+            "agent_token_required",
+            "agent_token_conflict",
+            "agent_mismatch",
+            "invalid_agent_label",
+        ] {
+            assert!(guide.contains(&format!("| `{code}` |")), "{code}");
+        }
+        assert!(guide.contains("## Who is the agent"));
+        assert!(guide.contains("The grouping is not a sandbox."));
+        // The statuses of the guide are the statuses of the table of the channel.
+        for (code, status) in [
+            ("agent_unknown", "422"),
+            ("agent_blocked", "403"),
+            ("agent_token_required", "422"),
+            ("agent_token_conflict", "422"),
+            ("agent_mismatch", "403"),
+            ("invalid_agent_label", "422"),
+        ] {
+            let line = guide
+                .lines()
+                .find(|l| l.starts_with(&format!("| `{code}` |")))
+                .unwrap();
+            assert!(line.contains(&format!("| {status} |")), "{line}");
+        }
+    }
+
+    #[test]
     fn the_debug_text_of_the_arguments_never_holds_the_token() {
         let args = IntentArgs {
             agent_token: Some(TOKEN_A.into()),

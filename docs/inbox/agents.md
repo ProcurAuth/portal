@@ -1,6 +1,6 @@
 # Agents
 
-This chapter tells how an agent uses the portal. An agent is a program that asks a person to approve an action, or to answer. The root [`README.md`](../../README.md) has the generated reference of the configuration. [`SPEC.md`](SPEC.md) has the numbered requirements 3.8.1 to 3.8.7. [`configuration.md`](configuration.md) has the rules of the block `inbox.mcp`.
+This chapter tells how an agent uses the portal. An agent is a program that asks a person to approve an action, or to answer. The root [`README.md`](../../README.md) has the generated reference of the configuration. [`SPEC.md`](SPEC.md) has the numbered requirements 3.8.1 to 3.8.22 and 5.12.6. [`configuration.md`](configuration.md) has the rules of the block `inbox.mcp`.
 
 ## What goes where
 
@@ -29,7 +29,7 @@ The header is `Authorization: Bearer <key>`. A request with no valid key gets `4
 ## An approval, step by step
 
 1. Call `approval_intent` with `lease_s` or `until`. Add an explanation when it helps the person. Add the flags that you need.
-2. Keep the `approval_ref` of the answer. It works one time, for this key, for a short time (`valid_for_s`).
+2. Keep the `approval_ref` of the answer. It works one time, for this key, for a short time (`valid_for_s`). Keep `agent_token` too, if the answer has it (see "Who is the agent").
 3. Call the tool of the service that needs the approval. Give the `approval_ref` as an argument.
 4. The service answers `awaiting_approval` with a `request_id`. The action did not run.
 5. Call `get_answer` with the `request_id` and `wait_s`. Do it in a loop until the status is final. Each call renews the lease.
@@ -44,12 +44,12 @@ All the arguments are in the JSON object `arguments`. An argument that is not in
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `approval_intent` | `lease_s` or `until`; `explanation`, `explanation_format`, `language`, `allow_custom`, `allow_ask_back`, `hint`, `previous_id` | `approval_ref`, `valid_for_s` |
-| `get_answer` | `request_id`; `wait_s` (default `0`), `after_seq` | The status of the item (see below) |
-| `keepalive` | `request_id` | `status`, `lease_until` or `until`, and `revived` when the item is alive again |
-| `say` | `request_id`, `text`; `explanation_format`, `expect_seq` | `seq`, `status` |
-| `supersede` | `request_id` | An error that names the way (see "Replace an approval") |
-| `cancel` | `request_id` | `status` |
+| `approval_intent` | `lease_s` or `until`; `explanation`, `explanation_format`, `language`, `allow_custom`, `allow_ask_back`, `hint`, `previous_id`, `agent_label`, `agent_token` | `approval_ref`, `valid_for_s`, `agent_status`, and `agent_token` when the call made the agent |
+| `get_answer` | `request_id`; `wait_s` (default `0`), `after_seq`, `agent_token` | The status of the item (see below) |
+| `keepalive` | `request_id`; `agent_token` | `status`, `lease_until` or `until`, and `revived` when the item is alive again |
+| `say` | `request_id`, `text`; `explanation_format`, `expect_seq`, `agent_token` | `seq`, `status` |
+| `supersede` | `request_id`; `agent_token` | An error that names the way (see "Replace an approval") |
+| `cancel` | `request_id`; `agent_token` | `status` |
 
 A key that is not conversational does not see `say` and `supersede`. The tool `approval_intent` exists when the file has the block `inbox.approvals`. The list of the tools is the same for each call of one key. It has this order: `approval_intent`, `get_answer`, `keepalive`, `say`, `supersede`, `cancel`.
 
@@ -93,6 +93,90 @@ A key that is not conversational cannot set `allow_custom` or `allow_ask_back`. 
 | `untrusted` | The comment and the messages of the person (see below) |
 
 The result never has the login of the person, the device or the channel of the answer.
+
+## Who is the agent
+
+Several agents can share one key. An agent is one program, or one conversation of a model. The owner wants to see the agents apart in the Inbox. The portal cannot trust what an agent says about itself. So the portal gives the identity, and the owner gives the name.
+
+### The token
+
+- The portal gives a token to each agent. It has the prefix `agt_` and 43 more characters.
+- The result of the call that made the agent holds the token. No other result holds it. The portal keeps a digest of it only.
+- Keep the token. Send it in each later call.
+- The token is not a credential. The key proves who calls. A token of another key is unknown.
+- Never put the token in a text. Never send it to a service. The service does not need it.
+
+### Where to send the token
+
+Send the token in the header `Agent-Token`, or in the argument `agent_token`. The header is the sure way. The owner can set a fixed header in the config of the client, and then no model has to copy the token. The argument is for a client that cannot set a header.
+
+- Header and argument must have the same value. A different value gives `agent_token_conflict`. Two headers with two values give it too.
+- An empty value is no token.
+- On the REST door, the header works on each route. A `POST` can also have the member `agent_token`. A `GET` and a `DELETE` use the header only.
+- A token in the query string gives `400 invalid_query`, because the logs of the proxies keep the query.
+
+Most MCP clients have a field for fixed headers. Read the manual of your client. The tests of the portal do not use a real client.
+
+### How an agent starts
+
+1. Call `approval_intent` with no token. Add `agent_label` when you want.
+2. Read `agent_status` and `agent_token` in the result.
+3. Keep `agent_token`. Send it in each later call.
+
+A call that makes an item is the only call that makes an agent. A read, a `say`, a `cancel` and a `supersede` never make one. The agent that loses its token makes a new agent with the next `approval_intent`. The owner can merge the two.
+
+`agent_label` is what the agent says about itself. It is one line of 1 to 64 characters. It has no control character and no format character, such as a bidirectional control or a zero-width character.
+
+The portal refuses a bad label with `invalid_agent_label`. It never cleans a label. The owner reads the label as text that is not verified. The label never becomes the name of the agent. Only the owner gives the name.
+
+| `agent_status` | Use |
+|---|---|
+| `new` | The agent has the state `new`. The call made it now, or the owner did not allow it yet. With `inbox.agents.lock_new` true, the owner cannot approve its items until the owner allows it. The default is false: the agent works at once. |
+| `known` | The owner allowed the agent. |
+| `unattributed` | The key reached `max_per_key` or `new_per_hour`. The call is not an error. The item goes to the bucket "Unattributed" of the key. There is no token. |
+| `key` | The key is in the mode `key`, or the file has no block `inbox.agents`. There is nothing to keep. |
+
+### What a call can do
+
+A read goes by the key. A write goes by the agent.
+
+- A read is `get_answer` or `keepalive`. It needs the key only, so an agent that lost its token can still read the answer. A token that is present must be the agent of the item. Else the portal gives `agent_mismatch`.
+- A write is `say`, `cancel` or `supersede`. When the item belongs to an agent, the call needs the token of this agent. A call with no token gives `agent_token_required`. Another token gives `agent_mismatch`.
+- A write on an item of the bucket needs the key only.
+- `previous_id` must name an item of the same agent. Else the portal gives `agent_mismatch`. A new agent has no item, so it cannot follow the thread of another agent.
+- All limits stay per key: the rate, the number of open items, the mute and the deny time. An agent that drops its token does not escape them.
+- When a second agent asks for an effect that has an open request, it gets that request. The request keeps its first agent.
+
+### What the portal records
+
+The portal records hints about each agent: the label, the name of the client, the `User-Agent` and the address range of the client. The range is the first 24 bits of an IPv4 address, or the first 48 bits of an IPv6 address. The client name is `clientInfo` when the call has it, else the `User-Agent`. The portal seals the hints with the content keys. The owner sees them in a box "Not verified". Anyone who holds the key can send the same text, so the hints are no proof.
+
+### The mode of a key
+
+The mode is an attribute of the key. The owner sets it in the form of the key, when the file has the block `inbox.agents`. Without the block, each key acts as `key`.
+
+| Mode | Use | Default for |
+|---|---|---|
+| `key` | One agent for the key. No token. All items go to the bucket of the key. | Keys of the kind `api` |
+| `discover` | A call that makes an item and has no token makes an agent, and the result gives its token. | Keys of the kind `mcp` |
+| `enrolled` | The owner makes the agents. A call that makes an item and has no valid token gives `agent_token_required`. | None |
+
+### Errors of the agents
+
+| Code | Status | Cause |
+|---|---|---|
+| `agent_unknown` | 422 | The token is unknown, was erased, has a bad form, or belongs to another key or owner. The message tells to call `approval_intent` with no token. |
+| `agent_blocked` | 403 | The owner blocked this agent. |
+| `agent_token_required` | 422 | The mode is `enrolled` and the call has no token. Or a write on the item of an agent has no token. |
+| `agent_token_conflict` | 422 | The header and the argument differ. |
+| `agent_mismatch` | 403 | The token is not the agent of the item, or `previous_id` belongs to another agent. |
+| `invalid_agent_label` | 422 | `agent_label` has a control character, a format character or a bad length. |
+
+None of these errors is retryable. A call over `max_per_key` or `new_per_hour` is not an error: it gets the status `unattributed`.
+
+### The grouping is not a sandbox
+
+The grouping is not a sandbox. The agents of one key share the key, so they are one trust domain. An approval stays bound to its effect and not to an agent. Another agent of the key can run the same effect, with the same arguments, at the service. A copy of a token joins the group of the agent that owns it. For a hard limit between two agents, give each agent its own key.
 
 ## Markdown and code color
 
@@ -203,6 +287,8 @@ A tool error is a result with `isError` set to `true`. Its `structuredContent` h
 | `too_fast`, `rate_limited` | 429 | A limit. `retry_after` gives the seconds. `retryable` is `true`. |
 | `storage_degraded`, `unavailable`, `replication_unavailable` | 503 | The portal cannot write now. `retryable` is `true`. |
 
+The codes of the agents (`agent_unknown`, `agent_blocked`, `agent_token_required`, `agent_token_conflict`, `agent_mismatch` and `invalid_agent_label`) are in "Who is the agent".
+
 A tool that the key cannot see, and a tool that does not exist, give the JSON-RPC error `-32602`.
 
 ## The MCP endpoint
@@ -238,7 +324,7 @@ The REST routes use a key of the kind `api`. A body is a JSON object. A route th
 | `POST /api/v1/items/{id}/turns` | `say`, with `text` and `expect_seq` | `201` |
 | `POST /api/v1/items/{id}/supersede` | `supersede` | `422 use_service_tool` |
 
-A `GET` with `?wait=N` renews the lease and waits at most `N` seconds, and never more than `inbox.items.wait_max`. A `GET` without `wait` reads and renews nothing. The parameter `after_seq` works as the argument of the tool. A parameter that is not a whole number gives `400`.
+Each route reads the header `Agent-Token`. See "Who is the agent". A `GET` with `?wait=N` renews the lease and waits at most `N` seconds, and never more than `inbox.items.wait_max`. A `GET` without `wait` reads and renews nothing. The parameter `after_seq` works as the argument of the tool. A parameter that is not a whole number gives `400`.
 
 ## Clients and time limits
 
