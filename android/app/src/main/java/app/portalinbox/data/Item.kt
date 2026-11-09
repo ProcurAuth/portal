@@ -1,6 +1,7 @@
 package app.portalinbox.data
 
 import app.portalinbox.core.ResolvedView
+import app.portalinbox.proto.AgentResultFrame
 import app.portalinbox.proto.AnswerResultFrame
 import app.portalinbox.proto.ClientFrame
 import app.portalinbox.proto.ClientFrames
@@ -73,7 +74,10 @@ data class Turn(val serverId: Long, val frame: MessageFrame, val receivedAtMs: L
 }
 
 enum class OutboxType(val wire: String) {
-    ANSWER("answer"), REPLY("reply");
+    ANSWER("answer"), REPLY("reply"),
+
+    /** An action of the owner on an agent (lot G4). Its `request_id` column holds the id of the agent. */
+    AGENT_DO("agent_do");
 
     companion object {
         fun of(wire: String): OutboxType = entries.first { it.wire == wire }
@@ -128,6 +132,15 @@ sealed interface ItemEvent {
     data class Digest(val serverId: Long, val deliveryId: String, val count: Long, val oldestCreatedAtMs: Long, val ids: List<String>) : ItemEvent
 
     data class AnswerResult(val serverId: Long, val result: AnswerResultFrame, val entry: OutboxEntry) : ItemEvent
+
+    /** The phone did not hold this agent, and it is `new`. The caller counts it in the one notification, once. */
+    data class NewAgent(val agent: Agent) : ItemEvent
+
+    /** A frame with a higher `rev` changed an agent that the phone held. */
+    data class AgentChanged(val agent: Agent) : ItemEvent
+
+    /** The result of an action of the owner on an agent. [entry] is the outbox entry that it closed, if the phone knew it. */
+    data class AgentResult(val serverId: Long, val result: AgentResultFrame, val entry: OutboxEntry?) : ItemEvent
 }
 
 /** The result of a frame: the delivery to acknowledge (after the durable write) and the events. */
@@ -153,6 +166,9 @@ enum class Refusal {
 
     /** The text or the combination breaks a rule of the frame. */
     BAD_INPUT,
+
+    /** An action on an agent: the phone does not hold the agent, or the action does not fit its state. */
+    BAD_STATE,
 }
 
 sealed interface Submit {

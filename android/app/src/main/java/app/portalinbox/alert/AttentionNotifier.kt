@@ -61,6 +61,8 @@ object AttentionNotifier {
         // The phone has shown what it holds: a restart does not show it as new.
         val repo = Items.repository(context)
         for (i in input.items) if (!i.notified) repo.markNotified(i.serverId, i.requestId)
+        // A new agent counts once: a restart of the process never alerts again for an agent that the notification showed.
+        for (n in input.agents) if (!n.notified) repo.markAgentNotified(n.serverId, n.agentId)
         val store = Store.get(context)
         for (a in input.alerts) if (!a.notified) store.markNotified(a.serverId, a.alertId)
     }
@@ -131,7 +133,10 @@ object AttentionNotifier {
             },
             phoneNow,
         )
-        return Attention.Input(portals, items, alerts, pendingReplies, phoneNow, network = hasNetwork(context), digests = waiting)
+        // The agents that wait for the owner: state `new`, never a bucket. Only the name of the key goes in: it is text of the portal.
+        val agents = repo.allAgents().filter { it.serverId in ids && it.isNew && !it.isBucket }
+            .map { Attention.NewAgent(it.serverId, it.agentId, it.keyName, it.notified) }
+        return Attention.Input(portals, items, alerts, pendingReplies, phoneNow, network = hasNetwork(context), digests = waiting, agents = agents)
     }
 
     /** True when the phone has a network. With no network the status notification says it once, and no portal warns. */

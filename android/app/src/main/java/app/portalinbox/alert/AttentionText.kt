@@ -28,15 +28,30 @@ object AttentionText {
 
     private fun count(n: Int, one: String, many: String) = if (n == 1) "1 $one" else "$n $many"
 
-    /** "3 to answer, 1 reply, 2 alerts". Empty when none of the three counts has a value. */
-    fun counts(toAnswer: Int, replies: Int, alerts: Int): String = listOfNotNull(
+    /** "3 to answer, 1 reply, 2 alerts, 1 new agent". Empty when none of the counts has a value. A new agent is a count, never a text. */
+    fun counts(toAnswer: Int, replies: Int, alerts: Int, newAgents: Int = 0): String = listOfNotNull(
         if (toAnswer > 0) "$toAnswer to answer" else null,
         if (replies > 0) count(replies, "reply", "replies") else null,
         if (alerts > 0) count(alerts, "alert", "alerts") else null,
+        if (newAgents > 0) count(newAgents, "new agent", "new agents") else null,
     ).joinToString(", ")
 
-    /** The counts of one portal: "2 to answer, 1 alert". */
+    /** The counts of one portal: "2 to answer, 1 alert". The new agents have their own part: see [newAgentText]. */
     private fun countsOf(p: Attention.Line) = counts(p.toAnswer, p.replies, p.alerts)
+
+    /**
+     * "new agent on ops-key" for one key, "new agents on ops-key, build-key" for two keys, "3 new agents" when many keys are
+     * involved. The key names are text of the portal. They are not on the lock screen: this part is only in the private version.
+     */
+    fun newAgentText(p: Attention.Line): String? {
+        if (p.newAgents == 0) return null
+        val keys = p.newAgentKeys.map { VisibleText.escapeLine(it) }
+        return when {
+            p.newAgents == 1 && keys.size == 1 -> "new agent on ${keys[0]}"
+            keys.size in 1..2 -> "${p.newAgents} new agents on ${keys.joinToString(", ")}"
+            else -> "${p.newAgents} new agents"
+        }
+    }
 
     fun downText(p: Attention.Line): String? {
         val d = p.down ?: return null
@@ -56,12 +71,12 @@ object AttentionText {
      * or "Production: 5 to answer · 3 waiting, oldest 6 days".
      */
     fun lineOf(p: Attention.Line): String {
-        val parts = listOfNotNull(countsOf(p).ifEmpty { null }, waitingText(p), downText(p))
+        val parts = listOfNotNull(countsOf(p).ifEmpty { null }, newAgentText(p), waitingText(p), downText(p))
         return name(p) + ": " + parts.joinToString(" · ")
     }
 
     fun of(a: Attention.Aggregate): Content {
-        val counts = counts(a.toAnswer, a.replies, a.alerts)
+        val counts = counts(a.toAnswer, a.replies, a.alerts, a.newAgents)
         val names = a.lines.joinToString(", ") { name(it) }
         val oldest = a.oldestAgeMs?.let { "the oldest waits " + Ages.long(it) }
         val title: String
@@ -89,7 +104,7 @@ object AttentionText {
             listOfNotNull(names, oldest?.replaceFirstChar { it.uppercase() }, downNames.ifEmpty { null }).joinToString(" · ")
         }
         // One portal that is up, with no digest: the two lines say it all. Else one line for each portal.
-        val lines = if (a.lines.size == 1 && a.lines[0].down == null && a.lines[0].waiting == 0L) emptyList() else a.lines.map { lineOf(it) }
+        val lines = if (a.lines.size == 1 && a.lines[0].down == null && a.lines[0].waiting == 0L && a.lines[0].newAgents == 0) emptyList() else a.lines.map { lineOf(it) }
         val shown = a.lines.filter { !it.hideNameOnLock }.joinToString(", ") { name(it) }
         val publicText = if (shown.isEmpty()) PUBLIC_HINT else "$shown · $PUBLIC_HINT"
         return Content(title, text, lines, publicTitle, publicText)

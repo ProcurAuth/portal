@@ -1,5 +1,6 @@
 package app.portalinbox.testsupport
 
+import app.portalinbox.data.Agent
 import app.portalinbox.data.Item
 import app.portalinbox.data.ItemRepository
 import app.portalinbox.data.OpenCount
@@ -20,6 +21,7 @@ class MemoryItemRepository : ItemRepository {
     private var early = HashMap<Key, SettledFrame>()
     private var outbox = LinkedHashMap<Key, OutboxEntry>()
     private var prefs = HashMap<Long, StoredPrefs>()
+    private var agents = LinkedHashMap<Key, Agent>()
 
     var transactions = 0
         private set
@@ -27,7 +29,7 @@ class MemoryItemRepository : ItemRepository {
     @Suppress("UNCHECKED_CAST")
     override fun <T> transaction(block: () -> T): T {
         transactions++
-        val saved = listOf(LinkedHashMap(items), HashMap(deliveries), ArrayList(turns), HashMap(early), LinkedHashMap(outbox), HashMap(prefs))
+        val saved = listOf(LinkedHashMap(items), HashMap(deliveries), ArrayList(turns), HashMap(early), LinkedHashMap(outbox), HashMap(prefs), LinkedHashMap(agents))
         try {
             return block()
         } catch (e: Throwable) {
@@ -37,6 +39,7 @@ class MemoryItemRepository : ItemRepository {
             early = saved[3] as HashMap<Key, SettledFrame>
             outbox = saved[4] as LinkedHashMap<Key, OutboxEntry>
             prefs = saved[5] as HashMap<Long, StoredPrefs>
+            agents = saved[6] as LinkedHashMap<Key, Agent>
             throw e
         }
     }
@@ -122,6 +125,20 @@ class MemoryItemRepository : ItemRepository {
     }
 
     fun deliveryCount(serverId: Long): Int = deliveries.keys.count { it.serverId == serverId }
+
+    override fun agent(serverId: Long, agentId: String): Agent? = agents[Key(serverId, agentId)]
+
+    override fun putAgent(agent: Agent) {
+        agents[Key(agent.serverId, agent.agentId)] = agent
+    }
+
+    override fun agents(serverId: Long): List<Agent> = agents.values.filter { it.serverId == serverId }.sortedBy { it.agentId }
+
+    override fun allAgents(): List<Agent> = agents.values.sortedWith(compareBy({ it.serverId }, { it.agentId }))
+
+    override fun markAgentNotified(serverId: Long, agentId: String) {
+        agents[Key(serverId, agentId)]?.let { agents[Key(serverId, agentId)] = it.copy(notified = true) }
+    }
 
     override fun prefs(serverId: Long): StoredPrefs? = prefs[serverId]
 

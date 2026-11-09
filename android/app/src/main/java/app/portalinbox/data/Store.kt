@@ -55,7 +55,7 @@ data class Alert(
  * level.
  */
 class Store private constructor(private val appContext: Context) :
-    SQLiteOpenHelper(appContext, "inbox.db", null, 9) {
+    SQLiteOpenHelper(appContext, "inbox.db", null, 10) {
 
     companion object {
         @Volatile private var instance: Store? = null
@@ -172,6 +172,12 @@ class Store private constructor(private val appContext: Context) :
                 appContext.getSharedPreferences("inbox_ui", Context.MODE_PRIVATE)
                     .edit().putBoolean(PREF_ENROLL_AGAIN, true).apply()
             }
+        } else if (oldVersion < 10) {
+            // v10 (lot G4): the table `agents`, and the frame `request` names its agent (lot G2). A stored request of v9 has no
+            // agent and the strict reader refuses it, so the tables of the items are made again. The portals stay. The
+            // portal sends the open items again at the next `sync`. No migration.
+            ItemSchema.drop(db)
+            ItemSchema.create(db)
         }
     }
 

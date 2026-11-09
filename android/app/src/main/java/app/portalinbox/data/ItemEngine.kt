@@ -2,6 +2,9 @@ package app.portalinbox.data
 
 import app.portalinbox.core.EffectHasher
 import app.portalinbox.proto.Action
+import app.portalinbox.proto.AgentFrame
+import app.portalinbox.proto.AgentOp
+import app.portalinbox.proto.AgentResultFrame
 import app.portalinbox.proto.AnswerFrame
 import app.portalinbox.proto.AnswerResultFrame
 import app.portalinbox.proto.AnswerStatus
@@ -51,6 +54,8 @@ class ItemEngine(
         is SettledFrame -> onSettled(serverId, frame)
         is DigestFrame -> onDigest(serverId, frame)
         is AnswerResultFrame -> onAnswerResult(serverId, frame)
+        is AgentFrame -> onAgent(serverId, frame)
+        is AgentResultFrame -> onAgentResult(serverId, frame)
         else -> Outcome.NONE
     }
 
@@ -156,6 +161,70 @@ class ItemEngine(
         Outcome(null, listOf(ItemEvent.AnswerResult(serverId, f, entry.copy(result = f.status.wire, closedAtMs = now))))
     }
 
+    // ------------------------------------------------------------ the agents
+
+    /**
+     * Keeps an `agent` frame. The phone holds one row for each portal and agent and ignores a frame with a lower `rev`. A frame
+     * with the same `rev` only renews the snapshot (`open`, `last_seen_ms`). The frame is always acknowledged: the portal stops
+     * sending it. An agent that the phone did not hold and that is `new` gives [ItemEvent.NewAgent], once: the flag `notified`
+     * is kept with the row, so a frame that comes again never gives the event again.
+     */
+    fun onAgent(serverId: Long, f: AgentFrame): Outcome = repo.transaction {
+        if (repo.hasDelivery(serverId, f.id)) return@transaction Outcome(f.id, emptyList())
+        val now = clock()
+        repo.addDelivery(serverId, f.id, now)
+        val held = repo.agent(serverId, f.agentId)
+        if (held != null && f.rev < held.rev) return@transaction Outcome(f.id, emptyList())
+        val agent = Agent.of(serverId, f, now, notified = held?.notified ?: false)
+        repo.putAgent(agent)
+        val events = ArrayList<ItemEvent>(1)
+        when {
+            held == null && agent.isNew && !agent.isBucket -> events += ItemEvent.NewAgent(agent)
+            held != null && f.rev > held.rev -> events += ItemEvent.AgentChanged(agent)
+            held == null -> events += ItemEvent.AgentChanged(agent)
+        }
+        Outcome(f.id, events)
+    }
+
+    /** The result of an action on an agent. It has no delivery id. The entry of the outbox closes, so the phone stops sending it. */
+    fun onAgentResult(serverId: Long, f: AgentResultFrame): Outcome = repo.transaction {
+        val entry = repo.outbox(serverId, f.clientMsgId)
+        if (entry == null || !entry.isPending || entry.type != OutboxType.AGENT_DO) return@transaction Outcome.NONE
+        val now = clock()
+        repo.closeOutbox(serverId, f.clientMsgId, f.status.wire, now)
+        Outcome(null, listOf(ItemEvent.AgentResult(serverId, f, entry.copy(result = f.status.wire, closedAtMs = now))))
+    }
+
+    /**
+     * Asks the portal to do [op] on an agent: the frame waits in the outbox until the result comes. Every action is idempotent
+     * on the portal, so the phone sends it again after each `welcome`. No biometric check: an action on an agent never runs a
+     * command. The words of a refusal are in [OutboxAnswer.submitLine].
+     */
+    fun agentDo(serverId: Long, agentId: String, op: AgentOp, name: String? = null, into: String? = null): Submit {
+        val agent = repo.agent(serverId, agentId)
+        val directory = AgentDirectory(repo.agents(serverId))
+        val target = into?.let { repo.agent(serverId, it) }
+        val plan = AgentActions.plan(agent, op, name, target, agent?.let { directory.mergeTargets(it) }.orEmpty(), newMsgId())
+        return when (plan) {
+            is AgentActions.Plan.Refused -> refused(plan.reason)
+            is AgentActions.Plan.Send -> {
+                val text = try {
+                    String(ClientFrames.encode(plan.frame), Charsets.UTF_8)
+                } catch (e: FrameException) {
+                    return refused(Refusal.BAD_INPUT)
+                }
+                // The same action on the same agent that already waits is not queued twice.
+                val twin = repo.pendingOutbox(serverId).firstOrNull {
+                    it.type == OutboxType.AGENT_DO && it.requestId == agentId && AgentActions.frameOf(it)?.let { f -> f.op == op && f.name == plan.frame.name && f.into == plan.frame.into } == true
+                }
+                if (twin != null) return Submit.Queued(twin)
+                val entry = OutboxEntry(serverId, plan.frame.clientMsgId, agentId, OutboxType.AGENT_DO, text, clock(), 0, null, null, null)
+                repo.putOutbox(entry)
+                Submit.Queued(entry)
+            }
+        }
+    }
+
     /** The item after a result. The `state` of the result is the state that the server holds. */
     private fun afterResult(item: Item, entry: OutboxEntry, f: AnswerResultFrame): Item {
         val byStatus: ItemState? = when (f.status) {
@@ -192,14 +261,16 @@ class ItemEngine(
     }
 
     /**
-     * The items that the phone holds open, with the last turn that it knows. When more than 500
-     * are open, the oldest 500 go: the server also sends each `settled` frame that the phone missed.
+     * The items that the phone holds open, with the last turn that it knows, and the agents that it holds with their `rev`
+     * (at most 200: see [AgentSync]). When more than 500 items are open, the oldest 500 go: the server also sends each
+     * `settled` frame that the phone missed.
      */
     fun syncFrame(serverId: Long): SyncFrame = SyncFrame(
         repo.openItems(serverId).take(MAX_SYNC_ENTRIES).map {
             val lastTurn = repo.turns(serverId, it.requestId).maxOfOrNull { t -> t.seq } ?: 0L
             OpenRef(it.requestId, maxOf(it.request.seq, lastTurn))
         },
+        AgentSync.refs(repo.agents(serverId)),
     )
 
     fun pendingOutbox(serverId: Long): List<OutboxEntry> = repo.pendingOutbox(serverId)

@@ -131,7 +131,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
 
     /**
      * Sends the frames of the outbox that this session did not send yet. Call it after
-     * `ItemEngine.approve`, `decline` or `reply`. Offline, the frames wait for the next `welcome`.
+     * `ItemEngine.approve`, `decline`, `reply` or `agentDo`. Offline, the frames wait for the next `welcome`.
      */
     fun flushOutbox() {
         events.offer(Event.Flush)
@@ -344,11 +344,10 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                                 if (frame.isNotEnabled) itemsEnabled = false
                                 onPrefsError(frame)
                             }
-                            is RequestFrame, is MessageFrame, is SettledFrame, is DigestFrame, is AnswerResultFrame -> onItemFrame(frame)
-                            // The agents (lot G4 stores them and shows them). Until then the phone confirms the frame and keeps nothing:
-                            // its `sync` lists no agent, so the server sends them again.
-                            is AgentFrame -> send(AckFrame(frame.id))
-                            is AgentResultFrame -> {}
+                            // The agents (lot G4): the engine keeps an `agent` frame by `rev`, the receipt goes after the write, and an
+                            // `agent_result` closes the entry of the outbox and gives a line for the snackbar.
+                            is RequestFrame, is MessageFrame, is SettledFrame, is DigestFrame, is AnswerResultFrame,
+                            is AgentFrame, is AgentResultFrame -> onItemFrame(frame)
                         }
                     }
                     is Event.Command -> if (connected) send(e.frame)

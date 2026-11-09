@@ -1,5 +1,7 @@
 package app.portalinbox.testsupport
 
+import app.portalinbox.proto.AgentFrame
+import app.portalinbox.proto.AgentResultFrame
 import app.portalinbox.proto.AnswerResultFrame
 import app.portalinbox.proto.DigestFrame
 import app.portalinbox.proto.MessageFrame
@@ -86,4 +88,36 @@ object Make {
     }
 
     fun welcome(file: String = "welcome.json"): WelcomeFrame = ServerFrames.decode(Fixtures.golden("server", file).text) as WelcomeFrame
+
+    /** The ids of the agents that the tests use. */
+    fun agentId(n: Int): String = hex(0xA000 + n)
+
+    /**
+     * An `agent` frame from the golden file of the state ([file]: `agent-known.json`, `agent-new.json`...). The members that the
+     * test sets are put over the golden values. `merged_into` is added by [edit].
+     */
+    fun agent(
+        agentId: String,
+        deliveryId: String,
+        rev: Long = 1,
+        file: String = "agent-known.json",
+        edit: (JSONObject) -> Unit = {},
+    ): AgentFrame {
+        val o = golden(file)
+        o.put("id", deliveryId).put("agent_id", agentId).put("rev", rev)
+        edit(o)
+        return ServerFrames.decode(StrictJson.compact(o)) as AgentFrame
+    }
+
+    fun agentResult(clientMsgId: String, agentId: String, status: String = "ok"): AgentResultFrame {
+        val o = JSONObject().put("t", "agent_result").put("client_msg_id", clientMsgId).put("agent_id", agentId).put("status", status)
+        return ServerFrames.decode(StrictJson.compact(o)) as AgentResultFrame
+    }
+
+    /** Puts a request into the group of an agent: `from.agent_id`, `from.label`, the kind and the state of the agent. */
+    fun asAgent(
+        o: JSONObject, agentId: String, label: String, state: String = "known", kind: String = "agent", keyName: String = "ops-key",
+    ) {
+        o.getJSONObject("from").put("agent_id", agentId).put("label", label).put("agent_state", state).put("agent_kind", kind).put("key_name", keyName)
+    }
 }
