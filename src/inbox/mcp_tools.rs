@@ -848,6 +848,7 @@ pub async fn approval_intent(app: &App, who: &Requester, args: IntentArgs) -> Re
             allow_ask_back: args.allow_ask_back,
             hint: args.hint,
             previous_id: args.previous_id,
+            agent_label: args.agent_label,
         },
     )
     .await?;

@@ -16,9 +16,13 @@ struct Agent {
 
 /// A server like the rig of the series A, with the kind `api` on and the block `inbox.mcp`. `mcp` holds the keys of the
 /// block.
-fn agent_rig(backend: &Backend, mcp: &str) -> Option<Rig> {
-    let inbox =
-        InboxRig::with_approvals(backend, &format!("consume_within = \"5m\" }} mcp {{ {mcp}"))?;
+///
+/// `blocks` holds more blocks of `inbox` after the block `approvals` (for example `agents { ... }`).
+fn agent_rig_with(backend: &Backend, blocks: &str, mcp: &str) -> Option<Rig> {
+    let inbox = InboxRig::with_approvals(
+        backend,
+        &format!("consume_within = \"5m\" }} {blocks} mcp {{ {mcp}"),
+    )?;
     let port = free_port();
     let mut env = inbox.env.clone();
     env.push(("TEST_PDP_DB".into(), PDP_DB_TOKEN.into()));
@@ -80,9 +84,13 @@ fn agent_rig(backend: &Backend, mcp: &str) -> Option<Rig> {
 }
 
 fn each_agent_rig(mcp: &str, test: impl Fn(&Rig, &str)) {
+    each_agent_rig_with("", mcp, test);
+}
+
+fn each_agent_rig_with(blocks: &str, mcp: &str, test: impl Fn(&Rig, &str)) {
     stay_in_a_minute();
     for backend in backends() {
-        let Some(r) = agent_rig(&backend, mcp) else {
+        let Some(r) = agent_rig_with(&backend, blocks, mcp) else {
             eprintln!("INBOX_TEST_PG is not set: skipped on PostgreSQL");
             continue;
         };
@@ -1427,3 +1435,7 @@ fn get_answer_returns_the_answers_of_a_form_in_untrusted() {
         }
     });
 }
+
+// The tests of lot G1b: the agent of a call.
+#[path = "agent_who_tests.rs"]
+mod who;
