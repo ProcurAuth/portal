@@ -17,12 +17,8 @@ struct Agent {
 /// A server like the rig of the series A, with the kind `api` on and the block `inbox.mcp`. `mcp` holds the keys of the
 /// block.
 ///
-/// `blocks` holds more blocks of `inbox` after the block `approvals` (for example `agents { ... }`).
-fn agent_rig_with(backend: &Backend, blocks: &str, mcp: &str) -> Option<Rig> {
-    agent_rig_full(backend, "", blocks, mcp)
-}
-
-/// The same, with more keys for the block `inbox.approvals` (`approvals`, for example a higher limit of the intents).
+/// `approvals` holds more keys for the block `inbox.approvals` (for example a higher limit of the intents). `blocks` holds
+/// more blocks of `inbox` after the block `approvals` (for example `agents { ... }`).
 fn agent_rig_full(backend: &Backend, approvals: &str, blocks: &str, mcp: &str) -> Option<Rig> {
     let inbox = InboxRig::with_approvals(
         backend,

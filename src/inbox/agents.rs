@@ -813,16 +813,13 @@ mod tests {
         let bare = &token[4..];
         // A token with its prefix, a bare token and a token that other characters of the alphabet touch.
         for text in [
-            format!("use {}", &*token),
+            format!("use {}", *token),
             format!("bare {bare}."),
             format!("x{bare}y"),
-            format!("a-{}", &*token),
-            format!("{}\n{}", "words", &*token),
+            format!("a-{}", *token),
+            format!("{}\n{}", "words", *token),
         ] {
-            assert!(
-                token_candidates(&text).contains(&token.to_string()),
-                "{text}"
-            );
+            assert!(token_candidates(&text).contains(&*token), "{text}");
         }
         // No run of 43 characters: no candidate and no work.
         assert!(token_candidates("").is_empty());
@@ -837,7 +834,7 @@ mod tests {
         assert_eq!(token_candidates(&run).len(), 8);
         // A text with a non-ASCII character never breaks a boundary.
         assert!(token_candidates("é".repeat(100).as_str()).is_empty());
-        assert!(token_candidates(&format!("é{bare}é")).contains(&token.to_string()));
+        assert!(token_candidates(&format!("é{bare}é")).contains(&*token));
     }
 
     fn row(id: &str, state: AgentState, seen: i64) -> AgentRow {
