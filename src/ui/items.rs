@@ -397,7 +397,7 @@ fn group(g: &Group, p: &OpenItems) -> String {
     format!(
         r#"<details class="agrp{class}" open><summary><span class="agrp__chev">{}</span><span class="agrp__name">{}</span>{chip}{}<span class="agrp__sum"><b>{}</b> open</span><span class="grow"></span>{manage}</summary>{}<ul class="oiList">{rows}</ul></details>"#,
         icon("chevron-right"),
-        html_escape(&a.label),
+        html::escape(&a.label),
         state_pill(a, false),
         g.lines.len(),
         hints_line(a, p.now_ms),
@@ -782,7 +782,7 @@ fn history_row(line: &Line, chained: bool, h: &History) -> String {
             let name = format!(
                 r#"<a href="{ITEMS}?agent={}">{}</a>"#,
                 html_escape(&a.agent_id),
-                html_escape(&a.label)
+                html::escape(&a.label)
             );
             if a.plain {
                 name

@@ -615,7 +615,7 @@ pub fn agent_page(frame: &Frame, p: &AgentPage, notice: Option<Notice>) -> Strin
     let a = &p.agent;
     let mut out = String::new();
     notice_html(&mut out, notice);
-    let name = html_escape(&a.label);
+    let name = html::escape(&a.label);
     let kind = if a.is_bucket() {
         format!(
             r#"<span class="kind">{}Unattributed</span>"#,
@@ -716,7 +716,7 @@ pub fn agents_page(frame: &Frame, l: &AgentsList, notice: Option<Notice>) -> Str
             body,
             r#"<tr><td><a href="{}">{}</a> {}</td><td>{pill}</td><td>{}</td><td class="muted">{}{idle}</td></tr>"#,
             html_escape(&a.href()),
-            html_escape(&a.label),
+            html::escape(&a.label),
             key_chip(&a.key_name),
             r.open,
             ago(l.now_ms, a.last_seen_at),
@@ -773,7 +773,7 @@ pub fn sender_box(s: &Sender, owner_login: &str) -> String {
     };
     let main = format!(
         r#"<div class="sender__main"><span class="sender__label">{label}</span><span class="sender__name">{}</span>{chip}{}<span class="sender__of">of <b>{}</b>{link}</span></div>"#,
-        html_escape(&a.label),
+        html::escape(&a.label),
         state_pill(a, true),
         html_escape(owner_login),
     );
@@ -838,7 +838,7 @@ pub fn about_sender(s: &Sender, owner_login: &str, agent_seen: &str) -> String {
     };
     format!(
         r#"<div class="sidebox"><h3>About the sender</h3><dl class="facts"><div><dt>{kind}</dt><dd>{}</dd></div>{key}<div><dt>Owner</dt><dd>{}</dd></div><div><dt>Agent seen</dt><dd>{agent_seen}</dd></div></dl><p>{note}</p></div>"#,
-        html_escape(&a.label),
+        html::escape(&a.label),
         html_escape(owner_login),
     )
 }
