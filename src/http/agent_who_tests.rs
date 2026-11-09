@@ -1774,7 +1774,8 @@ fn metric(r: &Rig, line: &str) -> u64 {
 /// makes one more alert, and nothing grows.
 #[test]
 fn flood_of_calls_with_no_token_keeps_the_cap_one_alert_each_hour_and_the_rows_bounded() {
-    each_agent_rig_with(
+    each_agent_rig_full(
+        "max_requests_per_key_per_hour = 1000",
         "agents { max_per_key = 3 new_per_hour = 100 }",
         r#"rate_limit_per_minute = 10000"#,
         |r, name| {
@@ -1845,7 +1846,8 @@ fn flood_of_calls_with_no_token_keeps_the_cap_one_alert_each_hour_and_the_rows_b
 /// cap, and the alert and the events stay one each hour.
 #[test]
 fn flood_against_new_per_hour_goes_to_the_bucket_and_the_next_hour_makes_at_most_the_rate() {
-    each_agent_rig_with(
+    each_agent_rig_full(
+        "max_requests_per_key_per_hour = 1000",
         "agents { max_per_key = 50 new_per_hour = 4 }",
         r#"rate_limit_per_minute = 10000"#,
         |r, name| {
@@ -1893,7 +1895,8 @@ fn flood_against_new_per_hour_goes_to_the_bucket_and_the_next_hour_makes_at_most
 /// flood of agents.
 #[test]
 fn flood_of_tokens_of_a_blocked_agent_and_of_unknown_tokens_writes_nothing() {
-    each_agent_rig_with(
+    each_agent_rig_full(
+        "max_requests_per_key_per_hour = 1000",
         "agents { max_per_key = 3 new_per_hour = 10 }",
         r#"rate_limit_per_minute = 10000"#,
         |r, name| {

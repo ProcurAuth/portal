@@ -19,9 +19,14 @@ struct Agent {
 ///
 /// `blocks` holds more blocks of `inbox` after the block `approvals` (for example `agents { ... }`).
 fn agent_rig_with(backend: &Backend, blocks: &str, mcp: &str) -> Option<Rig> {
+    agent_rig_full(backend, "", blocks, mcp)
+}
+
+/// The same, with more keys for the block `inbox.approvals` (`approvals`, for example a higher limit of the intents).
+fn agent_rig_full(backend: &Backend, approvals: &str, blocks: &str, mcp: &str) -> Option<Rig> {
     let inbox = InboxRig::with_approvals(
         backend,
-        &format!("consume_within = \"5m\" }} {blocks} mcp {{ {mcp}"),
+        &format!("consume_within = \"5m\" {approvals} }} {blocks} mcp {{ {mcp}"),
     )?;
     let port = free_port();
     let mut env = inbox.env.clone();
@@ -88,9 +93,13 @@ fn each_agent_rig(mcp: &str, test: impl Fn(&Rig, &str)) {
 }
 
 fn each_agent_rig_with(blocks: &str, mcp: &str, test: impl Fn(&Rig, &str)) {
+    each_agent_rig_full("", blocks, mcp, test);
+}
+
+fn each_agent_rig_full(approvals: &str, blocks: &str, mcp: &str, test: impl Fn(&Rig, &str)) {
     stay_in_a_minute();
     for backend in backends() {
-        let Some(r) = agent_rig_with(&backend, blocks, mcp) else {
+        let Some(r) = agent_rig_full(&backend, approvals, blocks, mcp) else {
             eprintln!("INBOX_TEST_PG is not set: skipped on PostgreSQL");
             continue;
         };
