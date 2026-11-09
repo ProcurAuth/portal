@@ -202,7 +202,7 @@ class AgentGroupsTest {
         hold(1, billing) { it.put("last_seen_ms", now - 60_000) }
         ask(1, billing, "x", 30)
         val g = groups().single()
-        assertEquals("ops-key · last call 1 min ago", AgentGroups.keyLine(g, now))
+        assertEquals("claude-laptop · last call 1 min ago", AgentGroups.keyLine(g, now))
     }
 
     @Test
@@ -212,8 +212,8 @@ class AgentGroupsTest {
         ask(1, fresh, "ops-key #4", 30, state = "new")
         ask(1, bucket, "Unattributed", 30, kind = "bucket")
         val g = groups()
-        assertEquals("ops-key · new, not named", AgentGroups.keyLine(g.first { it.isNew }, now))
-        assertEquals("ops-key · agent not known", AgentGroups.keyLine(g.first { it.isBucket }, now))
+        assertEquals("claude-laptop · new, not named", AgentGroups.keyLine(g.first { it.isNew }, now))
+        assertEquals("claude-laptop · agent not known", AgentGroups.keyLine(g.first { it.isBucket }, now))
     }
 
     @Test
