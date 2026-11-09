@@ -38,6 +38,8 @@ object ThreadState {
         /** `server time - phone time`: puts the time of a message of the outbox on the clock of the server. */
         val offsetMs: Long = 0L,
         val zone: ZoneId = ZoneId.systemDefault(),
+        /** The name of the agent from the table of the agents (lot G4), or null: then `from.label` of the frame is the name. */
+        val agentName: String? = null,
     )
 
     enum class Delivery { DELIVERED, QUEUED, SENT, NOT_SENT }
@@ -128,7 +130,7 @@ object ThreadState {
 
     fun of(i: Input): Screen {
         val item = i.item
-        val agent = VisibleText.escapeLine(item.request.from.label)
+        val agent = VisibleText.escapeLine(i.agentName ?: item.request.from.label)
         val waiting = waitingForAgent(item, i.outbox)
         val allowed = item.request.allowAskBack && item.request.from.interaction != Interaction.ONE_SHOT
         val phase = when {
@@ -148,7 +150,7 @@ object ThreadState {
         }
         return Screen(
             title = ItemTexts.title(item),
-            senderLine = ItemTexts.senderLine(item),
+            senderLine = ItemTexts.senderLine(item, i.agentName ?: item.request.from.label),
             statusLine = statusLine(item, phase, i.nowMs),
             statusSpoken = statusSpoken(item, phase, i.nowMs),
             chip = chipOf(item),

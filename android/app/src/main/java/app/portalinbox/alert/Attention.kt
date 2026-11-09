@@ -36,7 +36,7 @@ object Attention {
     /** The sound of a new thing. [PHONE]: the sound mode of the phone decides. [RING]: one sound on the alarm stream. [ALARM]: the looping alarm. */
     enum class Sound { NONE, PHONE, RING, ALARM }
 
-    enum class What { APPROVAL, QUESTION, REPLY, ALERT, DOWN, DIGEST }
+    enum class What { APPROVAL, QUESTION, REPLY, ALERT, DOWN, DIGEST, NEW_AGENT }
 
     enum class DownKind { OFFLINE, REENROLL, KEY_CHANGED }
 
@@ -58,10 +58,17 @@ object Attention {
     data class Reply(val serverId: Long, val requestId: String, val urgency: Urgency)
 
     /**
+     * A new agent that waits for the first decision of the owner (lot G4). [keyName] is text of the portal (the name of the key),
+     * never text that an agent sent. [notified]: the phone already counted it before the process started.
+     */
+    data class NewAgent(val serverId: Long, val agentId: String, val keyName: String, val notified: Boolean)
+
+    /**
      * [items]: the items that still wait for the owner (open, with no answer on its way). [alerts]: the unread alerts.
      * [phoneNowMs]: the time of the phone, for the quiet hours and the age of a warning. [network]: false when the phone has no
      * network. Then no portal warning is made: the status notification says "No network" once. [digests]: what still waits
-     * at each portal that sent a current digest ([DigestPlan.merge]).
+     * at each portal that sent a current digest ([DigestPlan.merge]). [agents]: the agents in state `new` that the owner did not
+     * decide yet. They add a count and a line to the same notification and never a second one.
      */
     data class Input(
         val portals: List<Portal>,
@@ -71,6 +78,7 @@ object Attention {
         val phoneNowMs: Long = 0L,
         val network: Boolean = true,
         val digests: List<DigestPlan.Waiting> = emptyList(),
+        val agents: List<NewAgent> = emptyList(),
     )
 
     /** One thing in the notification. [key] tells which one. [seen]: the phone already showed it before the process started. */
@@ -92,9 +100,13 @@ object Attention {
         val waiting: Long = 0,
         /** The age of the oldest waiting item of the digest, on the clock of the portal. */
         val waitingAgeMs: Long? = null,
+        /** The names of the keys with a new agent, each key once, in the order of first sight. */
+        val newAgentKeys: List<String> = emptyList(),
+        /** The number of new agents of this portal. */
+        val newAgents: Int = 0,
     ) {
         val toAnswer: Int get() = approvals + questions
-        val isEmpty: Boolean get() = toAnswer == 0 && replies == 0 && alerts == 0 && down == null && waiting == 0L
+        val isEmpty: Boolean get() = toAnswer == 0 && replies == 0 && alerts == 0 && down == null && waiting == 0L && newAgents == 0
     }
 
     data class Aggregate(
@@ -106,6 +118,8 @@ object Attention {
         val replies: Int,
         val alerts: Int,
         val down: Int,
+        /** The new agents that wait for the owner, all portals together. */
+        val newAgents: Int = 0,
         /** What the digests say still waits, all portals together. */
         val waiting: Long,
         /** The age of the oldest item, alert or waiting digest item, on the clock of its portal. Null when there is none. */
@@ -154,6 +168,7 @@ object Attention {
         var replies = 0
         var alerts = 0
         var down = 0
+        var newAgents = 0
         var waiting = 0L
         var oldest: Long? = null
         for (p in input.portals) {
@@ -200,6 +215,15 @@ object Attention {
                 if (a.action == Levels.ALARM && a.stoppedAtMs == null) ringing.add(a)
             }
             alerts += unread.size
+            // A new agent: one silent-or-not entry and a count. The key of the entry has no `rev`, so a change of the agent never
+            // alerts again. The text of the agent is never read here.
+            val newOnes = input.agents.filter { it.serverId == id }.sortedBy { it.agentId }
+            val silentAgent = p.muted || QuietHours.silent(false, Urgency.NORMAL, p.quiet, input.phoneNowMs)
+            for (n in newOnes) {
+                val key = "n:$id:${n.agentId}"
+                entries.putIfAbsent(key, Entry(key, id, What.NEW_AGENT, Rank.NORMAL, if (silentAgent) Sound.NONE else Sound.PHONE, n.notified))
+            }
+            newAgents += newOnes.size
             val dn = if (input.network) p.down else null
             if (dn != null) {
                 val key = "d:$id:${dn.kind}"
@@ -220,15 +244,16 @@ object Attention {
                 identity = p.identity, hideNameOnLock = p.hideNameOnLock, approvals = open.count { it.kind == RequestKind.APPROVAL },
                 questions = open.count { it.kind != RequestKind.APPROVAL }, replies = pReplies.size, alerts = unread.size, down = dn,
                 oldestAgeMs = age, phoneNowMs = input.phoneNowMs, waiting = digest?.count ?: 0, waitingAgeMs = waitingAge,
+                newAgentKeys = newOnes.map { it.keyName }.distinct(), newAgents = newOnes.size,
             )
             if (!line.isEmpty) lines.add(line)
             if (age != null && (oldest == null || age!! > oldest!!)) oldest = age
         }
         // A digest that says more than this one approval waits is more than one approval: no action then.
-        val single = if (approvals == 1 && questions == 0 && replies == 0 && alerts == 0 && down == 0 && waiting <= 1) singleCandidate else null
+        val single = if (approvals == 1 && questions == 0 && replies == 0 && alerts == 0 && down == 0 && newAgents == 0 && waiting <= 1) singleCandidate else null
         return Aggregate(
             lines = lines, entries = entries.values.toList(), approvals = approvals, questions = questions, replies = replies,
-            alerts = alerts, down = down, waiting = waiting, oldestAgeMs = oldest, maxRank = entries.values.maxOfOrNull { it.rank },
+            alerts = alerts, down = down, newAgents = newAgents, waiting = waiting, oldestAgeMs = oldest, maxRank = entries.values.maxOfOrNull { it.rank },
             ringing = ringing, singleApproval = single,
         )
     }

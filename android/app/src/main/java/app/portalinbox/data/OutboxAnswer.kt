@@ -65,7 +65,7 @@ object OutboxAnswer {
         AnswerStatus.DEVICE_REVOKED.wire -> "This phone is no longer allowed to answer. Add the server again."
         AnswerStatus.CUSTOM_NOT_ALLOWED.wire -> "The agent does not take a text with a decline."
         AnswerStatus.ASK_BACK_NOT_ALLOWED.wire -> "The agent does not take questions here."
-        AnswerStatus.AGENT_LOCKED.wire -> "This agent is new. Allow it first, then approve."
+        AnswerStatus.AGENT_LOCKED.wire -> "This agent is new and locked. Allow the agent first, then approve."
         ItemEngine.RESULT_SETTLED -> null
         else -> null
     }
@@ -92,6 +92,7 @@ object OutboxAnswer {
             Refusal.CUSTOM_NOT_ALLOWED -> "The agent does not take a text with a decline."
             Refusal.ASK_BACK_NOT_ALLOWED -> "The agent does not take questions here."
             Refusal.BAD_INPUT -> "The text is not valid. Check it and try again."
+            Refusal.BAD_STATE -> "This cannot be done now. The agent changed. Look at it again."
         }
     }
 

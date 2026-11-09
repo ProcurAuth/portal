@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Agents on the phone (lot G4). ASCII only. The words "Not verified" mark each text that a client or an agent sent. The sentences that
+         depend on data are in the pure classes of the package ui, so that a JVM test reads them. -->
+
+    <!-- The card of a new agent, above the list "To answer" -->
+    <string name="agent_new_section">New agent</string>
+    <string name="agent_observed_not_verified">Observed, not verified</string>
+    <string name="agent_name_for">Name for this agent</string>
+    <string name="agent_name_hint">For example: Refund cleaner</string>
+    <string name="agent_name_and_allow">Name and allow</string>
+    <string name="agent_block">Block</string>
+    <string name="agent_unblock">Unblock</string>
+    <string name="agent_allow">Allow</string>
+    <string name="agent_sending">Sending. The portal confirms soon.</string>
+    <string name="agent_merge_picker_title">Merge into</string>
+    <string name="agent_merge_picker_help">Its requests go to the agent that you choose. You cannot undo a merge.</string>
+    <string name="agent_looks_like_mark">looks like</string>
+    <string name="agent_block_confirm_title">Block this agent?</string>
+    <string name="agent_block_confirm_body">A blocked agent cannot ask. Its open requests are cancelled. You can unblock it later, but the cancelled requests do not come back.</string>
+
+    <!-- The header of a group in the list -->
+    <string name="agent_more">More</string>
+    <string name="agent_more_description">Open the agent screen</string>
+    <string name="agent_group_count">%1$d</string>
+
+    <!-- The agent screen -->
+    <string name="agent_screen_title">Agent</string>
+    <string name="agent_open_requests">Open requests (%1$d)</string>
+    <string name="agent_no_open_requests">No open request.</string>
+    <string name="agent_rename_title">Rename</string>
+    <string name="agent_rename_save">Save the name</string>
+    <string name="agent_merge_title">Merge</string>
+    <string name="agent_merge_help">Is it the same agent as another one of this key? Its requests go to the other agent.</string>
+    <string name="agent_merge_button">Merge into another agent</string>
+    <string name="agent_merge_none">This key has no other agent that you can merge into.</string>
+    <string name="agent_block_title">Block</string>
+    <string name="agent_block_help">A blocked agent cannot ask. Its open requests are cancelled.</string>
+    <string name="agent_unblock_help">The agent can ask again. The cancelled requests do not come back.</string>
+    <string name="agent_not_found">This agent is gone.</string>
+    <string name="agent_bucket_help">These requests came without an agent. The portal cannot tell who sent them.</string>
+
+    <!-- The list of the agents of a portal -->
+    <string name="agents_title">Agents</string>
+    <string name="agents_help">Agents of this portal that the phone knows.</string>
+    <string name="agents_empty">No agent yet. An agent shows here after its first call.</string>
+    <string name="agents_row_help">Name, key and state of each agent</string>
+
+    <!-- The box From agent on the approval screen -->
+    <string name="agent_from">From agent</string>
+    <string name="agent_not_verified">Not verified</string>
+    <string name="agent_says_it_is">Says it is</string>
+    <string name="agent_says_here">This request says it is</string>
+    <string name="agent_open">Open the agent</string>
+    <string name="agent_unattributed_note">No agent claims this request. The portal cannot tell who sent it.</string>
+</resources>

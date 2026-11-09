@@ -395,6 +395,13 @@ class PortalActivity : BaseActivity() {
                 startActivity(PortalPrefsActivity.intent(this, serverId))
             }.apply { minimumHeight = dp(48) },
         )
+        // The agents of this portal (lot G4): where the owner finds a blocked agent to unblock it.
+        p.addView(divider())
+        p.addView(
+            row(getString(R.string.agents_title), getString(R.string.agents_row_help), icon(R.drawable.ic_chevron_right, color(R.color.text_muted), 18)) {
+                startActivity(AgentActivity.list(this, serverId))
+            }.apply { minimumHeight = dp(48) },
+        )
         body.addView(p, lp().margins(this, t = 16))
     }
 

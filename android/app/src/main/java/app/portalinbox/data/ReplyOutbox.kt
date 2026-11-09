@@ -100,7 +100,7 @@ object ReplyOutbox {
             Refusal.ALREADY_QUEUED -> "Your last message is still on its way."
             Refusal.ASK_BACK_NOT_ALLOWED -> "The agent does not take questions here."
             Refusal.BAD_INPUT -> "The text is not valid. Check it and try again."
-            Refusal.NOT_AN_APPROVAL, Refusal.INVALID_REQUEST, Refusal.CUSTOM_NOT_ALLOWED -> "The message was not sent."
+            Refusal.NOT_AN_APPROVAL, Refusal.INVALID_REQUEST, Refusal.CUSTOM_NOT_ALLOWED, Refusal.BAD_STATE -> "The message was not sent."
         }
     }
 }

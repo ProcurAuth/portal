@@ -21,6 +21,9 @@ import android.window.OnBackInvokedDispatcher
 import app.portalinbox.BuildConfig
 import app.portalinbox.R
 import app.portalinbox.alert.Alerter
+import app.portalinbox.data.AgentActions
+import app.portalinbox.data.AgentDirectory
+import app.portalinbox.data.AgentKey
 import app.portalinbox.data.Alert
 import app.portalinbox.data.Item
 import app.portalinbox.data.LocalRetention
@@ -32,6 +35,8 @@ import app.portalinbox.portal.HomeFilter
 import app.portalinbox.portal.HomePortal
 import app.portalinbox.portal.ItemSort
 import app.portalinbox.portal.OfflineSummary
+import app.portalinbox.proto.AgentOp
+import app.portalinbox.service.AgentNotices
 import app.portalinbox.service.LinkState
 import app.portalinbox.service.InboxService
 import app.portalinbox.service.Items
@@ -88,7 +93,21 @@ class MainActivity : BaseActivity() {
     private lateinit var drawer: Drawer
     private lateinit var drawerContent: LinearLayout
     private val handler = Handler(Looper.getMainLooper())
-    private val onChange: () -> Unit = { render() }
+
+    /** The groups of "To answer" that the owner folded. Local to the phone. */
+    private var collapse = AgentCollapse()
+
+    /** The names that the owner typed in the cards of the new agents, by portal and agent: a redraw never loses them. */
+    private val nameDrafts = HashMap<String, String>()
+
+    /** The owner types in a name field now: the screen does not redraw under the keyboard. The redraw waits for the end of the typing. */
+    private var typing = false
+    private var redrawAfterTyping = false
+
+    private val onChange: () -> Unit = {
+        render()
+        showAgentNotices()
+    }
     private val tick = object : Runnable {
         override fun run() {
             render()
@@ -175,6 +194,7 @@ class MainActivity : BaseActivity() {
 
     override fun onResume() {
         super.onResume()
+        collapse = Prefs.agentCollapse(this)
         purgeLocalCopies()
         Registry.addListener(onChange)
         network.start()
@@ -299,7 +319,23 @@ class MainActivity : BaseActivity() {
         })
     }
 
+    /** The line of the last `agent_result`, if one waits: a snackbar, once. */
+    private fun showAgentNotices() {
+        while (true) {
+            val line = AgentNotices.take() ?: return
+            root.snackbar(line)
+        }
+    }
+
     private fun render() {
+        // A name field has the focus: wait for the end of the typing. A field that is gone (another screen) never holds the redraw.
+        if (typing) {
+            if (currentFocus is EditText) {
+                redrawAfterTyping = true
+                return
+            }
+            typing = false
+        }
         val servers = Store.get(this).servers()
         val portals = homePortals()
         // A filter on a portal that was removed falls back to All.
@@ -470,10 +506,19 @@ class MainActivity : BaseActivity() {
         val base = store.recentAlerts(now - window, limit, showRead, only)
         val alerts = if (extra == 0) base else store.latestAlerts(base.size + extra, showRead, only)
         // The items of the portals that the filter shows, the oldest first across portals with the limited time of each portal.
-        val toAnswer = ItemSort.toAnswer(filteredItems(servers), clockOffsets(servers))
+        val shownItems = filteredItems(servers)
+        val toAnswer = ItemSort.toAnswer(shownItems, clockOffsets(servers))
+        // The agents (lot G4): the groups of "To answer", and the cards of the new agents above them.
+        val directory = AgentDirectory(Items.repository(this).allAgents())
+        val groups = ItemListOrder.toAnswer(toAnswer, directory, collapse)
+        val agentCards = NewAgentCard.build(
+            directory, shownItems, { ServerClock.now(this, it) }, ZoneId.systemDefault(),
+            pending = { serverId, agentId -> AgentCommands.pending(this, serverId, agentId) }, shows = { filter.matches(it) },
+        )
+        pruneCollapse(servers)
         val filterName = only?.let { byId[it]?.identity?.nickname }
-        // Alice's rule: the alerts come first, then the items to answer. A section with no row does not show.
-        val sections = ItemListOrder.sections(hasAlerts = alerts.isNotEmpty(), hasItems = toAnswer.isNotEmpty())
+        // Alice's rule: the alerts come first, then the items to answer. The new agents sit between. A section with no row does not show.
+        val sections = ItemListOrder.sections(hasAlerts = alerts.isNotEmpty(), hasItems = groups.isNotEmpty(), hasNewAgents = agentCards.isNotEmpty())
         if (sections.isEmpty()) {
             if (filterName != null) {
                 body.addView(label(HomeFilter.nothingFrom(filterName), SP_L, color(R.color.text_muted), MEDIUM).apply { gravity = Gravity.CENTER },
@@ -493,13 +538,31 @@ class MainActivity : BaseActivity() {
                         body.addView(seeMore(), lp(WRAP, WRAP).margins(this, t = 2).apply { gravity = Gravity.CENTER_HORIZONTAL })
                     }
                 }
+                ItemListOrder.Section.NEW_AGENTS -> {
+                    body.addView(sectionTitle(getString(R.string.agent_new_section), agentCards.size.toString()))
+                    agentCards.forEachIndexed { i, m ->
+                        val key = AgentKey.of(m.serverId, m.agentId)
+                        body.addView(
+                            newAgentCard(
+                                m, nameDrafts[key] ?: "", { nameDrafts[key] = it },
+                                { has ->
+                                    typing = has
+                                    if (!has && redrawAfterTyping) {
+                                        redrawAfterTyping = false
+                                        handler.post { render() }
+                                    }
+                                },
+                                agentActions,
+                            ),
+                            lp().margins(this, t = if (i == 0) 0 else 8),
+                        )
+                    }
+                }
                 ItemListOrder.Section.TO_ANSWER -> {
                     val serverNow = HashMap<Long, Long>()
+                    fun at(serverId: Long) = serverNow.getOrPut(serverId) { ServerClock.now(this, serverId) }
                     body.addView(sectionTitle(HomeFilter.sectionTitle(getString(R.string.section_to_answer), filterName), toAnswer.size.toString()))
-                    toAnswer.forEachIndexed { i, item ->
-                        val at = serverNow.getOrPut(item.serverId) { ServerClock.now(this, item.serverId) }
-                        body.addView(itemCard(item, ItemListOrder.row(item, at), byId[item.serverId], now), lp().margins(this, t = if (i == 0) 0 else 8))
-                    }
+                    groups.forEachIndexed { i, g -> body.addView(agentGroup(g, directory, byId, ::at, now), lp().margins(this, t = if (i == 0) 0 else 8)) }
                 }
             }
         }
@@ -536,7 +599,7 @@ class MainActivity : BaseActivity() {
     }
 
     /** A card of the list "To answer": age and code | title, sender, ages | kind and state chips. */
-    private fun itemCard(item: Item, r: ItemListOrder.Row, portal: HomePortal?, nowMs: Long): View {
+    private fun itemCard(item: Item, r: ItemListOrder.Row, portal: HomePortal?, nowMs: Long, label: String? = null, framed: Boolean = true): View {
         val (chipText, fgKind, bg) = chipStyle(r.chip)
         // A portal that is down: the row is dimmed and its last line says why. Approve and Decline stay possible when the portal
         // is only offline: the answer waits in the outbox and the portal decides.
@@ -544,9 +607,12 @@ class MainActivity : BaseActivity() {
         val down = reason != null
         val bar = if (down) color(R.color.text_subtle) else fgKind
         val card = lin().apply {
-            background = solidCard()
-            clipToOutline = true
-            outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
+            // In a group the card of the agent holds the rows: the row has no frame of its own.
+            if (framed) {
+                background = solidCard()
+                clipToOutline = true
+                outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
+            }
             if (down) alpha = 0.62f
         }
         val row = lin(vertical = false).apply {
@@ -555,7 +621,7 @@ class MainActivity : BaseActivity() {
             isClickable = true
             // The words of a screen reader: full words, the age and the state as text (TalkBackLabels).
             contentDescription = TalkBackLabels.itemRow(item, ServerClock.now(this@MainActivity, item.serverId),
-                portal?.identity?.nickname, reason?.replace(" · ", ". "))
+                portal?.identity?.nickname, reason?.replace(" · ", ". "), label)
             setOnClickListener { openItem(item, r) }
         }
         row.addView(View(this).apply { setBackgroundColor(bar) }, lp(dp(3), MATCH))
@@ -586,6 +652,80 @@ class MainActivity : BaseActivity() {
         row.addView(tags, lp(WRAP, MATCH))
         card.addView(row)
         return card
+    }
+
+    // ------------------------------------------------------------ the agents (lot G4)
+
+    /** Forgets the folded groups that do not exist any more, in all portals: a filter on one portal never forgets the others. */
+    private fun pruneCollapse(servers: List<Server>) {
+        if (collapse.folded.isEmpty()) return
+        val all = ItemSort.toAnswer(allItems(servers), emptyMap())
+        val live = AgentGroups.keys(ItemListOrder.toAnswer(all, AgentDirectory(Items.repository(this).allAgents()), AgentCollapse()))
+        val kept = collapse.retain(live)
+        if (kept !== collapse) {
+            collapse = kept
+            Prefs.setAgentCollapse(this, kept)
+        }
+    }
+
+    /** One card for an agent: the header, the hint line, the rows (none when it is folded) and the lock line of a new agent. */
+    private fun agentGroup(
+        g: AgentGroups.Group, directory: AgentDirectory, portals: Map<Long, HomePortal>, serverNow: (Long) -> Long, nowMs: Long,
+    ): View {
+        val portal = portals[g.serverId]
+        val card = lin().apply {
+            background = when {
+                g.isNew -> rounded(color(R.color.warning_soft), dpf(CARD_RADIUS), color(R.color.warning) and 0x66FFFFFF, dp(1))
+                g.isBucket -> dashedBox(color(R.color.card), color(R.color.card_stroke), dpf(CARD_RADIUS))
+                else -> solidCard()
+            }
+            clipToOutline = true
+            outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
+        }
+        // The portal chip names the portal in the header when several portals exist: the same rule as on each row.
+        val chipPortal = portal.takeIf { portals.size > 1 }
+        card.addView(agentGroupHeader(g, serverNow(g.serverId), chipPortal, { toggleGroup(g.key) }, { openAgent(g) }))
+        g.shown.forEachIndexed { i, item ->
+            if (i > 0) card.addView(divider())
+            val row = ItemListOrder.row(item, serverNow(item.serverId), directory.labelOf(item), grouped = true)
+            card.addView(itemCard(item, row, portal, nowMs, directory.labelOf(item), framed = false))
+        }
+        if (!g.folded) g.lockLine?.let { card.addView(agentLockLine(it)) }
+        return card
+    }
+
+    private fun toggleGroup(key: String) {
+        collapse = collapse.toggle(key)
+        Prefs.setAgentCollapse(this, collapse)
+        render()
+    }
+
+    private fun openAgent(g: AgentGroups.Group) = startActivity(AgentActivity.intent(this, g.serverId, g.agentId))
+
+    /** Sends an action on an agent. A refusal of the phone shows as a snackbar. The result of the portal comes later as another one. */
+    private fun sendAgent(m: NewAgentCard.Model, op: AgentOp, name: String? = null, into: String? = null) {
+        val refusal = AgentCommands.run(this, m.serverId, m.agentId, op, name, into)
+        if (refusal != null) {
+            root.snackbar(refusal)
+            return
+        }
+        if (op == AgentOp.ALLOW) nameDrafts.remove(AgentKey.of(m.serverId, m.agentId))
+        render()
+    }
+
+    private val agentActions = object : NewAgentActions {
+        override fun nameAndAllow(m: NewAgentCard.Model, name: String) {
+            when (val c = NewAgentCard.nameAndAllow(name)) {
+                is AgentActions.NameCheck.Ok -> sendAgent(m, AgentOp.ALLOW, name = c.name)
+                else -> root.snackbar(AgentActions.nameLine(c) ?: "")
+            }
+        }
+
+        override fun allowAsPortalName(m: NewAgentCard.Model) = sendAgent(m, AgentOp.ALLOW)
+
+        override fun block(m: NewAgentCard.Model) = agentBlockSheet { sendAgent(m, AgentOp.BLOCK) }
+
+        override fun merge(m: NewAgentCard.Model) = agentMergeSheet(m.choices) { into -> sendAgent(m, AgentOp.MERGE, into = into) }
     }
 
     private fun openItem(item: Item, r: ItemListOrder.Row) {

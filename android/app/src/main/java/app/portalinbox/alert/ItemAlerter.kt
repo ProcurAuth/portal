@@ -3,8 +3,10 @@ package app.portalinbox.alert
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import app.portalinbox.data.AgentActions
 import app.portalinbox.data.Item
 import app.portalinbox.data.ItemEvent
+import app.portalinbox.service.AgentNotices
 import app.portalinbox.service.Items
 import app.portalinbox.service.Registry
 import app.portalinbox.ui.OpenScreens
@@ -29,6 +31,11 @@ object ItemAlerter {
             }
             is ItemEvent.UserMessage -> AttentionNotifier.clearReply(context, event.serverId, event.requestId)
             is ItemEvent.Digest -> AttentionNotifier.onDigest(context, event)
+            // The result of an action on an agent: a snackbar on the screen that is open. No notification.
+            is ItemEvent.AgentResult -> {
+                AgentNotices.post(AgentActions.resultLine(event.result, event.entry))
+                Registry.changed()
+            }
             else -> AttentionNotifier.refresh(context)
         }
     }

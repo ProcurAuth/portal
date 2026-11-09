@@ -75,6 +75,11 @@
             android:name=".ui.ThreadActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
+        <!-- The screen of one agent and the list of the agents of a portal. Only the app opens it. -->
+        <activity
+            android:name=".ui.AgentActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
         <!-- The settings of one portal: mute, lock screen, quiet hours, summary, retention, apply to all. -->
         <activity
             android:name=".ui.PortalPrefsActivity"

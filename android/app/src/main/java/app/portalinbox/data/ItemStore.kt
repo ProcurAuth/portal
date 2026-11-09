@@ -5,6 +5,7 @@ import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import app.portalinbox.core.ResolvedField
 import app.portalinbox.core.ResolvedView
+import app.portalinbox.proto.AgentFrame
 import app.portalinbox.proto.ItemState
 import app.portalinbox.proto.MessageFrame
 import app.portalinbox.proto.Prefs
@@ -18,7 +19,7 @@ import org.json.JSONObject
 
 /** The tables of the items. The upgrade of the database drops them and makes them again: no migration. */
 object ItemSchema {
-    val TABLES = listOf("items", "item_turns", "item_settled_early", "deliveries", "outbox", "server_prefs")
+    val TABLES = listOf("items", "item_turns", "item_settled_early", "deliveries", "outbox", "server_prefs", "agents")
 
     fun drop(db: SQLiteDatabase) {
         for (t in TABLES) db.execSQL("DROP TABLE IF EXISTS $t")
@@ -84,6 +85,17 @@ object ItemSchema {
                 PRIMARY KEY (server_id, client_msg_id))"""
         )
         db.execSQL("CREATE INDEX outbox_request ON outbox(server_id, request_id)")
+        // One row for each portal and agent (lot G4). `frame` is the last `agent` frame with the highest `rev`.
+        db.execSQL(
+            """CREATE TABLE agents (
+                server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                agent_id TEXT NOT NULL,
+                rev INTEGER NOT NULL,
+                frame TEXT NOT NULL,
+                received_at_ms INTEGER NOT NULL,
+                notified INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (server_id, agent_id))"""
+        )
         db.execSQL(
             """CREATE TABLE server_prefs (
                 server_id INTEGER PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,
@@ -328,8 +340,57 @@ class SqlItemRepository(private val store: Store) : ItemRepository {
         }
     }
 
+    override fun deleteClosedAgentActionsBefore(serverId: Long, beforeMs: Long) {
+        db.delete(
+            "outbox", "server_id = ? AND type = ? AND closed_at_ms IS NOT NULL AND closed_at_ms < ?",
+            arrayOf(serverId.toString(), OutboxType.AGENT_DO.wire, beforeMs.toString()),
+        )
+    }
+
     override fun deleteDeliveriesBefore(serverId: Long, beforeMs: Long) {
         db.delete("deliveries", "server_id = ? AND received_at_ms < ?", arrayOf(serverId.toString(), beforeMs.toString()))
+    }
+
+    // ------------------------------------------------------------ agents
+
+    private fun readAgent(c: Cursor): Agent = Agent.of(
+        serverId = c.getLong(0), f = ServerFrames.decode(c.getString(1)) as AgentFrame, receivedAtMs = c.getLong(2), notified = c.getInt(3) != 0,
+    )
+
+    private fun queryAgents(sql: String, args: Array<String>): List<Agent> =
+        db.rawQuery(sql, args).use { c -> buildList { while (c.moveToNext()) add(readAgent(c)) } }
+
+    override fun agent(serverId: Long, agentId: String): Agent? = queryAgents(
+        "SELECT server_id, frame, received_at_ms, notified FROM agents WHERE server_id = ? AND agent_id = ?",
+        arrayOf(serverId.toString(), agentId),
+    ).firstOrNull()
+
+    override fun putAgent(agent: Agent) {
+        db.insertWithOnConflict(
+            "agents", null,
+            ContentValues().apply {
+                put("server_id", agent.serverId)
+                put("agent_id", agent.agentId)
+                put("rev", agent.rev)
+                put("frame", StrictJson.compact(agent.toFrame(Agent.NO_DELIVERY).toJson()))
+                put("received_at_ms", agent.receivedAtMs)
+                put("notified", if (agent.notified) 1 else 0)
+            },
+            SQLiteDatabase.CONFLICT_REPLACE,
+        )
+    }
+
+    override fun agents(serverId: Long): List<Agent> = queryAgents(
+        "SELECT server_id, frame, received_at_ms, notified FROM agents WHERE server_id = ? ORDER BY agent_id", arrayOf(serverId.toString()),
+    )
+
+    override fun allAgents(): List<Agent> = queryAgents("SELECT server_id, frame, received_at_ms, notified FROM agents ORDER BY server_id, agent_id", emptyArray())
+
+    override fun markAgentNotified(serverId: Long, agentId: String) {
+        db.update(
+            "agents", ContentValues().apply { put("notified", 1) },
+            "server_id = ? AND agent_id = ?", arrayOf(serverId.toString(), agentId),
+        )
     }
 
     // ------------------------------------------------------------ preferences

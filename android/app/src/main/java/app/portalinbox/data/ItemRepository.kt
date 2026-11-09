@@ -58,8 +58,22 @@ interface ItemRepository {
     /** Erases an item and what belongs to it: its turns, its outbox rows and an early settlement. Lot A2, local retention. */
     fun deleteItem(serverId: Long, requestId: String)
 
+    /** Erases the closed outbox entries of the actions on agents that closed before [beforeMs]. An action has no item that a retention could erase. */
+    fun deleteClosedAgentActionsBefore(serverId: Long, beforeMs: Long)
+
     /** Forgets the deliveries that arrived before [beforeMs]. The server stopped sending these rows long ago. */
     fun deleteDeliveriesBefore(serverId: Long, beforeMs: Long)
+
+    /** The agent of a portal, or null. The key is the portal and the agent id: two portals never share an agent. */
+    fun agent(serverId: Long, agentId: String): Agent?
+    fun putAgent(agent: Agent)
+
+    /** The agents of one portal. */
+    fun agents(serverId: Long): List<Agent>
+
+    /** The agents of every portal, for the screens that show several portals. */
+    fun allAgents(): List<Agent>
+    fun markAgentNotified(serverId: Long, agentId: String)
 
     fun prefs(serverId: Long): StoredPrefs?
     fun putPrefs(serverId: Long, prefs: StoredPrefs, atMs: Long)

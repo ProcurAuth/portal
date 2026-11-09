@@ -96,7 +96,12 @@ class AttentionWorld(val now: Long = 1_788_000_100_000L) {
         replies: List<Attention.Reply> = emptyList(),
         network: Boolean = true,
         digests: List<DigestPlan.Waiting> = emptyList(),
-    ) = Attention.Input(portals, items, alerts, replies, now, network, digests)
+        agents: List<Attention.NewAgent> = emptyList(),
+    ) = Attention.Input(portals, items, alerts, replies, now, network, digests, agents)
+
+    /** A new agent of [server] on the key [keyName]. [notified]: the phone already counted it before the process started. */
+    fun newAgent(server: Long = 1, keyName: String = "ops-key", id: String = Make.hex(0xA100 + next()), notified: Boolean = false) =
+        Attention.NewAgent(server, id, keyName, notified)
 
     /** What a digest of [server] says still waits: [count] items, the oldest [ageMs] old on the clock of the portal. */
     fun waiting(server: Long, count: Long, ageMs: Long, id: String = "dg$server") = DigestPlan.Waiting(server, id, count, now - ageMs)
