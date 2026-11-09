@@ -975,7 +975,9 @@ fn the_agent_cases_a01_to_a09() {
     let log = s.log();
     let calls: Vec<&str> = log
         .lines()
-        .filter(|l| l.contains("\"event\":\"mcp_call\"") && l.contains("\"tool\":\"approval_intent\""))
+        .filter(|l| {
+            l.contains("\"event\":\"mcp_call\"") && l.contains("\"tool\":\"approval_intent\"")
+        })
         .collect();
     assert!(!calls.is_empty(), "A10");
     let id_of = |line: &str| -> Option<String> {
@@ -988,10 +990,23 @@ fn the_agent_cases_a01_to_a09() {
         "A10 {first_call}"
     );
     // A call with the token of the agent, and a call that its header makes, log the same id.
-    assert!(calls.iter().filter(|l| id_of(l).as_deref() == Some(first_call.as_str())).count() >= 4, "A10");
+    assert!(
+        calls
+            .iter()
+            .filter(|l| id_of(l).as_deref() == Some(first_call.as_str()))
+            .count()
+            >= 4,
+        "A10"
+    );
     // A call that is refused before it has an agent logs `-`.
-    assert!(calls.iter().any(|l| id_of(l).as_deref() == Some("-")), "A10");
-    assert!(!log.contains(&token[4..]), "A10: a log line holds the token");
+    assert!(
+        calls.iter().any(|l| id_of(l).as_deref() == Some("-")),
+        "A10"
+    );
+    assert!(
+        !log.contains(&token[4..]),
+        "A10: a log line holds the token"
+    );
 }
 
 #[test]

@@ -54,8 +54,7 @@ fn call_h(
         let text = result["content"][0]["text"].as_str().expect("a text");
         let parsed: Value = serde_json::from_str(text).unwrap();
         assert_eq!(parsed, result["structuredContent"], "{text}");
-        let busy = result["isError"] == true
-            && is_busy(parsed["error"]["code"].as_str());
+        let busy = result["isError"] == true && is_busy(parsed["error"]["code"].as_str());
         attempt += 1;
         if busy && attempt < 12 {
             std::thread::sleep(Duration::from_millis(400));
@@ -167,10 +166,9 @@ fn events_of(r: &Rig, agent_id: &str) -> Vec<String> {
 }
 
 fn owner_op(r: &Rig, agent_id: &str, op: AgentOp) {
-    let done = eventually(|| {
-        runtime().block_on(r.items().agent_op(OWNER, agent_id, op.clone(), "web"))
-    })
-    .unwrap();
+    let done =
+        eventually(|| runtime().block_on(r.items().agent_op(OWNER, agent_id, op.clone(), "web")))
+            .unwrap();
     assert!(done.changed);
 }
 
