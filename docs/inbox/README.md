@@ -167,11 +167,12 @@ An account makes the code, and the phone uses it one time.
 1. Sign in to the portal with the account that owns the phone.
 2. Open the tab Inbox. The account needs `inbox.receive` on one group at least.
 3. Press the plus button in the head of the zone **My phones**. An account that has `phone.read` sees the zone **Phones**, and the plus button is in that zone. The plus button makes the code. A popover shows the code one time. It stays open until you press **Done**.
-4. On the phone, install the app and open **Add a server**.
+4. On the phone, install the app and open **Add a portal**.
 5. Type the code, or tap the link `portal-inbox://enroll?...` on the phone.
-6. Compare the fingerprint that the app shows with the fingerprint on the page.
-7. Confirm. The app connects, enrolls and shows the groups.
-8. Choose a group and an action for each group that the app lists.
+6. Compare the fingerprint that the app shows with the fingerprint on the page. Use another channel if you can.
+7. Type a name and choose a color for the portal. The name and the color stay on the phone.
+8. Press **Add portal**. The app connects, enrolls and shows the groups.
+9. Choose a group and an action for each group that the app lists.
 
 The code holds the address of the server, the public key of the server and a secret of 128 bits. It works one time. It lives `inbox.enrollment.code_ttl` (10 minutes by default). An account can have `inbox.enrollment.max_active_per_account` codes that are not used and not expired. The code is a bearer secret until its first use. Show it only to its owner. There is no QR code in this version.
 
@@ -232,7 +233,7 @@ The browser asks the portal every 10 to 15 seconds. This is 4 to 6 requests each
 
 ## The Android app
 
-The app has the name Portal Inbox. Its application id is `app.portalinbox`. It only receives alerts. It does not send alerts. It does not use Firebase or any push service of a third party. It keeps one encrypted connection for each server in a foreground service. One app can enroll in several servers. The app shows the name of the server (`server.name` of the portal) in its lists and screens.
+The app has the name Portal Inbox. Its application id is `app.portalinbox`. It only receives alerts. It does not send alerts. It does not use Firebase or any push service of a third party. It keeps one encrypted connection for each server in a foreground service. One app can enroll in up to 10 portals. The app shows the name that the user chose for each portal, and never the name that the portal gives itself.
 
 For each group, the user chooses one action. This choice stays on the phone.
 
@@ -259,6 +260,36 @@ The app also starts again after a reboot. On some vendor ROMs (Xiaomi, Huawei, S
 A message of a kind other than `alert` shows as a generic message. The app never drops a message because of its kind. A person cannot change the login of a phone. The app shows it read-only. The source drawings of the app icon are in `assets/brand/`.
 
 The app accepts an address with `http://` or `https://`. For `https://` it uses the trust store of the phone. The manifest allows clear text, because the portal is often on a private network.
+
+### Several portals on one phone
+
+A phone can have 10 portals at most. Each portal has an identity that only you set. The identity has a name, a color, a monogram and a fingerprint. The monogram is the first two letters of the name. The fingerprint comes from the pinned key of the portal. The portal cannot change any of these.
+
+To add a portal:
+
+1. Open the menu, choose **Portals** and press **Add a portal**.
+2. Type or paste the code, or tap the link of the code.
+3. Read the confirmation screen. Compare the full fingerprint with the fingerprint on the page where the code was made.
+4. Type a name of 1 to 16 characters. The app proposes no name. Each portal needs its own name.
+5. Choose a color. A color that another portal uses is crossed out.
+6. Tick **I know who runs this portal** when the app asks for it.
+7. Press **Add portal**. The app uses the code at this step only.
+
+The app asks for the tick when the code came from a link. A link can come from anyone. The app shows which app opened the link. This hint can be false. A link can add a portal. A link can never replace the key or the address of a portal.
+
+The app also asks for the tick when the portal looks like a portal that you already have. The app marks the letters that differ, for example `porta1.example.org` against `portal.example.org`. The app refuses a code that has the key of a portal that you already have.
+
+The list **Portals** shows the name, the host, the start of the key, the state and the last sync of each portal. Drag the handle of a row to change the order. A screen reader can use the actions **Move up** and **Move down**.
+
+Tap a row to open the screen of the portal. On this screen you can rename the portal, choose another color, change the address and enroll the portal again. The switch **Hide the name on the lock screen** is on this screen too.
+
+Use **Change address** when the portal has a new address, for example when you are not at home. The key stays the same. The phone keeps one address for each portal.
+
+**Remove portal** shows what the phone erases: open requests, answers that are not sent, items in the history and alerts. You confirm one time. The name and the color are free at once.
+
+The app shows **Key changed** when the portal does not prove the key that the phone pinned. A new key is normal after a key rotation or a new install. An attacker at the same address gives the same sign.
+
+Ask the administrator for the new fingerprint by another channel. Then press **Enter a new code** on the screen of the portal. The phone keeps the name, the color and the history. Only the screen of a portal can start this step. A link cannot start it.
 
 ### Test with the emulator
 
