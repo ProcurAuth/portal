@@ -292,6 +292,5 @@
     <!-- Home list with several portals (lot MP3) -->
     <string name="filter_all">All</string>
     <string name="filter_strip_description">Filter by portal</string>
-    <string name="portal_new">New</string>
     <string name="alarm_portal_description">Portal %1$s</string>
 </resources>
