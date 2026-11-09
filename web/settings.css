@@ -4400,7 +4400,12 @@ textarea.uiInput { height: auto; min-height: 64px; padding: 6px 8px; resize: ver
 
 .tbar--hist {
   flex-wrap: wrap;
+  gap: 6px 8px;
   white-space: normal;
+}
+
+.tbar--hist .chips {
+  flex-wrap: wrap;
 }
 
 /* The command: line numbers, the colors of its language, and a scroller that a keyboard can reach. */

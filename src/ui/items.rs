@@ -828,7 +828,7 @@ fn command_zone(d: &Detail, t: &Text) -> String {
             "This is what will run. Read all of it.",
             &copy
         ),
-        html::escape(label),
+        html::escape_attr(label),
         html::command(&t.command, t.language),
         if lines == 1 { "" } else { "s" },
         t.command.len(),
@@ -952,7 +952,7 @@ fn decision(d: &Detail) -> String {
             r#"<form class="decide" method="post" action="{ANSWER}" aria-label="Decision"><div class="sec2__head"><h2 class="title">Your decision</h2><span class="sec2__note">Approve sends no text.</span></div><div class="decide__body">{hidden}{stale}<div class="decide__row"><button class="button button--approve" type="submit" name="action" value="accept">{}Approve</button><button class="button" type="submit" name="action" value="decline" formnovalidate>{}Decline</button><span class="grow"></span><span class="note">The agent must run the command within the time of the file after you approve.</span></div><p class="note">{}This page cannot check that you read the whole command. The phone can. Read the command to the end before you approve.</p>{comment}</div></form>"#,
             icon("check"),
             icon("x"),
-            icon("alert-triangle"),
+            icon("alert-triangle").replace("class=\"icon\"", "class=\"icon icon--sm\""),
         );
     }
     if i.allow_ask_back {
@@ -1094,6 +1094,9 @@ pub fn detail_page(frame: &Frame, d: &Detail, notice: Option<Notice>) -> String 
     notice_html(&mut out, notice);
     let stale = i.is_open() && d.now_ms - i.created_at > d.stale_after_ms;
     let state_pill = match i.state {
+        ItemState::Pending | ItemState::Replied if d.mode != Mode::Owner => {
+            r#"<span class="pill">Open</span>"#.to_string()
+        }
         ItemState::Pending => r#"<span class="pill pill--wait">Waiting for you</span>"#.to_string(),
         ItemState::Replied => r#"<span class="pill">Question sent</span>"#.to_string(),
         s => format!(r#"<span class="pill">{}</span>"#, word(s, i.answer_action)),
@@ -1387,7 +1390,10 @@ mod tests {
     fn the_command_is_first_and_the_copy_text_is_the_exact_bytes() {
         let l = approval("K7QF", NOW - 60_000);
         let command = "SELECT 1\r\nFROM t -- \u{202E}x\u{200B}\n";
-        let d = detail(&l, Body::Shown(text(command)), Mode::Owner);
+        let mut t = text(command);
+        // A label with a quote and a hidden character stays inside its attribute.
+        t.command_label = Some("SQL\u{202E}\"x".into());
+        let d = detail(&l, Body::Shown(t), Mode::Owner);
         let page = detail_page(&frame(), &d, None);
         let cmd = page.find(r#"id="cmd-t""#).unwrap();
         let exp = page.find(r#"id="exp-t""#).unwrap();
@@ -1402,6 +1408,7 @@ mod tests {
         assert!(!page.contains('\u{202E}') && !page.contains('\u{200B}'));
         assert!(page.contains("U+202E") && page.contains("U+200B"));
         assert!(page.contains("hidden or look-alike characters"));
+        assert!(page.contains(r#"aria-label="SQL&lt;U+202E&gt;&quot;x""#));
         assert!(page.contains("Not checked") && page.contains("not verified"));
         assert!(page.contains("does not change what will run"));
         assert!(page.contains("cannot check that you read the whole command"));

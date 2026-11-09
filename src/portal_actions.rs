@@ -564,6 +564,15 @@ mod tests {
     }
 
     #[test]
+    fn a_key_never_holds_an_approval_action() {
+        let read = Grant::parse("approval.read on service:portal").unwrap();
+        for kind in [KeyKind::Mcp, KeyKind::Api] {
+            assert!(check_key_grants(kind, std::slice::from_ref(&read)).is_err());
+        }
+        assert!(!KEY_ACTIONS.contains(&APPROVAL_READ) && !KEY_ACTIONS.contains(&APPROVAL_CANCEL));
+    }
+
+    #[test]
     fn the_document_has_the_keys_and_the_inbox_in_one_scope() {
         let document = document(&all_features());
         let names: Vec<&str> = document.actions.iter().map(|a| a.name.as_str()).collect();

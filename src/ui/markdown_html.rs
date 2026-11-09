@@ -132,6 +132,25 @@ pub fn escape(text: &str) -> String {
     escape_marked(text, false)
 }
 
+/// A text for the value of an attribute: escaped, and a hidden character is the text `<U+XXXX>`, with no markup.
+pub fn escape_attr(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c if is_misleading(c) => {
+                let _ = write!(out, "&lt;U+{:04X}&gt;", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// The same. With `lookalike`, a letter of a script that looks like ASCII has a mark with its code.
 fn escape_marked(text: &str, lookalike: bool) -> String {
     let mut out = String::with_capacity(text.len());
