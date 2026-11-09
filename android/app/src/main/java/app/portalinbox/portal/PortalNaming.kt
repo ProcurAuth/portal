@@ -98,17 +98,4 @@ object PortalNaming {
         }
         return picked.toString().uppercase(java.util.Locale.ROOT)
     }
-
-    /**
-     * A name for a portal when no screen asks for one: `Portal 1`, `Portal 2`, the first that no portal has. MP1 uses it
-     * while the form of the enrollment has no field for the nickname (lot MP2 adds the field).
-     */
-    fun suggest(existing: Collection<PortalIdentity>): String {
-        var n = 1
-        while (true) {
-            val name = "Portal $n"
-            if (existing.none { normalize(it.nickname) == normalize(name) }) return name
-            n++
-        }
-    }
 }

@@ -818,42 +818,9 @@ class MainActivity : BaseActivity() {
     private fun addServer() = startActivity(Intent(this, AddServerActivity::class.java))
 
     private fun openServer(id: Long) =
-        startActivity(Intent(this, ServerActivity::class.java).putExtra(ServerActivity.EXTRA_SERVER, id))
+        startActivity(Intent(this, PortalActivity::class.java).putExtra(PortalActivity.EXTRA_SERVER, id))
 
-    private fun renderServers(servers: List<Server>) {
-        val o = overall(servers)
-        body.addView(sectionTitle(getString(R.string.servers_title),
-            if (servers.isEmpty()) null else downCount(o) ?: getString(R.string.drawer_servers_all_up)))
-        if (servers.isEmpty()) {
-            body.addView(emptyState(R.drawable.ic_server, getString(R.string.alerts_no_server_title),
-                getString(R.string.alerts_no_server_body), null, null))
-        } else {
-            val now = System.currentTimeMillis()
-            val p = panel()
-            servers.forEachIndexed { i, s ->
-                if (i > 0) p.addView(divider(insetStart = 30))
-                val (code, fg) = linkCode(s.id, now)
-                val row = lin(vertical = false, padH = 12, padV = 9).apply {
-                    minimumHeight = dp(56)
-                    background = rowRipple()
-                    isClickable = true
-                    setOnClickListener { openServer(s.id) }
-                }
-                row.addView(statusDot(fg, 8), lp(dp(8), dp(8)).margins(this, r = 10))
-                val col = lin()
-                col.addView(label(s.nickname, SP_M, color(R.color.text_strong), MEDIUM, lines = 1))
-                col.addView(label("@${s.userName} · ${s.deviceName}", SP_S, color(R.color.text_muted), lines = 1),
-                    lp().margins(this, t = 2))
-                col.addView(mono(s.address.removePrefix("http://").removePrefix("https://"), SP_XS, color(R.color.text_subtle)), lp().margins(this, t = 2))
-                row.addView(col, lp(0, WRAP, 1f))
-                row.addView(label(code, SP_S, fg, MEDIUM, lines = 1), lp(WRAP, WRAP).margins(this, l = 8, r = 4))
-                row.addView(icon(R.drawable.ic_chevron_right, color(R.color.text_subtle), 16), lp(dp(16), dp(16)))
-                p.addView(row)
-            }
-            body.addView(p)
-        }
-        body.addView(button(getString(R.string.servers_add), ButtonKind.SECONDARY) { addServer() }, lp().margins(this, t = 10, b = 16))
-    }
+    private fun renderServers(servers: List<Server>) = PortalListView.render(this, body, servers, ::openServer, ::addServer, ::render)
 
     private fun linkCode(serverId: Long, now: Long): Pair<String, Int> {
         val st = Registry.status(serverId)

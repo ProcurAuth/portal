@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Several portals on one phone (lot MP2). The names of the portals are chosen by the user and are never taken from the portal. -->
+
+    <!-- Enrollment: the code step -->
+    <string name="enroll_continue">Continue</string>
+    <string name="enroll_code_help">Paste the code or the link from the Inbox tab of the portal. Nothing is used until you confirm on the next screen.</string>
+    <string name="enroll_reenroll_title">Enroll again</string>
+    <string name="enroll_reenroll_head">Enroll %1$s again</string>
+    <string name="enroll_reenroll_help">Enter a new code of this portal. The name, the color and the history stay.</string>
+
+    <!-- Enrollment: the confirmation screen -->
+    <string name="enroll_link_title">This code came from a link.</string>
+    <string name="enroll_link_body">The link can come from anyone. Add a portal only if you or your administrator made this code.</string>
+    <string name="enroll_opened_from">Opened from: %1$s</string>
+    <string name="enroll_opened_unknown">Opened from: unknown</string>
+    <string name="enroll_lookalike_title">Looks like your portal “%1$s”.</string>
+    <string name="enroll_lookalike_body">The address is almost the same, but the key is not.</string>
+    <string name="enroll_lookalike_against">against %1$s</string>
+    <string name="enroll_same_address_title">This address is used by %1$s with another key.</string>
+    <string name="enroll_same_address_body">Add it only if you are sure that it is another portal.</string>
+    <string name="enroll_lookalike_name_title">The name looks like your portal “%1$s”.</string>
+    <string name="enroll_lookalike_name_body">Two names that look alike are easy to mix up.</string>
+    <string name="enroll_international">The address has letters that are not in the English alphabet. Check it with care.</string>
+    <string name="enroll_already_title">Already added as %1$s.</string>
+    <string name="enroll_already_body">This code has the key of that portal. Nothing is added and the code is not used.</string>
+    <string name="enroll_open_portal">Open %1$s</string>
+    <string name="enroll_key_other_title">This key is the key of your portal “%1$s”.</string>
+    <string name="enroll_key_other_body">Nothing was changed and the code is not used.</string>
+    <string name="enroll_link_no_reenroll">A link cannot enroll a portal again. Open the portal on this phone and choose Enroll again.</string>
+    <string name="enroll_bad_code">This is not a valid enrollment code.</string>
+    <string name="enroll_address">Address</string>
+    <string name="enroll_key">Key</string>
+    <string name="enroll_key_help">Compare it with the page where the code was made.</string>
+    <string name="enroll_key_before">Before</string>
+    <string name="enroll_key_new">New</string>
+    <string name="enroll_key_same">The key is the same as before.</string>
+    <string name="enroll_key_differs">The key is not the same as before.</string>
+    <string name="enroll_name">Name on this phone</string>
+    <string name="enroll_name_note">You choose it. The portal does not know it.</string>
+    <string name="enroll_name_count">%1$d/%2$d</string>
+    <string name="enroll_name_fixed">Name and color</string>
+    <string name="enroll_color">Color</string>
+    <string name="enroll_color_used">%1$s, used by %2$s</string>
+    <string name="enroll_tick">I know who runs this portal.</string>
+    <string name="enroll_tick_reenroll">The new key is the one that my administrator gave me.</string>
+    <string name="enroll_tick_why_link">Needed because the code came from a link.</string>
+    <string name="enroll_tick_why_lookalike">Needed because this portal looks like another portal.</string>
+    <string name="enroll_tick_why_reenroll">Needed because the key of a portal is a serious thing to change.</string>
+    <string name="enroll_add">Add portal</string>
+    <string name="enroll_add_again">Enroll again</string>
+    <string name="enroll_adding">Connecting…</string>
+    <string name="enroll_device_help">The portal shows this name in its web interface.</string>
+    <string name="enroll_secret_note">The code works one time. The phone uses it only when you tap the button.</string>
+
+    <!-- Names -->
+    <string name="name_err_empty">Enter a name.</string>
+    <string name="name_err_long">Use 16 characters or fewer.</string>
+    <string name="name_err_hidden">The name has a hidden or special character.</string>
+    <string name="name_err_separators">Use at least one letter or digit.</string>
+    <string name="name_err_taken">The portal %1$s has this name, or a name that looks the same.</string>
+
+    <!-- The portal list -->
+    <string name="portal_new">New</string>
+    <plurals name="portal_open_count">
+        <item quantity="one">%d open</item>
+        <item quantity="other">%d open</item>
+    </plurals>
+    <string name="portal_synced">Synced %1$s</string>
+    <string name="portal_never_synced">Never synced</string>
+    <string name="portal_key_prefix">key %1$s</string>
+    <string name="portal_move_up">Move up</string>
+    <string name="portal_move_down">Move down</string>
+    <string name="portal_drag">Move %1$s. Drag to change the order.</string>
+    <string name="portal_moved">%1$s is now number %2$d of %3$d</string>
+    <string name="portals_footer_lead">Name, color and order are yours.</string>
+    <string name="portals_footer_body">They stay on this phone. A portal cannot change them. The filter strip and the chips follow this order.</string>
+    <string name="portals_key_lead">Key</string>
+    <string name="portals_key_body">is the start of the fingerprint of the portal key, fixed at enrollment. Tap a portal to see all 20 characters.</string>
+    <string name="portals_cap_note">This phone holds %1$d portals. Remove one to add another.</string>
+
+    <!-- The portal screen -->
+    <string name="portal_name">Name</string>
+    <string name="portal_rename_title">Name on this phone</string>
+    <string name="portal_save">Save</string>
+    <string name="portal_color">Color</string>
+    <string name="portal_color_title">Color of %1$s</string>
+    <string name="portal_identity">Identity on this phone</string>
+    <string name="portal_identity_help">Only you set the name and the color. The portal cannot change them.</string>
+    <string name="portal_fingerprint">Key fingerprint</string>
+    <string name="portal_fingerprint_help">Compare it with the page where the code was made.</string>
+    <string name="portal_reported">The portal calls itself “%1$s”.</string>
+    <string name="portal_prev_key">Key before</string>
+    <string name="portal_prev_key_at">Changed %1$s</string>
+    <string name="portal_connection">Connection</string>
+    <string name="portal_change_address">Change address</string>
+    <string name="portal_change_address_help">The key stays the same. A new address with another key shows “Key changed”.</string>
+    <string name="portal_address_hint">Address of the portal</string>
+    <string name="portal_address_invalid">This is not an address.</string>
+    <string name="portal_address_same">This is the address that the portal has now.</string>
+    <string name="portal_address_used">The portal %1$s has this address.</string>
+    <string name="portal_address_saved">Address changed</string>
+    <string name="portal_reenroll">Enroll again</string>
+    <string name="portal_reenroll_help">Use a new code of this portal. The name, the color and the history stay.</string>
+    <string name="portal_privacy">Lock screen</string>
+    <string name="portal_hide_name">Hide the name on the lock screen</string>
+    <string name="portal_hide_name_help">A notification then shows the request and not the name of the portal.</string>
+    <string name="portal_remove_nothing">This portal has nothing on this phone.</string>
+    <plurals name="portal_remove_open">
+        <item quantity="one">%d open request</item>
+        <item quantity="other">%d open requests</item>
+    </plurals>
+    <plurals name="portal_remove_unsent">
+        <item quantity="one">%d answer not sent yet</item>
+        <item quantity="other">%d answers not sent yet</item>
+    </plurals>
+    <plurals name="portal_remove_history">
+        <item quantity="one">%d item in history</item>
+        <item quantity="other">%d items in history</item>
+    </plurals>
+    <plurals name="portal_remove_alerts">
+        <item quantity="one">%d alert</item>
+        <item quantity="other">%d alerts</item>
+    </plurals>
+    <string name="portal_remove_lost">The phone erases: %1$s.</string>
+
+    <!-- Key changed (and a revoked device) -->
+    <string name="keychanged_title">The key of this portal changed.</string>
+    <string name="keychanged_body">The phone can no longer check that it talks to the same portal. It stopped sending your answers to it.</string>
+    <string name="keychanged_fingerprints">Key fingerprint</string>
+    <string name="keychanged_before">Before</string>
+    <string name="keychanged_new">New</string>
+    <string name="keychanged_new_unknown">Shows after you enter a new code.</string>
+    <string name="keychanged_ask_lead">Ask the administrator.</string>
+    <string name="keychanged_ask_body">A new key is normal after a key rotation or a new install. It is also what an attacker at the same address would show. Compare the new fingerprint with the value that the administrator gives you by another channel.</string>
+    <string name="keychanged_continue">If you continue, the phone enrolls again with a new code. It keeps the name, the color and the history of this portal. Open requests of the old key close at the next sync.</string>
+    <string name="keychanged_enter_code">Enter a new code</string>
+    <string name="keychanged_remove">Remove this portal and its data</string>
+    <string name="revoked_title">This phone cannot use this portal now.</string>
+    <string name="revoked_body">The portal does not accept this device, or the address is not valid. Enter a new code to use the portal again. The name, the color and the history stay.</string>
+</resources>

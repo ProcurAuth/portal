@@ -56,6 +56,23 @@ The agent sends its explanation and its talk to the portal, and the service neve
 - An `mcp_` key does not open the REST routes, and an `api_` key does not open the endpoint.
 - A bad key is counted for the client address. An address over the limit gets `429` before the portal checks the key. Each instance keeps its own counters.
 
+## Several portals on one phone
+
+The identity of a portal on the phone is local. The user chooses the name and the color when the phone adds the portal. The phone derives the fingerprint from the pinned key. The portal can set none of these. The portal sends a name of its own in `welcome`. The phone shows it only as "The portal calls itself", and only when it differs from the name of the user.
+
+
+- **Look-alike.** The phone compares a new portal with the portals that it holds, by key, address and name. It folds letters that look alike: `1` and `l`, `0` and `o`, `rn` and `m`, and some Cyrillic and Greek letters. It decodes Punycode. A result of this check shows a banner and requires a tick.
+
+- **Same key.** The phone refuses a code that has the key of a portal that it holds. It does not use the code. Two addresses of one portal are two enrollments of one key, so the phone keeps one address and lets the user change it.
+
+- **Link.** A link from another app is not proof of its origin. The phone shows the referrer as a hint and requires a tick. A link can add a portal. It can never replace a row, a key or an address.
+
+- **Key change.** A handshake that does not end with the pinned key, or the close code 4401, stops the connection. The phone shows "Key changed" and sends nothing. The user can enroll again in place, from the screen of that portal only. The phone keeps the name, the color and the history. The screen shows the old fingerprint, and then both fingerprints with a required tick.
+
+- **Fingerprint.** The fingerprint is a cue and not the boundary. An attacker can force a short prefix in hours. The full 80 bits cost about 2^80 digests. The boundary is the name and the color that the attacker cannot choose, and the fact that the user added the portal.
+
+- **Cap.** The phone holds at most 10 portals, one color for each.
+
 ## Limits of the model
 
 - The portal knows nothing about TLS. Noise protects the phones. The bearer key of a sender travels in clear text on plain HTTP. Terminate TLS in the reverse proxy, or use a private network.

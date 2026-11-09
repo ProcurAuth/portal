@@ -785,6 +785,7 @@ These choices fill the gaps of the specification. Change them only with a new pr
     within 10 seconds.
 12. **One attempt.** An enrollment connection carries one handshake. The server closes it
     after message 2 or after a refusal. The phone closes it with code 1000.
+13. **Identity on the phone.** The identity of a portal on the phone is local. The phone derives the fingerprint from the pinned key. The server never sends a display name that the phone trusts.
 
 ## Other interfaces
 
