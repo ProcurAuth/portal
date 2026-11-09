@@ -17,6 +17,7 @@ import android.widget.TextView
 import app.portalinbox.R
 import app.portalinbox.alert.ItemAlerter
 import app.portalinbox.core.NativeRender
+import app.portalinbox.data.AgentDirectory
 import app.portalinbox.data.Item
 import app.portalinbox.data.ItemRepository
 import app.portalinbox.data.ReplyOutbox
@@ -239,7 +240,10 @@ class ThreadActivity : BaseActivity() {
         }
         val offset = now() - System.currentTimeMillis()
         val screen = ThreadState.of(
-            ThreadState.Input(item, repo.turns(serverId, requestId), repo.outboxOf(serverId, requestId), now(), offset, ZoneId.systemDefault()),
+            ThreadState.Input(
+                item, repo.turns(serverId, requestId), repo.outboxOf(serverId, requestId), now(), offset, ZoneId.systemDefault(),
+                agentName = AgentDirectory(repo.agents(serverId)).labelOf(item),
+            ),
         )
         codeLabel.text = item.request.approval?.code ?: ""
         val previous = lastScreen

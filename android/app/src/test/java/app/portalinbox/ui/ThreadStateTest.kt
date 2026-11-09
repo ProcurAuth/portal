@@ -40,6 +40,19 @@ class ThreadStateTest {
         )
     }
 
+    @Test
+    fun theThreadNamesTheAgentFromTheTableAndFallsBackToTheFrame() {
+        open()
+        val frame = screen()
+        assertTrue(frame.senderLine, frame.senderLine.startsWith("Billing bot"))
+        val item = repo.item(server, rid)!!
+        val renamed = ThreadState.of(
+            ThreadState.Input(item, repo.turns(server, rid), repo.outboxOf(server, rid), now, 0L, ZoneOffset.UTC, agentName = "Renamed agent"),
+        )
+        assertTrue(renamed.senderLine, renamed.senderLine.startsWith("Renamed agent"))
+        assertEquals("Renamed agent", renamed.agentLabel)
+    }
+
     private fun agentTurn(seq: Long, delivery: Int) = engine.onMessage(server, Make.message(rid, Make.hex(delivery), seq, user = false))
     private fun userTurn(seq: Long, delivery: Int) = engine.onMessage(server, Make.message(rid, Make.hex(delivery), seq, user = true))
 
