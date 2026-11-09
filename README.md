@@ -1196,6 +1196,7 @@ An agent can ask the owner of its key to approve an action. The owner answers on
 | One request | `/auth/settings/inbox/items/{id}` | The owner of the request, or `approval.read` for the metadata. |
 | Content for the administrator | `/auth/settings/inbox/items/{id}/body` | The superadmin, and `inbox.at_rest.admin_body_read = true`. Else the route answers `404`. |
 | **Inbox limits** | `/auth/settings/inbox/limits` | `approval.read`. The page is read only. |
+| **Preferences** | `/auth/settings/inbox/prefs` | The account itself. A session that the superadmin opens as the account gets `403`. |
 
 - **Order on the page Inbox:** the alerts come first, then the panel **Open items**, then the phones and the connections. The page scrolls when the panel is present.
 - **The page of a request:** the zone **Command** comes first. It shows the text of the service in a fixed font, with line numbers. It shows the fields of the view and the short hash of the effect. The hint `language` sets the colors.
@@ -1209,6 +1210,24 @@ An agent can ask the owner of its key to approve an action. The owner answers on
 - **History:** the filters are the state, the key, the service and the period (7, 30 or 90 days). A request that follows an abandoned or replaced one stands right after it. An owner sees only the own requests. An account with `approval.read` sees the metadata of all of them.
 - **Cancel:** an account with `approval.cancel` sees the button **Cancel this request** on an open request. The service sees a closed request.
 - **Rules of safety:** a form needs the session, the token `csrf` and the right `Origin`. A session that the superadmin opens as another account reads no request and answers nothing. Each read of the route of the administrator writes one row `body_read` and adds one to `portal_item_body_reads_total`. The row has no content.
+
+### Preferences
+
+The link **Preferences** is in the bar of the page Inbox, next to **History**. It opens `/auth/settings/inbox/prefs`. The page needs no script. Only the account itself can use it. A session that the superadmin opens as the account gets `403` for the page and for the form.
+
+The page has two rows. The row **Summary of open items** has three choices: **Daily at** a time, **Every** N hours, or **None**. The summary is one quiet message with the count and the age of the open items. It never holds a content.
+
+The row **Quiet hours** has two times and the box **Urgent items still ring**. A new item that arrives in the quiet hours reaches the phone with no sound. The server delivers it at once. Empty both times for no quiet hours.
+
+The page has one time zone. The daily summary and the quiet hours use it. The list has all the zones of the database in the binary.
+
+- The values of the account replace the defaults of `inbox.items.digest`. The page shows the default of the file in its third row. The button **Use the defaults of the file** removes the values of the account.
+- The values never go past a limit of the file. The period of the summary goes from 1 hour to 7 days.
+- The server refuses a value that is not valid with status `422`, and it stores nothing. It never changes a value to make it fit. A zone name needs its exact capital letters.
+- The phone and the page use the same stored values. A change of the phone shows on the page at once. A change of the page reaches a phone at its next connection.
+- A daily summary is due at the time of each local day, also across a change of summer time. A time that the change skips is due after the gap. An `every` summary is due at the multiples of its period since the Unix epoch. A due time that the server missed by more than 15 minutes is not sent. The server sends no summary when no item was open at the due time.
+
+The time zone database is inside the binary (the crate `jiff` with its bundled database). The server never reads the zone files of the host, so the static image needs no `tzdata`.
 
 ### Notifications in the browser
 
@@ -1347,7 +1366,11 @@ An `answer` goes to the engine. The server checks the effect that the phone show
 
 The frame `sync` lists the items that a phone holds open. The portal sends the open items that the phone lacks and the `settled` frame of each item that is final. The frame `refresh` gives one item. These frames have new delivery ids, so the phone does not take them for old deliveries.
 
-The frame `set_prefs` stores the quiet hours and the digest of the account. The next `welcome` sends them again. The server applies none of them yet. The frame `welcome` says `body_purge_after_ms`. The value 0 says that the server has no items.
+The frame `set_prefs` stores the quiet hours and the digest of the account, after the server checks them. The next `welcome` sends them again. A value that is not valid gets the frame `error` with the code `invalid_prefs`, and the server stores nothing. The frame `welcome` says `body_purge_after_ms`. The value 0 says that the server has no items.
+
+The preferences have effect in two places. A `request` that arrives inside the quiet hours of the owner has `quiet` true. The server delivers it at once, as any other.
+
+The task of the digest writes one row of kind `digest` for each owner at each due time. The key of the row has the login and the due time, so several instances write one row. The session of a phone builds the frame `digest` from the open items when it sends the row. It withdraws the row when no item is open.
 
 ### Stop
 
@@ -1852,7 +1875,7 @@ This block is inside the block `inbox.items`. It sets the default summary of the
 |---|---|---|---|
 | `mode` | `off`, `daily`, `every` | required | The default summary of the open items. `off`: no summary. `daily`: one summary each day at `at`, in `timezone`. `every`: one summary at each interval `every`. Recommended: `"daily"`. |
 | `at` | text: a time of the day as HH:MM, from 00:00 to 23:59 | required | The time of the daily summary, as `HH:MM` on a 24-hour clock. Applies only when `inbox.items.digest.mode` is `daily`. |
-| `timezone` | text: an IANA time zone name, such as Europe/Paris or UTC | required | The time zone of `at`, as an IANA name. The start checks the form of the name. A later release checks the name in a time zone database. Applies only when `inbox.items.digest.mode` is `daily`. |
+| `timezone` | text: an IANA time zone name, such as Europe/Paris or UTC | required | The time zone of `at`, as an IANA name. The start checks the name in the time zone database that the binary embeds. A name with other capital letters is refused. Applies only when `inbox.items.digest.mode` is `daily`. |
 | `every` | duration, 1h to 7d | required | The interval between two summaries. Applies only when `inbox.items.digest.mode` is `every`. |
 
 #### Block `inbox.at_rest`

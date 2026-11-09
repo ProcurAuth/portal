@@ -176,6 +176,8 @@ pub trait ItemTx {
         login: &str,
         prefs: &Prefs,
     ) -> impl Future<Output = Result<(), DbError>>;
+    /// The owners that have an open item, each with the creation time of the oldest one.
+    fn open_owners(&mut self) -> impl Future<Output = Result<Vec<(String, i64)>, DbError>>;
     /// Writes a row of `alerts` and a delivery for each device of the owner that is not revoked. The result is the
     /// devices of the deliveries.
     fn insert_notice(
@@ -1136,6 +1138,7 @@ async fn mute_after_refusals<T: ItemTx>(
                 l.item.requester_key_id
             ),
             key: format!("mute:{}:{until}", l.item.requester_key_id),
+            digest: false,
         });
     }
     Ok(())
@@ -1487,6 +1490,61 @@ pub async fn maintain<T: ItemTx>(tx: &mut T, cx: &Cx) -> Result<MaintainReport, 
         events_deleted: tx.delete_events(cx.now, &cx.rules).await?,
         intents_deleted: tx.delete_intents(cx.now).await?,
     })
+}
+
+/// An owner with an open item, and the preferences that tell when its digest is due.
+#[derive(Clone, Debug)]
+pub struct DigestCandidate {
+    pub owner: String,
+    /// The creation time of the oldest open item of the owner.
+    pub oldest_ms: i64,
+    pub prefs: Prefs,
+}
+
+/// The owners that have an open item, each with its preferences. An owner with no open item has no digest.
+pub async fn digest_candidates<T: ItemTx>(tx: &mut T) -> Result<Vec<DigestCandidate>, DbError> {
+    let mut out = Vec::new();
+    for (owner, oldest_ms) in tx.open_owners().await? {
+        let prefs = tx.prefs(&owner).await?;
+        out.push(DigestCandidate {
+            owner,
+            oldest_ms,
+            prefs,
+        });
+    }
+    Ok(out)
+}
+
+/// The result of [`digest_rows`].
+#[derive(Debug, Default)]
+pub struct DigestRows {
+    /// The rows that this call wrote and that have a device to go to.
+    pub written: u32,
+    /// The devices with a new delivery.
+    pub woken: Vec<String>,
+}
+
+/// Writes the rows of the digests. A row whose key exists is not written again: PostgreSQL and SQLite refuse the second
+/// insert of the same key, so one row exists for each owner and due time, with any number of instances.
+pub async fn digest_rows<T: ItemTx>(
+    tx: &mut T,
+    cx: &Cx,
+    rows: &[OwnerAlert],
+) -> Result<DigestRows, DbError> {
+    let mut out = DigestRows::default();
+    for row in rows {
+        let devices = tx.insert_owner_alert(row, cx.now).await?;
+        if !devices.is_empty() {
+            out.written += 1;
+        }
+        out.woken.extend(devices);
+    }
+    out.woken.sort();
+    out.woken.dedup();
+    if !out.woken.is_empty() {
+        tx.announce(&out.woken, &[]).await?;
+    }
+    Ok(out)
 }
 
 /// Adds the counts of the same key id.

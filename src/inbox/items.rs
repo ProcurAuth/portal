@@ -73,6 +73,11 @@ impl ManualClock {
     pub fn advance(&self, by: Duration) {
         self.0.fetch_add(by.as_millis() as i64, Ordering::SeqCst);
     }
+
+    /// Puts the clock at `ms` (Unix time).
+    pub fn set(&self, ms: i64) {
+        self.0.store(ms, Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
@@ -506,7 +511,8 @@ pub struct Notice {
     pub except_device: Option<String>,
 }
 
-/// An alert of the portal to the devices of an owner. It names no item: it is a plain alert (`kind = 'alert'`).
+/// An alert of the portal to the devices of an owner. It names no item: it is a plain alert (`kind = 'alert'`), or the
+/// row of a digest (`kind = 'digest'`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OwnerAlert {
     pub owner: String,
@@ -514,6 +520,8 @@ pub struct OwnerAlert {
     pub title: String,
     /// Makes the alert idempotent: one alert for each key.
     pub key: String,
+    /// True: the row is the digest of the owner. The frame holds numbers that the server reads when it sends the row.
+    pub digest: bool,
 }
 
 /// What one operation writes besides the rows of the item: the events and the messages. The storage code writes

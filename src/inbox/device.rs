@@ -939,6 +939,14 @@ async fn flush_deliveries(
     let mut withdrawn = Vec::new();
     // The deliveries of items that the server withdrew: each one has its own log line.
     let mut withdrawn_items = Vec::new();
+    // A phone that was away has one digest row for each due time that passed. Only the newest counts the open items now.
+    let newest_digest = pending
+        .iter()
+        .filter_map(|r| match r {
+            Row::Plain(p) if p.kind == Kind::Digest => Some(p.seq),
+            _ => None,
+        })
+        .max();
     for row in pending {
         let seq = row.seq();
         let due = !inflight
@@ -955,6 +963,10 @@ async fn flush_deliveries(
                         }
                         None => continue,
                     }
+                }
+                if p.kind == Kind::Digest && newest_digest != Some(p.seq) {
+                    withdrawn.push(p.seq);
+                    continue;
                 }
                 if !due {
                     continue;

@@ -11,6 +11,7 @@
 # ui-check-keep.js checks the box "Stay signed in" of the sign-in page and the session cookie: see its header.
 # ui-check-login.js checks the sign-in page, its band and the second step: see its header. It reads UI_CHECK_HOST too.
 # ui-check-confirm.js checks the lock of an approval in the editor and the interaction of a key. It WRITES: use a portal that is yours. See its header.
+# ui-check-prefs.js checks the page Inbox > Preferences. It WRITES: start the server with the test `prefs_demo_for_the_eyes` of tests/prefs_e2e.rs (see the header of the script).
 # ui-check-items.js checks the web pages of the items (open items, history, one request, limits). It WRITES: start the server with the test `items_demo_for_the_eyes` of tests/items_web_e2e.rs (see the header of the script).
 # ui-check-theme.js checks the theme selector of the launcher (the demo is fine: it only signs in): see its header.
 # PLAYWRIGHT_IMAGE: the image of the browser (default mcr.microsoft.com/playwright:v1.49.1-noble).

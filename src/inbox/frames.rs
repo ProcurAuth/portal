@@ -204,10 +204,14 @@ fn clean_line(text: &str) -> String {
         .to_string()
 }
 
-/// The hook of the quiet hours (lot L11): true when the item came inside the quiet hours of the account. The server
-/// never holds an item back, so the answer only tells the phone to be silent.
-pub fn arrived_quiet(_owner: &str, _created_at_ms: i64) -> bool {
-    false
+/// The hook of the quiet hours: true when the item came inside the quiet hours of the account (`created_at_ms` is the
+/// time of the arrival, in the zone of the window). The server never holds an item back, so the answer only tells the
+/// phone to be silent. The flag does not depend on the urgency: the phone reads `high_rings` of its preferences.
+pub fn arrived_quiet(prefs: &inbox_core::proto::Prefs, created_at_ms: i64) -> bool {
+    prefs
+        .quiet
+        .as_ref()
+        .is_some_and(|q| super::prefs::in_quiet(q, created_at_ms))
 }
 
 /// The `request` frame of an item. `id` is the id of the delivery. `body` is the unsealed body.
@@ -234,7 +238,8 @@ pub fn request_frame(
         seq: item.last_seq,
         from,
         urgency: item.urgency,
-        quiet: arrived_quiet(&item.requester_owner, item.created_at),
+        // The caller sets the flag from the preferences of the owner (see `arrived_quiet`).
+        quiet: false,
         created_at_ms: item.created_at,
         chain_created_at_ms: item.chain_created_at,
         agent_seen_at_ms: item.agent_seen_at,

@@ -366,6 +366,15 @@ impl ItemTx for SqliteTx<'_, '_> {
         Ok(())
     }
 
+    async fn open_owners(&mut self) -> Result<Vec<(String, i64)>, DbError> {
+        let mut stmt = self.0.prepare_cached(
+            "SELECT requester_owner, MIN(created_at) FROM items WHERE state IN ('pending', 'replied')
+             GROUP BY requester_owner ORDER BY requester_owner",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     async fn insert_notice(&mut self, n: &Notice, now: i64) -> Result<Vec<String>, DbError> {
         let id = super::util::random_id();
         let key = format!("{}:{}:{}", n.request_id, n.kind, n.seq);
@@ -573,10 +582,10 @@ impl ItemTx for SqliteTx<'_, '_> {
             .0
             .prepare_cached(
                 "INSERT INTO alerts (id, kind, target_kind, target_id, title, source, idempotency_key, created_at)
-                 VALUES (?1, 'alert', 'user', ?2, ?3, 'portal', ?4, ?5)
+                 VALUES (?1, ?6, 'user', ?2, ?3, 'portal', ?4, ?5)
                  ON CONFLICT (source, idempotency_key) DO NOTHING",
             )?
-            .execute(params![id, a.owner, a.title, a.key, now])?;
+            .execute(params![id, a.owner, a.title, a.key, now, if a.digest { "digest" } else { "alert" }])?;
         if created == 0 {
             return Ok(Vec::new());
         }

@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::items_store::ItemError;
+use super::items_store::{DigestMemo, ItemError};
 use super::log;
 use super::pg::Event;
 use super::state::App;
@@ -210,9 +210,35 @@ fn spawn_items(app: Arc<App>) {
     });
 }
 
+/// The digest: every 15 seconds the task asks the engine to write the row of each owner whose due time came. The
+/// engine reads the clock and the preferences, and the database keeps one row for each owner and due time, so
+/// several instances send one frame.
+fn spawn_digest(app: Arc<App>) {
+    let Some(file) = app.config.items.as_ref().map(|i| i.digest.clone()) else {
+        return;
+    };
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(15));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut memo = DigestMemo::default();
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {}
+                _ = app.shutdown.wait() => return,
+            }
+            let Some(items) = app.items() else { return };
+            match items.digest_pass(&file, &mut memo).await {
+                Ok(_) | Err(ItemError::Degraded) => {}
+                Err(e) => log::warn!(event = "digest_failed", error = %e),
+            }
+        }
+    });
+}
+
 pub fn spawn_background(app: Arc<App>) {
     spawn_cluster(app.clone());
     spawn_items(app.clone());
+    spawn_digest(app.clone());
     spawn_resilience(app.clone());
     // Gauges and last-seen persistence.
     let a = app.clone();

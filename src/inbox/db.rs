@@ -1294,7 +1294,7 @@ pub fn recent_alerts(
     cutoff: i64,
 ) -> rusqlite::Result<Vec<AlertSummary>> {
     let sql = format!(
-        "{ALERT_SUMMARY} WHERE a.created_at >= ?2 AND a.request_id IS NULL GROUP BY a.id ORDER BY a.created_at DESC LIMIT ?1"
+        "{ALERT_SUMMARY} WHERE a.created_at >= ?2 AND a.request_id IS NULL AND a.kind <> 'digest' GROUP BY a.id ORDER BY a.created_at DESC LIMIT ?1"
     );
     let mut stmt = conn.prepare_cached(&sql)?;
     let rows = stmt.query_map(params![limit, since_ms], alert_summary)?;
@@ -1517,8 +1517,9 @@ fn scope_sql(scope: &Scope) -> (String, Vec<String>) {
         }
     };
     (
-        // The web shows the alerts. The items have their own page, and a row of an item names its `request_id`.
-        format!("request_id IS NULL AND (({groups}) OR (target_kind = 'user' AND target_id = ?)) AND ({services})"),
+        // The web shows the alerts. The items have their own page, and a row of an item names its `request_id`. The row of
+        // a digest is for the phones only.
+        format!("request_id IS NULL AND kind <> 'digest' AND (({groups}) OR (target_kind = 'user' AND target_id = ?)) AND ({services})"),
         values,
     )
 }

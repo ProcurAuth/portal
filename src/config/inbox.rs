@@ -125,7 +125,6 @@ pub struct ItemsConfig {
     pub retention: Duration,
     pub body_purge_after: Duration,
     pub audit_retention: Duration,
-    #[allow(dead_code)] // lot L11 reads it
     pub digest: DigestConfig,
     #[allow(dead_code)] // lot L13 reads it
     pub max_body_bytes: usize,

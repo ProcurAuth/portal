@@ -16,7 +16,7 @@ use zeroize::Zeroizing;
 use super::content_box::{self, ContentBox, FIELD_BODY, FIELD_INTENT, FIELD_TURN};
 use super::db::DbError;
 use super::hub::Hub;
-use super::items::{Caller, Clock, Effects, Loaded, NewEvent, Rules, Wait};
+use super::items::{Caller, Clock, Effects, Loaded, NewEvent, OwnerAlert, Rules, Wait};
 use super::items_db;
 use super::items_ops::{
     self as ops, AnswerIn, AnswerOut, AnswerVia, CancelBy, Cancelled, Consumed, CreateOutcome, Cx,
@@ -30,6 +30,7 @@ use super::pg;
 use super::replica::Replica;
 use super::store::Store;
 use super::util::random_id;
+use crate::config::DigestConfig;
 
 /// Why a call of the engine failed. A refusal of a rule is a value of the operation, not an error.
 #[derive(Debug)]
@@ -41,6 +42,8 @@ pub enum ItemError {
     Seal(String),
     /// The copy of the replica does not hold the write and `sync_alerts` is true.
     Replica,
+    /// The preferences have a value that the server refuses. Nothing was stored.
+    Prefs(super::prefs::PrefsError),
 }
 
 impl From<DbError> for ItemError {
@@ -60,6 +63,7 @@ impl std::fmt::Display for ItemError {
             ItemError::Storage(e) => write!(f, "{e}"),
             ItemError::Seal(e) => write!(f, "seal: {e}"),
             ItemError::Replica => f.write_str("the replica does not hold the write"),
+            ItemError::Prefs(e) => write!(f, "invalid preferences: {e}"),
         }
     }
 }
@@ -196,6 +200,11 @@ pub struct IntentPlain {
     pub previous_id: Option<String>,
     pub content: Zeroizing<Vec<u8>>,
 }
+
+/// The due times that this instance wrote already. It saves one write each pass; the database keeps the rule that one
+/// row exists for each owner and due time.
+#[derive(Debug, Default)]
+pub struct DigestMemo(std::collections::HashMap<String, i64>);
 
 /// The engine of the items, as the caller uses it.
 pub struct Items<'a> {
@@ -798,8 +807,10 @@ impl Items<'_> {
         in_tx!(self, [login], tx, tx.prefs(&login))
     }
 
-    /// Replaces the preferences of an account. The server stores them and applies nothing here.
+    /// Replaces the preferences of an account. A value that the server refuses (a name that is not in the time zone
+    /// database, a period out of the range of the file) gives [`ItemError::Prefs`] and stores nothing.
     pub async fn set_prefs(&self, login: &str, prefs: &Prefs) -> Result<(), ItemError> {
+        super::prefs::check(prefs).map_err(ItemError::Prefs)?;
         self.writable()?;
         let (login, prefs) = (login.to_string(), prefs.clone());
         in_tx!(self, [login, prefs], tx, tx.put_prefs(&login, &prefs))?;
@@ -847,6 +858,65 @@ impl Items<'_> {
             );
         }
         Ok(done.value)
+    }
+
+    /// One pass of the digest: writes the row of the digest of each owner whose due time came. The due time comes
+    /// from the preferences of the account over the default of the file, and from the clock of the engine. A row that
+    /// exists for the owner and the due time is not written again, so several instances send one frame. The frame
+    /// is built when the session of a phone sends the row: it holds the count, the age and the ids, never a body.
+    /// The result is the number of rows written.
+    pub async fn digest_pass(
+        &self,
+        file: &DigestConfig,
+        memo: &mut DigestMemo,
+    ) -> Result<u32, ItemError> {
+        self.writable()?;
+        let now = self.clock.now_ms();
+        let found = in_tx!(self, [], tx, ops::digest_candidates(tx))?;
+        memo.0
+            .retain(|owner, _| found.iter().any(|c| &c.owner == owner));
+        let mut due = Vec::new();
+        for c in found {
+            let plan = match super::prefs::plan(&c.prefs, file) {
+                Ok(plan) => plan,
+                Err(reason) => {
+                    log::warn!(event = "digest_plan_refused", owner = %c.owner, reason = %reason);
+                    continue;
+                }
+            };
+            let Some(at) = super::prefs::due_slot(&plan, now) else {
+                continue;
+            };
+            // An item that came after the due time waits for the next one: the digest speaks of what was open.
+            if c.oldest_ms > at || memo.0.get(&c.owner) == Some(&at) {
+                continue;
+            }
+            due.push((c.owner, at));
+        }
+        if due.is_empty() {
+            return Ok(0);
+        }
+        let rows: Vec<OwnerAlert> = due
+            .iter()
+            .map(|(owner, at)| OwnerAlert {
+                owner: owner.clone(),
+                title: "Summary".into(),
+                key: super::prefs::digest_key(owner, *at),
+                digest: true,
+            })
+            .collect();
+        let cx = self.cx();
+        let out = in_tx!(self, [rows, cx], tx, ops::digest_rows(tx, &cx, &rows))?;
+        for (owner, at) in due {
+            memo.0.insert(owner, at);
+        }
+        if let Some(hub) = self.hub {
+            hub.wake(&out.woken);
+        }
+        if out.written > 0 {
+            log::info!(event = "digest_queued", count = out.written);
+        }
+        Ok(out.written)
     }
 
     /// The retention: bodies, items and events.

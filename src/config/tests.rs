@@ -3866,6 +3866,9 @@ fn the_digest_mode_decides_which_keys_apply() {
         (r#"digest { mode = "daily" at = "24:00" timezone = "UTC" }"#, "inbox.items.digest.at"),
         (r#"digest { mode = "daily" at = "8:30" timezone = "UTC" }"#, "HH:MM"),
         (r#"digest { mode = "daily" at = "08:30" timezone = "Paris time" }"#, "inbox.items.digest.timezone"),
+        // The form is right, the name is not in the database: the start stops, the value is not changed.
+        (r#"digest { mode = "daily" at = "08:30" timezone = "Mars/Base" }"#, "has no zone with exactly this name"),
+        (r#"digest { mode = "daily" at = "08:30" timezone = "europe/paris" }"#, "capital letters"),
         (r#"digest { mode = "every" every = "30m" }"#, "from 1h to 7d"),
         (r#"digest { mode = "weekly" }"#, "inbox.items.digest.mode"),
     ] {

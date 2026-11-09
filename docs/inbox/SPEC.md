@@ -270,7 +270,7 @@ Each account has two preferences: the digest and the quiet hours. They are in th
 
 3.9.1 **[5.1.0]** The Inbox MUST keep the preferences of an account in the table `account_prefs`. They override the defaults of `inbox.items.digest`. They MUST NOT exceed a limit of the file. Only the account itself MAY change them, never a session that the superadmin opens as the account.
 
-3.9.2 **[5.1.0]** The digest mode is `off`, `daily` or `every`. `daily` needs a time `HH:MM` and a time zone. `every` needs a period from 1 hour to 7 days. A name that is not an IANA time zone MUST get `422`.
+3.9.2 **[5.1.0]** The digest mode is `off`, `daily` or `every`. `daily` needs a time `HH:MM` and a time zone. `every` needs a period from 1 hour to 7 days. A name that is not an IANA time zone MUST get `422` on the page and the error `invalid_prefs` on the phone. The server MUST store nothing and MUST NOT change the value, also not the capital letters. The start MUST check `inbox.items.digest.timezone` in the same time zone database.
 
 3.9.3 **[5.1.0]** The Inbox MUST send one frame `digest` for each owner at each due time, even with several instances. The frame holds the count, the age of the oldest item and the ids. It MUST NOT hold a body. An empty digest MUST NOT be sent.
 
@@ -279,6 +279,10 @@ Each account has two preferences: the digest and the quiet hours. They are in th
 3.9.5 **[5.1.0]** The lock screen option is local to the phone. The default is off. With it off, the notification MUST use the private visibility and a generic text.
 
 3.9.6 **[5.1.0]** Delegation, escalation and muted agents are not part of this version. They need a new decision of the owner.
+
+3.9.7 **[5.1.0]** The server MUST read the time zones from a database that is inside the binary. It MUST NOT read the zone files of the host. The crate of the database MUST be for the server only: the phone and `inbox-core` MUST NOT use it.
+
+3.9.8 **[5.1.0]** A `daily` digest MUST be due once for each local day at `HH:MM` of its time zone, also across a change of summer time. An `every` digest MUST be due at the multiples of its period since the Unix epoch. The server MUST NOT send a due time that is more than 15 minutes old. It MUST NOT send a digest for an owner that had no open item at the due time. All times MUST come from an injected clock.
 
 ### 3.10 Product decisions on items
 
@@ -582,12 +586,14 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.8.7 | 5.1.0 | L8, L10, A2 | L8: `frames::tests::the_line_from_never_holds_text_of_an_agent`. L10: `items_web_e2e::command_above_explanation_and_explanation_labelled_unverified` (the line from has the name of the key and the owner). A2: to fill |
 | 3.8.8 | 5.1.0 | L9 | `agent_channel::get_answer_renews_lease_without_budget_unit` (an item that the service made with `lease_s` and no intent), `approval_api_tests::pep_observation_unit` (L7) |
 | 3.8.9 | 5.1.0 | L9 | `config::tests::the_block_mcp_has_the_documented_defaults_and_the_set_values_apply`, `a_bad_key_of_the_block_mcp_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` |
-| 3.9.1 | 5.1.0 | L11 | to fill |
-| 3.9.2 | 5.1.0 | L11 | to fill |
-| 3.9.3 | 5.1.0 | L11 | to fill |
-| 3.9.4 | 5.1.0 | L8, L11 | L8: `set_prefs_is_stored_and_comes_back_in_the_welcome`. L11: to fill |
+| 3.9.1 | 5.1.0 | L11 | `items_tests::prefs_override_file_defaults_never_a_cap`, `prefs_e2e::prefs_page_refused_for_impersonated_session`, `prefs_e2e::set_prefs_from_phone_synced_to_page` |
+| 3.9.2 | 5.1.0 | L11 | `prefs_e2e::bad_timezone_name_refused_422_no_coercion`, `ui::prefs::tests::a_bad_value_is_the_error_with_its_field_and_nothing_is_changed`, `config::tests::the_digest_mode_decides_which_keys_apply` (a zone that the database does not hold) |
+| 3.9.3 | 5.1.0 | L11 | `items_tests::digest_two_instances_one_frame`, `items_tests::digest_empty_not_sent`, `approval_api_tests::prefs::digest_row_becomes_a_frame_with_numbers_only` |
+| 3.9.4 | 5.1.0 | L8, L11 | L8: `set_prefs_is_stored_and_comes_back_in_the_welcome`. L11: `approval_api_tests::prefs::quiet_flag_set_in_window_request_still_delivered`, `prefs_e2e::quiet_flag_set_in_window_request_still_delivered`, `prefs_e2e::set_prefs_from_phone_synced_to_page` |
 | 3.9.5 | 5.1.0 | A3 | to fill |
-| 3.9.6 | 5.1.0 | L11 | to fill |
+| 3.9.6 | 5.1.0 | L11 | `prefs_e2e::prefs_page_refused_for_impersonated_session` (the page has no row of delegation, escalation or muted agents) |
+| 3.9.7 | 5.1.0 | L11 | `prefs::tests::zones_come_from_the_embedded_database_with_their_exact_name`; the size of the binary and the build for the phone are in the report of the lot (the crate is not in `inbox-core`) |
+| 3.9.8 | 5.1.0 | L11 | `items_tests::daily_digest_once_at_local_time_across_dst_change`, `items_tests::digest_every_n_hours`, `prefs::tests::a_daily_due_time_follows_the_local_clock_across_the_spring_change`, `prefs::tests::a_time_inside_the_gap_is_due_after_the_gap_and_a_time_that_repeats_is_due_once`, `prefs::tests::a_due_time_that_is_too_old_is_not_sent` |
 | 3.10.1 | 5.1.0 | L3 | `frames::every_frame_rejects_unknown_field`, `invalid/client/answer-with-signature.json` in `frames::invalid_frames_are_refused` |
 | 3.10.2 | 5.1.0 | L2 | `config_risk_key_is_refused_and_no_document_depends_on_a_risk_level` |
 | 3.10.3 | 5.1.0 | L7 | L7: `approval_api_tests::no_phone_409`, `approval_api_tests::mute_after_three_refusals_alerts_owner` (the owner is the only recipient). L8 and L10 add the phone and the web screens |

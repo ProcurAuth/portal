@@ -2031,7 +2031,7 @@ impl PgStore {
             .query(
                 "SELECT a.id, a.target_kind, a.target_id, a.title, a.source, a.created_at, COUNT(d.seq), COUNT(d.received_at), a.kind, a.service
                  FROM alerts a LEFT JOIN deliveries d ON d.alert_id = a.id
-                 WHERE a.created_at >= $2 AND a.request_id IS NULL GROUP BY a.id ORDER BY a.created_at DESC LIMIT $1",
+                 WHERE a.created_at >= $2 AND a.request_id IS NULL AND a.kind <> 'digest' GROUP BY a.id ORDER BY a.created_at DESC LIMIT $1",
                 &[&i64::from(limit), &since_ms],
             )
             .await
@@ -2123,7 +2123,7 @@ impl PgStore {
         };
         (
             format!(
-                "request_id IS NULL AND (({groups}) OR (target_kind = 'user' AND target_id = ${login})) AND ({services})"
+                "request_id IS NULL AND kind <> 'digest' AND (({groups}) OR (target_kind = 'user' AND target_id = ${login})) AND ({services})"
             ),
             args,
         )

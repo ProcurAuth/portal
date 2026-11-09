@@ -47,6 +47,7 @@ pub mod metrics;
 pub mod notify;
 mod peer;
 mod pg;
+pub mod prefs;
 mod ratelimit;
 mod replica;
 pub mod rights;
@@ -86,10 +87,10 @@ pub(crate) mod page_items {
 /// What the tests of the portal take from the inbox.
 #[cfg(test)]
 pub(crate) mod testing {
-    pub(crate) use super::device_items::{Builder, Built};
+    pub(crate) use super::device_items::{digest_for_test, Builder, Built};
     pub(crate) use super::items::{owner_text_payload, Caller, Loaded, Wait};
     pub(crate) use super::items_ops::{AnswerVia, CancelBy, Cancelled, NewItem, TurnOut};
-    pub(crate) use super::items_store::{Answer, Answered, Created, ItemError, Items};
+    pub(crate) use super::items_store::{Answer, Answered, Created, DigestMemo, ItemError, Items};
     pub(crate) use super::pg::tests::TestDatabase;
 }
 use hub::Hub;
