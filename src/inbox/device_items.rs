@@ -298,6 +298,7 @@ pub(super) async fn digest(app: &App, login: &str, id: &str) -> Result<Built, En
         owner: Some(login.to_string()),
         open: Some(true),
         limit: SYNC_LIMIT,
+        agent_id: None,
         ..ListFilter::default()
     };
     match items.list(filter).await {
@@ -414,6 +415,9 @@ pub(super) async fn answer(
         Ok(Answered::Accepted { loaded, .. }) => (AnswerStatus::Accepted, Some(loaded.item.state)),
         Ok(Answered::Refused { status, loaded }) => (status, Some(loaded.item.state)),
         Ok(Answered::NotFound) => (AnswerStatus::Closed, None),
+        // The agent is new and `lock_new` is true. The status `agent_locked` of the frame `answer_result` comes with
+        // the protocol amendment (lot G2): until then the phone gets `closed`.
+        Ok(Answered::AgentLocked(loaded)) => (AnswerStatus::Closed, Some(loaded.item.state)),
         Err(ItemError::Degraded | ItemError::Replica) => return unavailable(socket, session).await,
         Err(e) => return Err(storage(e)),
     };
@@ -569,6 +573,7 @@ pub(super) async fn sync(
         owner: Some(login.to_string()),
         open: Some(true),
         limit: SYNC_LIMIT,
+        agent_id: None,
         ..ListFilter::default()
     };
     let mut still_open = match builder.items.list(filter).await {

@@ -241,6 +241,8 @@ fn requester(state: &AppState, subject: &str) -> Option<Requester> {
             }
             crate::keys::Interaction::OneShot => inbox_core::proto::Interaction::OneShot,
         },
+        // A service never names an agent: a request with no intent belongs to the bucket of the key.
+        agent: Default::default(),
     })
 }
 

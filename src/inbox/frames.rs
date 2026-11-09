@@ -479,6 +479,7 @@ mod tests {
             previous_id: None,
             requester_key_id: "2b7c91d0e4a853f6".into(),
             requester_owner: "alice".into(),
+            agent_id: "a".repeat(32),
             via: Via::Mcp,
             interaction: Interaction::Conversational,
             urgency: Urgency::High,

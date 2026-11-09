@@ -193,12 +193,19 @@ fn spawn_items(app: Arc<App>) {
             }
             if n.is_multiple_of(30) {
                 match items.maintain().await {
-                    Ok(r) if r.bodies_purged + r.items_deleted + r.events_deleted > 0 => {
+                    Ok(r)
+                        if r.bodies_purged
+                            + r.items_deleted
+                            + r.events_deleted
+                            + r.agents_purged
+                            > 0 =>
+                    {
                         log::info!(
                             event = "items_retention",
                             bodies_purged = r.bodies_purged,
                             items_deleted = r.items_deleted,
-                            events_deleted = r.events_deleted
+                            events_deleted = r.events_deleted,
+                            agents_purged = r.agents_purged
                         )
                     }
                     Ok(_) => {}

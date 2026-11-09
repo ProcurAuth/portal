@@ -276,6 +276,7 @@ impl Rig {
             key_id: subject.strip_prefix("key:").unwrap().to_string(),
             owner: OWNER.into(),
             interaction,
+            agent: Default::default(),
         }
     }
 

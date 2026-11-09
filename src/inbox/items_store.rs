@@ -17,16 +17,13 @@ use super::content_box::{self, ContentBox, FIELD_BODY, FIELD_INTENT, FIELD_TURN}
 use super::db::DbError;
 use super::hub::Hub;
 use super::items::{Caller, Clock, Effects, Loaded, NewEvent, OwnerAlert, Rules, Wait};
-use super::items_db;
 use super::items_ops::{
     self as ops, AnswerIn, AnswerOut, AnswerVia, CancelBy, Cancelled, Consumed, CreateOutcome, Cx,
     IntentRow, ItemDelivery, ItemTx, ListFilter, MaintainReport, NewItem, Refused, Renewed, Sealed,
     Speaker, SupersedeOut, SweepReport, TurnIn, TurnOut, TurnRow,
 };
-use super::items_pg::PgTx;
 use super::log;
 use super::metrics::InboxMetrics;
-use super::pg;
 use super::replica::Replica;
 use super::store::Store;
 use super::util::random_id;
@@ -72,30 +69,34 @@ impl std::fmt::Display for ItemError {
 /// `$cap` are the values that the operation borrows: the SQLite thread gets a copy of each.
 macro_rules! in_tx {
     ($self:expr, [$($cap:ident),*], $tx:ident, $body:expr) => {{
-        let result: Result<_, DbError> = match $self.store {
-            Store::Sqlite(db) => {
+        let result: Result<_, $crate::inbox::db::DbError> = match $self.store {
+            $crate::inbox::store::Store::Sqlite(db) => {
                 $( let $cap = $cap.clone(); )*
-                db.call(move |c| items_db::in_tx(c, |$tx| items_db::ready($body)))
-                    .await
+                db.call(move |c| {
+                    $crate::inbox::items_db::in_tx(c, |$tx| $crate::inbox::items_db::ready($body))
+                })
+                .await
             }
-            Store::Pg(pg) => {
+            $crate::inbox::store::Store::Pg(pg) => {
                 pg.guard(async {
                     let mut c = pg.client().await?;
-                    let t = c.transaction().await.map_err(pg::db_error)?;
-                    let mut owner = PgTx(t);
+                    let t = c.transaction().await.map_err($crate::inbox::pg::db_error)?;
+                    let mut owner = $crate::inbox::items_pg::PgTx(t);
                     let out = {
                         let $tx = &mut owner;
                         $body.await?
                     };
-                    owner.0.commit().await.map_err(pg::db_error)?;
+                    owner.0.commit().await.map_err($crate::inbox::pg::db_error)?;
                     Ok(out)
                 })
                 .await
             }
         };
-        result.map_err(ItemError::from)
+        result.map_err($crate::inbox::items_store::ItemError::from)
     }};
 }
+// The agents (`agents_store.rs`) run their operations in the same way.
+pub(super) use in_tx;
 
 /// The store alone, for the checks of the start and the commands.
 struct StoreRef<'a> {
@@ -125,6 +126,10 @@ pub enum Created {
     TooMany(Limit),
     /// The approval API does not create the request: see [`Refused`].
     Refused(Refused),
+    /// The agent of the item does not exist, or it belongs to another key or to another owner.
+    BadAgent,
+    /// The owner blocked the agent of the item.
+    AgentBlocked,
 }
 
 /// The limit that a creation passed.
@@ -152,6 +157,9 @@ pub struct Answer {
 #[derive(Debug)]
 pub enum Answered {
     NotFound,
+    /// The agent of the item is `new` and `inbox.agents.lock_new` is true: the answer `accept` is refused until the owner
+    /// allows the agent. A decline and a reply stay open. The screens show the lock; the server decides it.
+    AgentLocked(Box<Loaded>),
     Refused {
         status: AnswerStatus,
         loaded: Box<Loaded>,
@@ -183,6 +191,8 @@ pub struct NewIntent<'a> {
     /// The digest of the `approval_ref`.
     pub digest: &'a str,
     pub key_id: &'a str,
+    /// The agent that the intent is for: the id that `resolve_agent` gave, or the bucket of the key.
+    pub agent_id: &'a str,
     pub wait: Wait,
     pub allow_custom: bool,
     pub allow_ask_back: bool,
@@ -194,6 +204,8 @@ pub struct NewIntent<'a> {
 
 /// An intent that a submission reads, with its text unsealed.
 pub struct IntentPlain {
+    /// The agent that the intent was made for.
+    pub agent_id: String,
     pub wait: Wait,
     pub allow_custom: bool,
     pub allow_ask_back: bool,
@@ -222,14 +234,14 @@ pub struct Items<'a> {
 }
 
 impl Items<'_> {
-    fn cx(&self) -> Cx {
+    pub(super) fn cx(&self) -> Cx {
         Cx {
             rules: self.rules,
             now: self.clock.now_ms(),
         }
     }
 
-    fn writable(&self) -> Result<(), ItemError> {
+    pub(super) fn writable(&self) -> Result<(), ItemError> {
         if self.store.is_degraded() {
             return Err(ItemError::Degraded);
         }
@@ -238,7 +250,7 @@ impl Items<'_> {
 
     // ------------------------------------------------------------ sealing
 
-    fn seal(&self, plain: &[u8], aad: &[u8]) -> Result<Sealed, ItemError> {
+    pub(super) fn seal(&self, plain: &[u8], aad: &[u8]) -> Result<Sealed, ItemError> {
         let ct = self.content.seal(plain, aad).map_err(ItemError::Seal)?;
         let kid = ContentBox::kid_of(&ct)
             .ok_or_else(|| ItemError::Seal("the sealed value has no key id".into()))?
@@ -270,7 +282,7 @@ impl Items<'_> {
     // ------------------------------------------------------------ after a commit
 
     /// The log, the metrics and the wake of the sessions and of the agents. Nothing here holds a body.
-    fn after(&self, fx: &Effects) {
+    pub(super) fn after(&self, fx: &Effects) {
         if let Some(hub) = self.hub {
             hub.wake(&fx.woken);
         }
@@ -286,7 +298,7 @@ impl Items<'_> {
         }
     }
 
-    async fn replicate(&self) -> Result<(), ItemError> {
+    pub(super) async fn replicate(&self) -> Result<(), ItemError> {
         let Some(replica) = self.replica else {
             return Ok(());
         };
@@ -350,6 +362,8 @@ impl Items<'_> {
             CreateOutcome::TooManyForOwner => Created::TooMany(Limit::PerOwner),
             CreateOutcome::TooManyOpen => Created::TooMany(Limit::Total),
             CreateOutcome::Refused(r) => Created::Refused(r),
+            CreateOutcome::BadAgent => Created::BadAgent,
+            CreateOutcome::AgentBlocked => Created::AgentBlocked,
         };
         Ok(created)
     }
@@ -445,6 +459,7 @@ impl Items<'_> {
                 key_id: key_id.map(str::to_string),
                 open: Some(true),
                 limit: 100_000,
+                ..Default::default()
             })
             .await?;
         let mut n = 0;
@@ -556,6 +571,12 @@ impl Items<'_> {
             match done.value {
                 AnswerOut::SeqMoved { last_seq } => seq = last_seq + 1,
                 AnswerOut::NotFound => return Ok(Answered::NotFound),
+                AnswerOut::AgentLocked(loaded) => {
+                    if let Some(m) = self.metrics {
+                        m.item_answer("agent_locked");
+                    }
+                    return Ok(Answered::AgentLocked(loaded));
+                }
                 AnswerOut::Refused { status, loaded } => {
                     if let Some(m) = self.metrics {
                         m.item_answer(super::items::status_str(status));
@@ -597,6 +618,7 @@ impl Items<'_> {
         let row = IntentRow {
             ref_digest: new.digest.to_string(),
             requester_key_id: new.key_id.to_string(),
+            agent_id: new.agent_id.to_string(),
             lease_s,
             until_at,
             allow_custom: new.allow_custom,
@@ -658,6 +680,7 @@ impl Items<'_> {
             _ => return Ok(None),
         };
         Ok(Some(IntentPlain {
+            agent_id: row.agent_id,
             wait,
             allow_custom: row.allow_custom,
             allow_ask_back: row.allow_ask_back,
@@ -937,7 +960,7 @@ pub async fn start_checks(store: &Store, content: &ContentBox) -> Result<(), Str
         in_tx!(at, [], tx, tx.missing_table()).map_err(|e| format!("inbox storage: {e}"))?;
     if let Some(table) = missing {
         return Err(format!(
-            "the inbox database was made by a version before 5.1.0 and has no table {table}: this portal has no migration for it; make a new database (see README, Upgrades, version 5.1.0)"
+            "the inbox database was made by a version before 5.1.0, or by a build of 5.1.0 before the agents, and has no table {table}: this portal has no migration for it; make a new database (see README, Upgrades, version 5.1.0)"
         ));
     }
     let counts = in_tx!(at, [], tx, tx.kid_counts()).map_err(|e| format!("inbox storage: {e}"))?;
@@ -945,8 +968,8 @@ pub async fn start_checks(store: &Store, content: &ContentBox) -> Result<(), Str
 }
 
 /// Erases the sealed values of the key `kid` and keeps the metadata (`portal inbox content-purge`). The result is the
-/// rows of the items, of the turns and of the intents.
-pub async fn purge_key(store: &Store, kid: &str) -> Result<(u64, u64, u64), String> {
+/// rows of the items, of the turns, of the intents and of the agents (their hints).
+pub async fn purge_key(store: &Store, kid: &str) -> Result<(u64, u64, u64, u64), String> {
     let at = StoreRef { store };
     let (kid, now) = (kid.to_string(), super::util::now_ms());
     in_tx!(at, [kid, now], tx, tx.purge_key(&kid, now)).map_err(|e| format!("inbox storage: {e}"))
@@ -982,6 +1005,17 @@ impl Items<'_> {
         use inbox_core::proto::{Decision, Interaction, ItemState, Urgency, Via};
         let now = self.clock.now_ms();
         let request_id = random_id();
+        // The item belongs to the bucket of the key, as the item of a service that has no intent.
+        let bucket = {
+            let (key, owner) = (s.key_id.clone(), s.owner.clone());
+            let cx = self.cx();
+            in_tx!(
+                self,
+                [cx, key, owner],
+                tx,
+                super::agents_ops::ensure_bucket(tx, &cx, &key, &owner)
+            )?
+        };
         let answered = s.state == ItemState::Answered;
         let open = matches!(s.state, ItemState::Pending | ItemState::Replied);
         let item = ItemRow {
@@ -993,6 +1027,7 @@ impl Items<'_> {
             previous_id: None,
             requester_key_id: s.key_id.clone(),
             requester_owner: s.owner.clone(),
+            agent_id: bucket.agent_id.clone(),
             via: Via::Mcp,
             interaction: Interaction::Conversational,
             urgency: Urgency::Normal,
@@ -1087,7 +1122,7 @@ impl Items<'_> {
                         &[&id, &login],
                     )
                     .await
-                    .map_err(pg::db_error)?;
+                    .map_err(super::pg::db_error)?;
                     Ok(())
                 })
                 .await

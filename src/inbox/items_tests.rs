@@ -211,6 +211,7 @@ fn approval(n: u32) -> (NewItem, Vec<u8>) {
         allow_ask_back: true,
         idempotency_key: format!("idem-{n}"),
         previous_id: None,
+        agent_id: None,
         body_size: 0,
         approval: Some(NewApproval {
             service: "db".into(),
@@ -352,6 +353,7 @@ async fn caps_per_key_owner_total() {
                 key_id: Some("k1".into()),
                 open: Some(true),
                 limit: 10,
+                agent_id: None,
                 ..Default::default()
             })
             .await
@@ -1427,9 +1429,10 @@ async fn orphan_body_kid_stops_start_with_count() {
         );
         assert!(error.contains("content-purge"), "{error}");
         // The command erases the contents and keeps the metadata: the start goes on.
-        let (items_n, turns_n, intents_n) = super::items_store::purge_key(&env.store, "k1")
-            .await
-            .unwrap();
+        let (items_n, turns_n, intents_n, _agents_n) =
+            super::items_store::purge_key(&env.store, "k1")
+                .await
+                .unwrap();
         assert_eq!((items_n, turns_n, intents_n), (2, 1, 0));
         assert!(start_checks(&env.store, &other).await.is_ok());
         assert_eq!(

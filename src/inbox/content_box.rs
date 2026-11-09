@@ -47,6 +47,8 @@ pub const FIELD_BODY: &str = "body";
 pub const FIELD_TURN: &str = "turn";
 /// The field of the explanation of an intent. The id of the request is the digest of the `approval_ref`.
 pub const FIELD_INTENT: &str = "intent";
+/// The field of the observed hints of an agent. The id of the request is the id of the agent.
+pub const FIELD_HINTS: &str = "agent_hints";
 
 /// The associated data of a sealed value: the prefix `portal-content/v1`, the id of the request, the
 /// name of the field, the sequence number and the effect (empty when the item has none). Each text has

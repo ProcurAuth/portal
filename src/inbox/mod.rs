@@ -19,6 +19,14 @@
 //! - `metrics`, `log`: the Prometheus text and the JSON log.
 
 pub mod admin;
+pub mod agents;
+mod agents_db;
+mod agents_ops;
+mod agents_pg;
+mod agents_sql;
+mod agents_store;
+#[cfg(test)]
+mod agents_tests;
 mod api;
 pub mod approvals;
 

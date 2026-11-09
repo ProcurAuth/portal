@@ -113,6 +113,7 @@ pub(super) async fn open_panel(state: &AppState, ctx: &Context<'_>, now_ms: i64)
         owner: Some(ctx.viewer.login.clone()),
         open: Some(true),
         limit: OPEN_ROWS,
+        agent_id: None,
         ..ListFilter::default()
     };
     let Ok(rows) = items.list(filter).await else {
@@ -186,6 +187,7 @@ pub(super) async fn history(state: &Arc<AppState>, ctx: &Context<'_>) -> HttpRes
         owner: (!all).then(|| ctx.viewer.login.clone()),
         open: Some(false),
         limit: HISTORY_ROWS,
+        agent_id: None,
         ..ListFilter::default()
     };
     let Ok(rows) = items.list(filter).await else {
@@ -693,6 +695,8 @@ pub(super) async fn answer(
                 },
             )
         }
+        // The agent is new and `lock_new` is true. Lot G3 gives this refusal its own status and its own screen.
+        Ok(Answered::AgentLocked(_)) => back(&id, "locked"),
         Ok(Answered::NotFound) => back(&id, "gone"),
         Err(_) => back(&id, "failed"),
     }

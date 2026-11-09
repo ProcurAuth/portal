@@ -68,6 +68,28 @@ impl Kinded {
     }
 }
 
+/// A counter with two labels, `op` and `via`: the actions of the owners on the agents.
+#[derive(Default)]
+struct Paired(Mutex<BTreeMap<(&'static str, &'static str), u64>>);
+
+impl Paired {
+    fn add(&self, op: &'static str, via: &'static str) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry((op, via))
+            .or_insert(0) += 1;
+    }
+
+    fn render(&self, out: &mut String, name: &str, help: &str) {
+        header(out, name, help, "counter");
+        for ((op, via), count) in self.0.lock().unwrap_or_else(|p| p.into_inner()).iter() {
+            let _ = writeln!(out, "{name}{{op=\"{op}\",via=\"{via}\"}} {count}");
+        }
+    }
+}
+
 #[derive(Default)]
 struct Histogram {
     /// The count of the observations at or below each bound, not cumulative.
@@ -94,6 +116,9 @@ pub struct InboxMetrics {
     latency: Mutex<Histogram>,
     item_events: Labeled,
     item_answers: Labeled,
+    agents_created: Labeled,
+    agent_refused: Labeled,
+    agent_actions: Paired,
     item_renewals_written: AtomicU64,
     item_body_served: AtomicU64,
     item_body_reads: AtomicU64,
@@ -170,6 +195,23 @@ impl InboxMetrics {
     /// One answer, by the status that the owner got.
     pub fn item_answer(&self, status: &'static str) {
         self.item_answers.add(status, 1);
+    }
+
+    /// One agent made. `origin` is `call` (an item-making call without a token) or `owner`.
+    pub fn agent_created(&self, origin: &'static str) {
+        self.agents_created.add(origin, 1);
+    }
+
+    /// One call that an agent limit or a check of the agent refused or sent to the bucket: `cap`, `rate`, `unknown`,
+    /// `blocked` or `mismatch`.
+    pub fn agent_refused(&self, reason: &'static str) {
+        self.agent_refused.add(reason, 1);
+    }
+
+    /// One action of an owner on an agent that changed it: `rename`, `allow`, `block`, `unblock` or `merge`, by `web`
+    /// or `phone`.
+    pub fn agent_action(&self, op: &'static str, via: &'static str) {
+        self.agent_actions.add(op, via);
     }
 
     /// One write of a lease. A renewal writes at most once in `lease_s`.
@@ -252,6 +294,23 @@ impl InboxMetrics {
             "portal_item_answers_total",
             "Answers of owners to items, by status",
             "status",
+        );
+        self.agents_created.render(
+            &mut out,
+            "portal_agents_created_total",
+            "Agents made, by origin",
+            "origin",
+        );
+        self.agent_refused.render(
+            &mut out,
+            "portal_agent_refused_total",
+            "Calls that an agent limit or an agent check refused or sent to the bucket, by reason",
+            "reason",
+        );
+        self.agent_actions.render(
+            &mut out,
+            "portal_agent_actions_total",
+            "Actions of owners that changed an agent, by action and by place",
         );
         counter(
             &mut out,

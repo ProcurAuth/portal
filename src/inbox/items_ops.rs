@@ -19,6 +19,7 @@ use inbox_core::proto::{
     Action, AnswerStatus, Decision, InputType, Interaction, ItemState, Kind, Prefs, Urgency, Via,
 };
 
+use super::agents_ops::{item_agent, ItemAgentFault};
 use super::db::DbError;
 use super::items::{
     can_revive, check_wait, finish, renew, settle_due, transition, ApprovalRow, Caller, Effects,
@@ -39,6 +40,8 @@ pub struct Sealed {
 pub struct IntentRow {
     pub ref_digest: String,
     pub requester_key_id: String,
+    /// The agent that the intent was made for. The submission that names the intent gives its item to this agent.
+    pub agent_id: String,
     pub lease_s: Option<i64>,
     pub until_at: Option<i64>,
     pub allow_custom: bool,
@@ -96,13 +99,15 @@ pub enum Scope<'a> {
 pub struct ListFilter {
     pub owner: Option<String>,
     pub key_id: Option<String>,
+    /// The items of one agent.
+    pub agent_id: Option<String>,
     /// `Some(true)`: the open items. `Some(false)`: the final items. `None`: all.
     pub open: Option<bool>,
     pub limit: u32,
 }
 
 /// The steps of an operation that touch SQL. Each method runs in the transaction of the operation.
-pub trait ItemTx {
+pub trait ItemTx: super::agents_ops::AgentTx {
     /// Reads an item and its approval, and locks the rows.
     fn load(&mut self, id: &str) -> impl Future<Output = Result<Option<Loaded>, DbError>>;
     /// Writes the columns that an operation changes.
@@ -282,17 +287,19 @@ pub trait ItemTx {
     fn missing_table(&mut self) -> impl Future<Output = Result<Option<&'static str>, DbError>>;
     /// Each key id that seals a content, with the number of sealed values.
     fn kid_counts(&mut self) -> impl Future<Output = Result<Vec<(String, u64)>, DbError>>;
-    /// Erases the sealed values of a key and keeps the metadata. The result is the rows of the items, of the turns and
-    /// of the intents.
+    /// Erases the sealed values of a key and keeps the metadata. The result is the rows of the items, of the turns, of
+    /// the intents and of the agents (their hints).
     fn purge_key(
         &mut self,
         kid: &str,
         now: i64,
-    ) -> impl Future<Output = Result<(u64, u64, u64), DbError>>;
+    ) -> impl Future<Output = Result<(u64, u64, u64, u64), DbError>>;
 }
 
 /// The tables that a version 5.1 needs for the items. A database that lacks one was made by a version 5.0.
-pub const TABLES: [&str; 8] = [
+pub const TABLES: [&str; 10] = [
+    "agents",
+    "agent_events",
     "items",
     "turns",
     "approvals",
@@ -340,7 +347,7 @@ async fn flush<T: ItemTx>(tx: &mut T, cx: &Cx, mut fx: Effects) -> Result<Effect
     Ok(fx)
 }
 
-async fn done<T: ItemTx, R>(
+pub(super) async fn done<T: ItemTx, R>(
     tx: &mut T,
     cx: &Cx,
     value: R,
@@ -395,6 +402,9 @@ pub struct NewItem {
     pub allow_ask_back: bool,
     pub idempotency_key: String,
     pub previous_id: Option<String>,
+    /// The agent of the item: the id that `agents::resolve` gave, or `None` for the bucket of the key. The creation
+    /// checks it in its transaction: the agent must belong to the key and to the owner, and it must not be blocked.
+    pub agent_id: Option<String>,
     pub body_size: i64,
     pub approval: Option<NewApproval>,
     /// Refuse the creation when the owner has no phone that is not revoked.
@@ -457,6 +467,10 @@ pub enum CreateOutcome {
     TooManyForOwner,
     TooManyOpen,
     Refused(Refused),
+    /// The agent of the item does not exist, or it belongs to another key or to another owner.
+    BadAgent,
+    /// The owner blocked the agent of the item.
+    AgentBlocked,
 }
 
 /// The limits of the approval API, checked in the transaction of the creation. `old` is the request that a
@@ -514,10 +528,18 @@ async fn guard_checks<T: ItemTx>(
     Ok(None)
 }
 
+fn agent_fault(fault: ItemAgentFault) -> CreateOutcome {
+    match fault {
+        ItemAgentFault::Unknown => CreateOutcome::BadAgent,
+        ItemAgentFault::Blocked => CreateOutcome::AgentBlocked,
+    }
+}
+
 fn build_row(
     cx: &Cx,
     request_id: &str,
     new: &NewItem,
+    agent_id: String,
     kid: &str,
     chain_id: String,
     chain_created_at: i64,
@@ -540,6 +562,7 @@ fn build_row(
         previous_id: new.previous_id.clone(),
         requester_key_id: new.requester_key_id.clone(),
         requester_owner: new.owner.clone(),
+        agent_id,
         via: new.via,
         interaction: new.interaction,
         urgency: new.urgency,
@@ -614,6 +637,18 @@ pub async fn create<T: ItemTx>(
     if let Err(e) = check_wait(new.wait, cx.now, cx.now, &cx.rules) {
         return done(tx, cx, CreateOutcome::BadWait(e), fx).await;
     }
+    let agent_id = match item_agent(
+        tx,
+        cx,
+        &new.requester_key_id,
+        &new.owner,
+        new.agent_id.as_deref(),
+    )
+    .await?
+    {
+        Ok(id) => id,
+        Err(fault) => return done(tx, cx, agent_fault(fault), fx).await,
+    };
     if let Some(refused) = guard_checks(tx, cx, new, &mut fx).await? {
         return done(tx, cx, CreateOutcome::Refused(refused), fx).await;
     }
@@ -651,6 +686,7 @@ pub async fn create<T: ItemTx>(
         cx,
         request_id,
         new,
+        agent_id,
         &body.kid,
         request_id.to_string(),
         cx.now,
@@ -967,6 +1003,9 @@ pub struct AnswerIn {
 #[derive(Debug)]
 pub enum AnswerOut {
     NotFound,
+    /// The agent of the item is `new`, and `inbox.agents.lock_new` is true: the owner cannot accept until it allows
+    /// the agent. A decline and a talk stay open. Nothing was written.
+    AgentLocked(Box<Loaded>),
     /// The answer was not taken. The state of the item is in the row.
     Refused {
         status: AnswerStatus,
@@ -1012,6 +1051,16 @@ pub async fn answer<T: ItemTx>(
     if !l.item.is_open() {
         let status = super::items::closed_status(l.item.state);
         return done(tx, cx, refuse(status, l), fx).await;
+    }
+    // The server decides the lock, not the screen. It comes before the other checks of an accept.
+    if a.action == Action::Accept && cx.rules.agents.enabled && cx.rules.agents.lock_new {
+        let locked = tx
+            .agent_by_id(&l.item.agent_id)
+            .await?
+            .is_some_and(|agent| agent.state == super::agents::AgentState::New);
+        if locked {
+            return done(tx, cx, AnswerOut::AgentLocked(Box::new(l)), fx).await;
+        }
     }
     if let Some(approval) = &l.approval {
         if a.action == Action::Accept && a.shown_effect.as_deref() != Some(approval.effect.as_str())
@@ -1221,6 +1270,10 @@ pub enum SupersedeOut {
     /// The idempotency key of the new item names an item that exists.
     Existing(Box<Loaded>),
     Refused(Refused),
+    /// The new item belongs to another agent than the old one: a chain stays inside one agent. Nothing was written.
+    AgentMismatch,
+    /// The agent of the new item does not exist, is blocked, or belongs to another key.
+    BadAgent,
     Created {
         old: Box<Loaded>,
         new: Box<Loaded>,
@@ -1263,6 +1316,12 @@ pub async fn supersede<T: ItemTx>(
     let mut item = new.clone();
     item.requester_key_id = key_id.to_string();
     item.owner = old.item.requester_owner.clone();
+    // A chain stays inside one agent: the new item takes the agent of the old one, and nothing else.
+    let agent_id = match item_agent(tx, cx, key_id, &item.owner, item.agent_id.as_deref()).await? {
+        Ok(id) if id == old.item.agent_id => id,
+        Ok(_) => return done(tx, cx, SupersedeOut::AgentMismatch, fx).await,
+        Err(_) => return done(tx, cx, SupersedeOut::BadAgent, fx).await,
+    };
     if let Some(refused) = guard_checks(tx, cx, &item, &mut fx).await? {
         return done(tx, cx, SupersedeOut::Refused(refused), fx).await;
     }
@@ -1275,6 +1334,7 @@ pub async fn supersede<T: ItemTx>(
         cx,
         new_id,
         &item,
+        agent_id,
         &body.kid,
         old.item.chain_id.clone(),
         old.item.chain_created_at,
@@ -1479,17 +1539,27 @@ pub struct MaintainReport {
     pub items_deleted: u64,
     pub events_deleted: u64,
     pub intents_deleted: u64,
+    /// The agents that nothing refers to and nobody called for `inbox.agents.purge_after`.
+    pub agents_purged: u64,
 }
 
 /// The retention: erases the sealed bodies after `body_purge_after`, deletes the final items after `retention` and
-/// the events after `audit_retention`.
+/// the events after `audit_retention`. It erases the agents that nothing refers to after `inbox.agents.purge_after`:
+/// the intents and the items go first, so an agent leaves only after the rows that name it.
 pub async fn maintain<T: ItemTx>(tx: &mut T, cx: &Cx) -> Result<MaintainReport, DbError> {
-    Ok(MaintainReport {
+    let mut report = MaintainReport {
         bodies_purged: tx.purge_bodies(cx.now, &cx.rules).await?,
         items_deleted: tx.delete_final(cx.now, &cx.rules).await?,
         events_deleted: tx.delete_events(cx.now, &cx.rules).await?,
         intents_deleted: tx.delete_intents(cx.now).await?,
-    })
+        agents_purged: 0,
+    };
+    if cx.rules.agents.enabled {
+        report.agents_purged = tx
+            .purge_agents(cx.now - cx.rules.agents.purge_after_ms)
+            .await?;
+    }
+    Ok(report)
 }
 
 /// An owner with an open item, and the preferences that tell when its digest is due.
