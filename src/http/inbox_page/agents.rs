@@ -822,7 +822,6 @@ pub(super) async fn merge(state: &Arc<AppState>, ctx: &Context<'_>, mut f: Field
 /// The page that shows the token one time. It is the answer to a POST. The token is in no URL and in no other page.
 fn token_response(
     state: &Arc<AppState>,
-    ctx: &Context<'_>,
     frame: crate::ui::Frame<'_>,
     row: &AgentRow,
     token: &str,
@@ -830,7 +829,6 @@ fn token_response(
 ) -> HttpResponse {
     let key_name = key_text(state, &row.key_id);
     let label = row.label(&key_name, AgentMode::Enrolled);
-    let _ = ctx;
     no_store(html_response(
         StatusCode::OK,
         ui_agents::token_page(
@@ -880,7 +878,6 @@ pub(super) async fn enroll(
     {
         Ok(Ok(done)) => token_response(
             state,
-            ctx,
             frame(state, ctx).await,
             &done.agent,
             &done.token,
@@ -927,7 +924,6 @@ pub(super) async fn reset(state: &Arc<AppState>, ctx: &Context<'_>, mut f: Field
     {
         Ok(Ok(done)) => token_response(
             state,
-            ctx,
             frame(state, ctx).await,
             &done.agent,
             &done.token,
