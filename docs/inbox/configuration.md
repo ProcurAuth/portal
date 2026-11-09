@@ -13,6 +13,7 @@ Check a file with `portal check-config --config FILE`. The command prints the va
 - Inside `inbox`, the blocks `devices` and `storage` are mandatory. The blocks `enrollment`, `replica`, `cluster` and `watch` are optional.
 - The blocks `items` and `at_rest` are optional, but they go together. Each one needs the other. The block `items` holds the blocks `lease` and `digest`. The block `at_rest` holds one block `key "<id>"` for each content key.
 - The block `approvals` is optional. It starts the approval of an action at the PDP. See "Approvals".
+- The block `agents` is optional. It starts the agents of a key. See "Agents".
 - The block `mcp` is optional. It starts the MCP endpoint of the agents. See "The MCP endpoint".
 - The blocks `group "<id>"` and `api_key "<name>"` can occur more than once. The block `inbox` needs one group at least.
 - The Inbox has no `postgres` block. It uses the block `postgres` of the portal. With no `postgres` block, it uses the SQLite file of the block `storage` of the portal.
@@ -37,6 +38,7 @@ Two keys that contradict each other stop the program at start. The message names
 - `inbox.watch.group` must be the label of a block `group`. The block must send at least one kind of alert.
 - `inbox.items` needs `inbox.at_rest`, and `inbox.at_rest` needs `inbox.items`. See "Items" and "Content keys".
 - `inbox.approvals` needs `inbox.items`, `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. A block `pdp_client` with `approvals = true` needs the block `inbox.approvals`. See "Approvals".
+- `inbox.agents` needs `inbox.items` and `inbox.at_rest`. Its `idle_after` is at most its `purge_after`. See "Agents".
 - `inbox.mcp` needs `inbox.items` and `keys.mcp = true`. Its `max_wait` is at most `inbox.items.wait_max`. Its `path` is not `metrics.path`. See "The MCP endpoint".
 
 ## Keys of the senders
@@ -114,6 +116,22 @@ The block `inbox.approvals` sets how the PDP gates an action that a grant marks 
 - `web_approval` is `true` by default. With `false`, the web page lists the requests and does not decide them, so an owner with no phone gets `409 no_device`.
 
 A block `pdp_client` has the key `approvals`. The default is `false`. A server without the flag gets a plain `false` for an action with `confirm`. See the README, "The approval gate" and "The approval API for a service".
+
+## Agents
+
+Several programs, or several conversations of one model, can share one key. The block `inbox.agents` lets the portal tell them apart. The portal gives each agent a token, and the owner gives it a name. All its keys have a default, so the block can be empty. Without the block, each key is one agent, and the Inbox works as before.
+
+- `max_per_key` is the most agents of one key that are `new`, `known` or `blocked`. The range is `1` to `1000`. The default is `16`.
+- `new_per_hour` is the most agents that the calls of one key can make in one hour. The range is `1` to `1000`. The default is `6`.
+- `lock_new` is `false` by default. With `false`, a new agent is allowed at once, and its owner gets a notice. With `true`, the owner cannot accept an item of a new agent until the owner allows the agent. A refusal and a talk stay open, and the server decides this, not the screen.
+- `idle_after` is the time after which an agent with no open item and no call leaves the active views. The range is `1h` to `365d`. The default is `14d`. The agent still works, and a call makes it active again.
+- `purge_after` is the time after which the sweeper erases an agent that has no item, no live intent and no call. The range is `7d` to `3650d`. The default is `365d`. The token of an erased agent is unknown.
+
+The limits are per key, never per agent. An agent that drops its token cannot escape them. A call that would pass `max_per_key` or `new_per_hour` does not fail. It goes to the bucket `Unattributed` of the key, it gets no token, and the owner gets one alert each hour. The bucket has no name, and the owner cannot merge it, block it or lock it.
+
+The mode of a key is an attribute of the key and not of the file. The three modes are `key`, `discover` and `enrolled`. The mode `key` is one agent for the key and has no token. The mode `discover` makes an agent at the first call that makes an item and has no token. The mode `enrolled` makes no agent from a call: the owner makes it. Without the block, each mode acts as `key`.
+
+The portal seals the hints of an agent (what it says about itself, its client and its address range) with the content keys of `inbox.at_rest`. The command `portal inbox content-purge` erases these hints too. The metrics are `portal_agents_created_total`, `portal_agent_refused_total` and `portal_agent_actions_total`.
 
 ## The MCP endpoint
 

@@ -231,11 +231,11 @@ fn previous_id_of_another_agent_is_refused() {
         assert_eq!(agent_rows(r), rows, "[{name}] the refusal made no agent");
         // Another agent that exists is refused too.
         let (_, token_b, _) = first_item(r, &who, &key, 2);
-        let e = follow(&holding(&who, &token_b)).err().expect("refused");
+        let e = follow(&holding(&who, &token_b)).expect_err("refused");
         assert_eq!((e.status, e.code), (403, "agent_mismatch"), "[{name}]");
         // The bucket: a key in the mode `key` cannot follow the request of an agent, and can follow its own.
         let plain = r.requester(&key, Interaction::Conversational);
-        let e = follow(&plain).err().expect("refused");
+        let e = follow(&plain).expect_err("refused");
         assert_eq!((e.status, e.code), (403, "agent_mismatch"), "[{name}]");
         let own = r.submit(&key, 5).id();
         r.answer(&own, Action::Decline, None);
@@ -339,9 +339,7 @@ fn blocked_agent_intent_ref_is_dead() {
             "[{name}]"
         );
         // The agent gets `agent_blocked` at its next intent.
-        let e = intent_out(r, &holding(&who, &token), explained())
-            .err()
-            .expect("refused");
+        let e = intent_out(r, &holding(&who, &token), explained()).expect_err("refused");
         assert_eq!((e.status, e.code), (403, "agent_blocked"), "[{name}]");
         // The same key with no token makes a new agent: the block is for the token.
         let (fresh, _, _) = first_item(r, &who, &key, 3);

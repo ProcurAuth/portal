@@ -542,16 +542,26 @@ fn agent_fault(fault: ItemAgentFault) -> CreateOutcome {
     }
 }
 
+/// Where a new item sits in a chain of replacements.
+struct Place {
+    chain_id: String,
+    chain_created_at: i64,
+    supersedes: Option<String>,
+}
+
 fn build_row(
     cx: &Cx,
     request_id: &str,
     new: &NewItem,
     agent_id: String,
     kid: &str,
-    chain_id: String,
-    chain_created_at: i64,
-    supersedes: Option<String>,
+    place: Place,
 ) -> Loaded {
+    let Place {
+        chain_id,
+        chain_created_at,
+        supersedes,
+    } = place;
     let (lease_s, lease_until, until_at) = match new.wait {
         Wait::Lease { lease_s } => (
             Some(lease_s),
@@ -689,16 +699,12 @@ pub async fn create<T: ItemTx>(
             return done(tx, cx, CreateOutcome::Refused(Refused::BadIntent), fx).await;
         }
     }
-    let l = build_row(
-        cx,
-        request_id,
-        new,
-        agent_id,
-        &body.kid,
-        request_id.to_string(),
-        cx.now,
-        None,
-    );
+    let place = Place {
+        chain_id: request_id.to_string(),
+        chain_created_at: cx.now,
+        supersedes: None,
+    };
+    let l = build_row(cx, request_id, new, agent_id, &body.kid, place);
     tx.insert(&l, Some(body)).await?;
     fx.event(
         &l.item,
@@ -1337,16 +1343,12 @@ pub async fn supersede<T: ItemTx>(
             return done(tx, cx, SupersedeOut::Refused(Refused::BadIntent), fx).await;
         }
     }
-    let created = build_row(
-        cx,
-        new_id,
-        &item,
-        agent_id,
-        &body.kid,
-        old.item.chain_id.clone(),
-        old.item.chain_created_at,
-        Some(old_id.to_string()),
-    );
+    let place = Place {
+        chain_id: old.item.chain_id.clone(),
+        chain_created_at: old.item.chain_created_at,
+        supersedes: Some(old_id.to_string()),
+    };
+    let created = build_row(cx, new_id, &item, agent_id, &body.kid, place);
     old.item.superseded_by = Some(new_id.to_string());
     finish(
         &mut old,

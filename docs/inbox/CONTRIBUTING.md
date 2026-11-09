@@ -41,6 +41,8 @@ The tests of the inbox are in `tests/inbox_e2e.rs`. The tests of items are in `t
 
 The tests of the preferences are in three places. The file `tests/prefs_e2e.rs` tests the page, `set_prefs` and the quiet flag with a real phone. The file `src/inbox/items_tests.rs` tests the digest for both databases, with a clock that the test sets. The file `src/http/prefs_tests.rs` tests the frames that the session builds. The pure rules of the time zones and of the due times are in `src/inbox/prefs.rs`. A test of the digest never waits: it sets the clock.
 
+The tests of the agents are in two places. The file `src/inbox/agents_tests.rs` tests the resolution, the limits, the actions of the owner, the lock and the purge for both databases. It uses the rig of `src/inbox/items_tests.rs`. The file `src/http/agent_binding_tests.rs` tests the path of the PEP: the intent gives the agent, and a submission with no intent goes to the bucket. The pure rules (the token, the names, the hints and the binding of a call to an item) are in `src/inbox/agents.rs`.
+
 The tests of the approval API of the services are in `src/http/approval_api_tests.rs`. They have a recorder that keeps each answer that the service gets. Add a new answer to the check of `check_what_the_service_learned`, not a new way to read it. The tests of the approval gate of the PDP are in `src/http/pdp/approval_tests.rs`. The file `src/http/pdp_rig.rs` starts the Inbox for them and for the cases with approvals. It also writes approvals in any state.
 
 ## End-to-end check with the real PEP

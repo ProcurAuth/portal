@@ -181,6 +181,16 @@ inbox {
     # allowed_client_cidrs         = ["10.42.0.0/16"]   # without this key, each address passes
   }
 
+  # Optional: the agents of a key. Each value shown is the default. lock_new = true makes the owner allow a new agent
+  # before it can get an approval. A call over a limit goes to the bucket "Unattributed", and the owner gets an alert.
+  # agents {
+  #   max_per_key  = 16
+  #   new_per_hour = 6
+  #   lock_new     = false
+  #   idle_after   = "14d"
+  #   purge_after  = "365d"
+  # }
+
   group "infra" {
     name        = "Infra"
     description = "Outages of the infrastructure"

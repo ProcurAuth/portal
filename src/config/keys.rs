@@ -294,7 +294,7 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ),
     (
         "inbox.agents",
-        "This block is optional and is inside the block `inbox`. Its presence turns on the agents of a key: the portal gives each agent of one key a token, and it groups the items by agent. Without this block, each key is one agent. A new agent is allowed at once, and its owner gets a notice. The block needs the blocks `inbox.items` and `inbox.at_rest`. The mode of each key (`key`, `discover` or `enrolled`) is an attribute of the key, not of the file.",
+        "This block is optional and is inside the block `inbox`. Its presence starts the agents of a key: the portal gives each agent of one key a token, and it groups the items by agent. Without this block, each key is one agent. A new agent is allowed at once, and its owner gets a notice. The block needs the blocks `inbox.items` and `inbox.at_rest`. The mode of each key (`key`, `discover` or `enrolled`) is an attribute of the key, not of the file.",
     ),
     (
         "inbox.approvals",
@@ -1692,7 +1692,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Duration { min: secs(HOUR), max: secs(365 * DAY) },
         presence: Presence::Default("14d"),
         when: When::Always,
-        doc: "An agent with no open item and no call for this time leaves the active views. It still works, and a call brings it back. It must not be above `purge_after`.",
+        doc: "An agent with no open item and no call for this time leaves the active views. It still works, and a call makes it active again. It must not be above `purge_after`.",
     },
     Key {
         block: "inbox.agents",

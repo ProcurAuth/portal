@@ -227,7 +227,9 @@ pub struct Outcome {
     pub limit: Option<&'static str>,
 }
 
-/// The decision of the resolution, before any write.
+/// The decision of the resolution, before any write. A value lives for one call, so the size of its largest variant
+/// costs nothing.
+#[allow(clippy::large_enum_variant)]
 enum Plan {
     /// No agent: a read or a write on an item, with no token. The item decides.
     NoAgent,

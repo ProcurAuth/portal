@@ -1,5 +1,5 @@
 //! The PostgreSQL side of the agents: the steps of `agents_ops.rs` with the syntax of PostgreSQL. The row that a
-//! human action changes is read with `FOR UPDATE`.
+//! human action changes is read with `FOR NO KEY UPDATE`.
 
 use super::agents::{AgentEventRow, AgentRow};
 use super::agents_ops::AgentTx;
@@ -19,7 +19,8 @@ impl PgTx<'_> {
         let sql = format!(
             "{} WHERE {clause}{}",
             select_agents(false),
-            if lock { " FOR UPDATE OF a" } else { "" }
+            // `NO KEY UPDATE` does not wait for the foreign key checks of the items that name the agent.
+            if lock { " FOR NO KEY UPDATE OF a" } else { "" }
         );
         let rows = self.rows(&sql, &[Box::new(arg.to_string())]).await?;
         rows.first().map(decode_agent).transpose()
