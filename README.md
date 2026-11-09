@@ -2239,7 +2239,7 @@ Version 5.0.0 is the first version of the merged product. Read these points befo
 
 Roll the instances one at a time. A new instance opens its ports only when its catalogue is complete. See "Start and stop".
 
-Version 5.1.0 adds the blocks `inbox.items` and `inbox.at_rest`. The release is not complete: this text lists the points that exist. Read them before you upgrade from 5.0.x:
+Version 5.1.0 adds the blocks `inbox.items` and `inbox.at_rest`. They give the items of the Inbox: approvals of agent actions and the discussion with an agent. Read these points before you upgrade from 5.0.x:
 
 - The blocks are optional, and each one needs the other. Without them, the Inbox runs as before.
 - The tables of the items are new: `items`, `turns`, `approvals`, `item_events`, `approval_intents`, `approval_mute`, `account_prefs`, `items_heartbeat` and `content_key_check`. The table `alerts` has two new columns, `request_id` and `seq`.
@@ -2250,7 +2250,7 @@ Version 5.1.0 adds the blocks `inbox.items` and `inbox.at_rest`. The release is 
 
 Version 5.1.0 adds approvals to grants and the interaction of a key. Read these points before you upgrade from 5.0.5:
 
-- A grant can have the property `confirm`, and a key has the attribute `interaction`. See "Approval of an action" and "Rules of the keys". The PDP does not use them in this step.
+- A grant can have the property `confirm`, and a key has the attribute `interaction`. See "Approval of an action" and "Rules of the keys". The PDP answers `false` with `approval_required` for an action with `confirm`, and the agent asks again after the owner approves.
 - The columns `user_grants.confirm`, `key_grants.confirm` and `keys.interaction` are new. They changed the schema version 8 in place: the schema version did not change, and there is no migration. A database that 5.0.5 made lacks the columns, and the portal stops at start and says so. Make a new database, or add the columns by hand.
 - For SQLite, add `confirm INTEGER NOT NULL DEFAULT 0 CHECK (confirm IN (0, 1))` to `user_grants` and to `key_grants`. Add `interaction TEXT NOT NULL DEFAULT 'conversational' CHECK (interaction IN ('conversational', 'one_shot'))` to `keys`. For PostgreSQL, use `confirm BOOLEAN NOT NULL DEFAULT false`.
 - Then run `UPDATE keys SET interaction = 'one_shot' WHERE kind = 'api';`. A start from an empty database makes the columns.
@@ -2267,6 +2267,8 @@ Version 5.1.0 adds the agents of a key. Read these points before you upgrade fro
 - The default of `inbox.agents.lock_new` is `false`: a new agent is allowed at once, and its owner gets a notice. Set it to `true` to lock the approval of a new agent until its owner allows it.
 - The hints of an agent are sealed with the content keys. The command `portal inbox content-purge` erases them with the other contents of a lost key.
 - The metrics `portal_agents_created_total`, `portal_agent_refused_total` and `portal_agent_actions_total` are new.
+- The Android app of 5.1.0 and the server of 5.1.0 go together. The app keeps its portals when it updates from an earlier build, and it drops its local items: they come back from the server at the next connection. A phone of an earlier build cannot read the new frames of the agents. Update the app and the server in one step.
+
 
 Version 5.0.5 changes how the launcher opens a service, and it adds external services. It adds one table to the database. It has no change of the protocol. Read these points before you upgrade from 5.0.4:
 
