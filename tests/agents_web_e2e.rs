@@ -3,9 +3,10 @@
 //! filter of the History. The rig is the one of the items: the service asks through the approval API, the agent gives its
 //! texts through `/mcp`, and the owner uses the pages with a session. The pages have no script, so each check reads the HTML.
 //!
-//! The agent channel gives no token yet (lot G1b): every request of the rig goes to the bucket of its key. A test then makes
-//! the agents in the database, as the engine writes them, and moves the requests to them. The hints are sealed with the key of
-//! the server, as the engine seals them. The channel tests of lot G5 make the same agents with real calls.
+//! The agents come from the real channel (lot G5): the first call of an agent has no token, the portal makes the agent and
+//! gives the token, and the next calls send it. The owner uses the forms of the pages. Only the cases that the channel
+//! refuses to make are written in the database: text with hidden characters, an agent of another key or of another owner,
+//! and the demo for the eyes. They test what the page does with data that it must never trust.
 
 mod common;
 
@@ -248,11 +249,11 @@ fn csrf_of(pep: &Pep, cookie: &str) -> String {
 }
 
 /// The fields of a valid form of the action, on the new agent.
-fn fields_for(action: &str) -> String {
+fn fields_for(action: &str, a1: &str, a2: &str) -> String {
     match action {
-        ALLOW | RENAME => format!("agent_id={A2}&name=Mine"),
-        MERGE => format!("agent_id={A2}&into={A1}"),
-        _ => format!("agent_id={A2}"),
+        ALLOW | RENAME => format!("agent_id={a2}&name=Mine"),
+        MERGE => format!("agent_id={a2}&into={a1}"),
+        _ => format!("agent_id={a2}"),
     }
 }
 
@@ -276,50 +277,76 @@ const A1: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
 const A2: &str = "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2";
 const A3: &str = "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3";
 
-/// Three requests of one key: one for a known agent, one for a new agent and one that stays in the bucket.
-fn three(pep: &Pep) -> (String, String, String) {
-    seed(
-        pep,
-        Seed {
-            name: Some("Billing bot"),
-            says: Some("billing-bot"),
-            client: Some("claude-code 2.1"),
-            net: Some("203.0.113.0/24"),
-            ..Seed::new(A1, "known", 1)
-        },
+/// What the real agents of `trio` gave.
+struct Trio {
+    /// The requests: one of the known agent, one of the new agent, one with no agent (the bucket of the key).
+    one: String,
+    two: String,
+    three: String,
+    /// The ids of the two agents, as the engine made them.
+    a1: String,
+    a2: String,
+    /// The tokens of the two agents, as the channel gave them once.
+    tok1: String,
+    tok2: String,
+}
+
+/// The `User-Agent` of the two agents: the client that the owner reads.
+const UA: &str = "claude-code 2.1";
+
+/// The agent that a request belongs to, as the engine wrote it.
+fn agent_of(pep: &Pep, request: &str) -> String {
+    pep.s
+        .scalar(&format!(
+            "SELECT agent_id FROM items WHERE request_id = '{request}'"
+        ))
+        .expect("the request has an agent")
+}
+
+/// Three requests of one key, made through the real channel (lot G5): no SQL writes an agent. The first call of an agent has
+/// no token, so the portal makes the agent and gives its token. The owner allows the first agent with a name through the
+/// form of the page. The second agent stays new. The third request has no intent, so it goes to the bucket of the key.
+fn trio(pep: &Pep) -> Trio {
+    let first = pep.agent_request(None, UA, &command(1), json!({"agent_label": "billing-bot"}));
+    assert_eq!(first.status, "new", "{first:?}");
+    let tok1 = first
+        .token
+        .clone()
+        .expect("the call that made the agent gives its token");
+    let a1 = agent_of(pep, &first.request_id);
+    let cookie = pep.cookie(OWNER);
+    let csrf = csrf_of(pep, &cookie);
+    let (st, head, _) = pep.post(
+        &cookie,
+        ALLOW,
+        &csrf,
+        &format!("agent_id={a1}&name=Billing+bot"),
+        None,
     );
-    seed(
-        pep,
-        Seed {
-            says: Some("billing-bot"),
-            client: Some("claude-code 2.1"),
-            net: Some("203.0.113.0/24"),
-            created_ago_s: 90,
-            ..Seed::new(A2, "new", 2)
-        },
+    assert_eq!(st, 303, "{head}");
+    let second = pep.agent_request(None, UA, &command(2), json!({"agent_label": "billing-bot"}));
+    assert_eq!(second.status, "new", "{second:?}");
+    let tok2 = second.token.clone().expect("a token");
+    let a2 = agent_of(pep, &second.request_id);
+    assert_ne!(a1, a2, "two calls with no token make two agents");
+    // The agent that knows its token makes a request of its own: the same agent, no new one.
+    let (three, _) = pep.submit(&command(3), 600);
+    assert_eq!(
+        pep.s.scalar(&format!(
+            "SELECT kind FROM agents WHERE agent_id = (SELECT agent_id FROM items WHERE request_id = '{three}')"
+        )),
+        Some("bucket".to_string()),
+        "a submission with no intent goes to the bucket"
     );
-    let (one, _) = pep.submit_intent(&command(1), json!({}), 600);
-    let (two, _) = pep.submit_intent(&command(2), json!({}), 600);
-    let (three, _) = pep.submit_intent(&command(3), json!({}), 600);
-    give(pep, &one, A1);
-    give(pep, &two, A2);
-    // A call without a token makes a new agent in the mode `discover`. The rig leaves these agents with no request, and the
-    // third request stays in the bucket of the key, as for a key that is over its limit.
-    let key = &pep.key_id;
-    let now = now_ms();
-    sql(
-        pep,
-        &format!(
-            "INSERT INTO agents (agent_id, key_id, owner, kind, state, origin, ordinal, rev, created_at, last_seen_at) \
-             SELECT 'b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0', '{key}', '{OWNER}', 'bucket', 'known', 'key', 0, 1, {now}, {now} \
-             WHERE NOT EXISTS (SELECT 1 FROM agents WHERE key_id = '{key}' AND kind = 'bucket'); \
-             UPDATE items SET agent_id = (SELECT agent_id FROM agents WHERE key_id = '{key}' AND kind = 'bucket') WHERE request_id = '{three}'; \
-             DELETE FROM approval_intents WHERE agent_id IN (SELECT agent_id FROM agents WHERE key_id = '{key}' AND kind = 'agent' AND agent_id NOT IN ('{A1}', '{A2}')); \
-             DELETE FROM agent_events WHERE agent_id IN (SELECT agent_id FROM agents WHERE key_id = '{key}' AND kind = 'agent' AND agent_id NOT IN ('{A1}', '{A2}')); \
-             DELETE FROM agents WHERE key_id = '{key}' AND kind = 'agent' AND agent_id NOT IN ('{A1}', '{A2}');"
-        ),
-    );
-    (one, two, three)
+    Trio {
+        one: first.request_id,
+        two: second.request_id,
+        three,
+        a1,
+        a2,
+        tok1,
+        tok2,
+    }
 }
 
 // The panel -------------------------------------------------------------------------------------------
@@ -328,7 +355,9 @@ fn three(pep: &Pep) -> (String, String, String) {
 fn two_agents_with_one_key_have_two_groups_new_first_bucket_last() {
     let pep = enabled(false);
     let cookie = pep.cookie(OWNER);
-    let (one, two, three) = three(&pep);
+    let Trio {
+        one, two, three, ..
+    } = trio(&pep);
     let (st, head, page) = pep.page(&cookie, INBOX);
     assert_eq!(st, 200, "{page}");
     assert_eq!(
@@ -362,7 +391,7 @@ fn two_agents_with_one_key_have_two_groups_new_first_bucket_last() {
     assert!(order[1] < group(&one) && group(&one) < order[2]);
     assert!(order[2] < group(&three));
     // The hints of the agents are in the line "Observed, not verified", not in the title.
-    assert!(page.contains("<q>billing-bot</q>") && page.contains("From 203.0.113.0/24"));
+    assert!(page.contains("<q>billing-bot</q>") && page.contains("From 127.0.0.0/24"));
     assert!(page.contains("Client claude-code 2.1"));
     assert!(page.contains("Which agent asked is not known."));
     // The row names the service and the action: the key is in the header of the group.
@@ -405,12 +434,12 @@ fn a_key_without_agents_is_one_group_with_the_name_of_the_key() {
 fn the_first_use_notice_names_the_choices_and_has_no_locked_row_by_default() {
     let pep = enabled(false);
     let cookie = pep.cookie(OWNER);
-    let (_, two, _) = three(&pep);
+    let Trio { two, a2, .. } = trio(&pep);
     let (_, _, page) = pep.page(&cookie, INBOX);
     assert!(page.contains("A new agent is using the key"), "{page}");
     // The forms: name and allow, allow as it is, block, merge. Each one has the token and the id of the agent.
     for action in [ALLOW, BLOCK, MERGE] {
-        assert_eq!(hidden_in(&page, action, "agent_id"), A2, "{action}");
+        assert_eq!(hidden_in(&page, action, "agent_id"), a2, "{action}");
         assert!(!hidden_in(&page, action, "csrf").is_empty());
     }
     assert!(
@@ -435,7 +464,7 @@ fn the_first_use_notice_names_the_choices_and_has_no_locked_row_by_default() {
 fn with_lock_new_the_row_the_page_and_the_server_refuse_approve_and_decline_stays_open() {
     let pep = enabled(true);
     let cookie = pep.cookie(OWNER);
-    let (_, two, _) = three(&pep);
+    let Trio { two, a2, tok2, .. } = trio(&pep);
     let (_, _, page) = pep.page(&cookie, INBOX);
     assert!(page.contains("Approve is locked until you allow this agent. You can decline now."));
     assert!(
@@ -464,14 +493,20 @@ fn with_lock_new_the_row_the_page_and_the_server_refuse_approve_and_decline_stay
         pep.verdict_settles(&two, Duration::from_secs(10))["verdict"],
         "denied"
     );
-    let (next, _) = pep.submit_intent(&command(5), json!({}), 600);
-    give(&pep, &next, A2);
+    // The agent sends its next request with its token: the same agent, still locked.
+    let again = pep.agent_request(Some(&tok2), UA, &command(5), json!({}));
+    assert_eq!(
+        (again.status.as_str(), again.token.is_none()),
+        ("new", true)
+    );
+    let next = again.request_id;
+    assert_eq!(agent_of(&pep, &next), a2);
     assert_eq!(pep.answer_form(&cookie, &next, "accept", "").0, 409);
     let (st, head, _) = pep.post(
         &cookie,
         ALLOW,
         &csrf,
-        &format!("agent_id={A2}&name=Refund+cleaner"),
+        &format!("agent_id={a2}&name=Refund+cleaner"),
         None,
     );
     assert_eq!(st, 303, "{head}");
@@ -540,33 +575,101 @@ fn hints_are_escaped_and_label_injection_is_rendered_as_text() {
 fn a_text_that_folds_to_the_name_of_a_known_agent_is_flagged() {
     let pep = enabled(false);
     let cookie = pep.cookie(OWNER);
-    seed(
-        &pep,
-        Seed {
-            name: Some("Billing bot"),
-            client: Some("claude-code 2.1"),
-            net: Some("203.0.113.0/24"),
-            ..Seed::new(A1, "known", 1)
-        },
+    // The known agent has a name that the owner gave. The new agent says the same text with other letters and spaces.
+    let known = pep.agent_request(None, UA, &command(7), json!({"agent_label": "my-reports"}));
+    let a1 = agent_of(&pep, &known.request_id);
+    let csrf = csrf_of(&pep, &cookie);
+    let (st, head, _) = pep.post(
+        &cookie,
+        ALLOW,
+        &csrf,
+        &format!("agent_id={a1}&name=Billing+bot"),
+        None,
     );
-    seed(
-        &pep,
-        Seed {
-            says: Some("BILLING  Bot"),
-            client: Some("claude-code 2.1"),
-            net: Some("198.51.100.0/24"),
-            ..Seed::new(A2, "new", 2)
-        },
+    assert_eq!(st, 303, "{head}");
+    let copy = pep.agent_request(
+        None,
+        UA,
+        &command(8),
+        json!({"agent_label": "BILLING  Bot"}),
     );
-    let (id, _) = pep.submit_intent(&command(7), json!({}), 600);
-    give(&pep, &id, A2);
     let (_, _, page) = pep.page(&cookie, INBOX);
     assert!(
-        page.contains("is the same as the name of your agent <b>Billing bot</b>. Same client too."),
+        page.contains(
+            "is the same as the name of your agent <b>Billing bot</b>. Same client and same address range too."
+        ),
         "{page}"
     );
-    let (_, _, detail) = pep.page(&cookie, &item_path(&id));
+    let (_, _, detail) = pep.page(&cookie, &item_path(&copy.request_id));
     assert!(detail.contains("Same text as the name of your agent Billing bot. This can be a copy."));
+}
+
+/// The notice of a new agent names the known agent that it looks like, with the sentence that hints can be copied
+/// (lot G5, SPEC 3.8.25). The text is the same as the text of the known agent, or the client and the range are the same.
+/// Nothing merges by itself.
+#[test]
+fn the_first_use_notice_names_a_similar_known_agent_and_nothing_merges() {
+    let pep = enabled(false);
+    let cookie = pep.cookie(OWNER);
+    // No known agent yet: the first new agent looks like nothing.
+    let first = pep.agent_request(None, UA, &command(9), json!({"agent_label": "billing-bot"}));
+    let (_, _, page) = pep.page(&cookie, INBOX);
+    assert!(page.contains("A new agent is using the key"));
+    assert!(!page.contains("Looks like your agent"), "{page}");
+    let a1 = agent_of(&pep, &first.request_id);
+    let csrf = csrf_of(&pep, &cookie);
+    let (st, _, _) = pep.post(
+        &cookie,
+        ALLOW,
+        &csrf,
+        &format!("agent_id={a1}&name=Nightly+ETL"),
+        None,
+    );
+    assert_eq!(st, 303);
+    // The same text with other letters: the notice names the known agent, by its name and with a link, and says why.
+    let copy = pep.agent_request(
+        None,
+        UA,
+        &command(10),
+        json!({"agent_label": "Billing-Bot"}),
+    );
+    let a2 = agent_of(&pep, &copy.request_id);
+    let (_, _, page) = pep.page(&cookie, INBOX);
+    assert!(
+        page.contains(&format!(
+            "Looks like your agent <a href=\"{AGENTS}/{a1}\">Nightly ETL</a>: it says the same text. Hints can be copied. Nothing merges by itself."
+        )),
+        "{page}"
+    );
+    // The notice is the only place: the page of the known agent has no such line.
+    let (_, _, known_page) = pep.page(&cookie, &format!("{AGENTS}/{a1}"));
+    assert!(!known_page.contains("Looks like your agent"));
+    // The client and the range are the same, and the text is not: the line says that.
+    let by_client = pep.agent_request(None, UA, &command(11), json!({"agent_label": "other-name"}));
+    let a3 = agent_of(&pep, &by_client.request_id);
+    let (_, _, page) = pep.page(&cookie, INBOX);
+    assert_eq!(page.matches("Looks like your agent").count(), 2, "{page}");
+    assert!(page.contains("it has the same client and the same address range"));
+    // Nothing merged: both are still new, and the known agent still holds its own request.
+    for id in [&a2, &a3] {
+        assert_eq!(
+            pep.s
+                .scalar(&format!("SELECT state FROM agents WHERE agent_id = '{id}'")),
+            Some("new".to_string())
+        );
+    }
+    assert_eq!(agent_of(&pep, &first.request_id), a1);
+    // A new agent with another text, another client and no range in common has no line: the user agent differs.
+    let stranger = pep.agent_request(
+        None,
+        "curl/8.5",
+        &command(12),
+        json!({"agent_label": "report-writer"}),
+    );
+    assert_eq!(stranger.status, "new");
+    let (_, _, page) = pep.page(&cookie, INBOX);
+    // The range is the same in this rig (one machine), so the client decides: a different client gives no line.
+    assert_eq!(page.matches("Looks like your agent").count(), 2, "{page}");
 }
 
 // The agent page and the list -------------------------------------------------------------------------
@@ -575,12 +678,16 @@ fn a_text_that_folds_to_the_name_of_a_known_agent_is_flagged() {
 fn the_agent_page_shows_the_agent_and_the_list_reaches_every_agent() {
     let pep = enabled(false);
     let cookie = pep.cookie(OWNER);
-    let (one, _, _) = three(&pep);
-    sql(
-        &pep,
-        &format!("INSERT INTO agent_events (agent_id, at, event, actor, detail) VALUES ('{A1}', {}, 'says_changed', 'agent', NULL)", now_ms() - 1000),
-    );
-    let (st, head, page) = pep.page(&cookie, &format!("{AGENTS}/{A1}"));
+    let Trio {
+        one, a1, a2, tok1, ..
+    } = trio(&pep);
+    // The agent says another text and then the first one again: the portal records the two changes as events. The text
+    // that stays is the first one.
+    for says in ["billing-agent", "billing-bot"] {
+        let again = pep.agent_request(Some(&tok1), UA, &command(40), json!({"agent_label": says}));
+        assert_eq!(again.status, "known");
+    }
+    let (st, head, page) = pep.page(&cookie, &format!("{AGENTS}/{a1}"));
     assert_eq!(st, 200, "{page}");
     assert_eq!(
         common::approvals::header_of(&head, "cache-control").as_deref(),
@@ -596,7 +703,7 @@ fn the_agent_page_shows_the_agent_and_the_list_reaches_every_agent() {
         "Says it is",
         "billing-bot",
         "claude-code 2.1",
-        "203.0.113.0/24",
+        "127.0.0.0/24",
         "Anyone who holds the key can send these texts. They are no proof.",
         "Events",
         "Made by a first call of the key",
@@ -613,13 +720,13 @@ fn the_agent_page_shows_the_agent_and_the_list_reaches_every_agent() {
         "the table of the open requests has a Review link"
     );
     for action in [RENAME, MERGE, BLOCK] {
-        assert_eq!(hidden_in(&page, action, "agent_id"), A1);
+        assert_eq!(hidden_in(&page, action, "agent_id"), a1);
     }
-    assert!(page.contains(&format!("/auth/settings/inbox/items?agent={A1}")));
+    assert!(page.contains(&format!("/auth/settings/inbox/items?agent={a1}")));
     // The list shows the three agents, the new one first, and links to each page.
     let (st, _, list) = pep.page(&cookie, AGENTS);
     assert_eq!(st, 200);
-    assert!(list.contains(&format!("{AGENTS}/{A2}")) && list.contains(&format!("{AGENTS}/{A1}")));
+    assert!(list.contains(&format!("{AGENTS}/{a2}")) && list.contains(&format!("{AGENTS}/{a1}")));
     assert!(list.find(&format!("{KEY} #2")).unwrap() < list.find("Billing bot").unwrap());
     assert!(
         !text(&list).contains("billing-bot"),
@@ -647,13 +754,13 @@ fn bucket_id(pep: &Pep, cookie: &str) -> String {
 fn owner_sees_only_own_agents_and_forms_refuse_foreign_agents() {
     let pep = enabled(false);
     let cookie = pep.cookie(OWNER);
-    let (_, two, _) = three(&pep);
+    let Trio { two, a1, a2, .. } = trio(&pep);
     let erin = other_owner(&pep, "erin");
     // Erin sees nothing of dana.
     let (st, _, page) = pep.page(&erin, INBOX);
     assert_eq!(st, 200);
     assert!(!page.contains("agrp") && !page.contains("Billing bot") && !page.contains("firstuse"));
-    assert_eq!(pep.page(&erin, &format!("{AGENTS}/{A1}")).0, 404);
+    assert_eq!(pep.page(&erin, &format!("{AGENTS}/{a1}")).0, 404);
     assert_eq!(
         pep.page(&erin, &format!("{AGENTS}/{}", "0".repeat(32))).0,
         404
@@ -665,11 +772,11 @@ fn owner_sees_only_own_agents_and_forms_refuse_foreign_agents() {
     // Her forms on the agents of dana change nothing and answer as for an agent that does not exist.
     let csrf = csrf_of(&pep, &erin);
     for (action, fields) in [
-        (ALLOW, format!("agent_id={A2}&name=Mine")),
-        (BLOCK, format!("agent_id={A2}")),
-        (UNBLOCK, format!("agent_id={A1}")),
-        (RENAME, format!("agent_id={A1}&name=Mine")),
-        (MERGE, format!("agent_id={A2}&into={A1}")),
+        (ALLOW, format!("agent_id={a2}&name=Mine")),
+        (BLOCK, format!("agent_id={a2}")),
+        (UNBLOCK, format!("agent_id={a1}")),
+        (RENAME, format!("agent_id={a1}&name=Mine")),
+        (MERGE, format!("agent_id={a2}&into={a1}")),
     ] {
         let (st, head, _) = pep.post(&erin, action, &csrf, &fields, None);
         assert_eq!(st, 303, "{action}");
@@ -697,7 +804,7 @@ fn owner_sees_only_own_agents_and_forms_refuse_foreign_agents() {
         &cookie,
         MERGE,
         &csrf,
-        &format!("agent_id={A2}&into={A3}"),
+        &format!("agent_id={a2}&into={A3}"),
         None,
     );
     assert_eq!(st, 303);
@@ -708,10 +815,10 @@ fn owner_sees_only_own_agents_and_forms_refuse_foreign_agents() {
 fn forms_need_csrf_and_origin_and_an_impersonated_session_does_nothing() {
     let pep = enabled(false);
     let cookie = pep.cookie(OWNER);
-    let (_, two, _) = three(&pep);
+    let Trio { two, a1, a2, .. } = trio(&pep);
     let csrf = csrf_of(&pep, &cookie);
     for action in [ALLOW, BLOCK, UNBLOCK, RENAME, MERGE] {
-        let fields = fields_for(action);
+        let fields = fields_for(action, &a1, &a2);
         // No token, a wrong token, no origin and another origin: refused.
         assert_eq!(
             pep.post(&cookie, action, "", &fields, None).0,
@@ -752,7 +859,7 @@ fn forms_need_csrf_and_origin_and_an_impersonated_session_does_nothing() {
     }
     // The session of "Log in as" reads no agent and acts on none.
     let as_dana = impersonate(&pep, OWNER);
-    assert_eq!(pep.page(&as_dana, &format!("{AGENTS}/{A2}")).0, 403);
+    assert_eq!(pep.page(&as_dana, &format!("{AGENTS}/{a2}")).0, 403);
     assert_eq!(pep.page(&as_dana, AGENTS).0, 403);
     let (st, _, page) = pep.page(&as_dana, INBOX);
     assert_eq!(st, 200);
@@ -760,7 +867,7 @@ fn forms_need_csrf_and_origin_and_an_impersonated_session_does_nothing() {
     let csrf = csrf_of(&pep, &as_dana);
     for action in [ALLOW, BLOCK, UNBLOCK, RENAME, MERGE] {
         assert_eq!(
-            pep.post(&as_dana, action, &csrf, &fields_for(action), None)
+            pep.post(&as_dana, action, &csrf, &fields_for(action, &a1, &a2), None)
                 .0,
             403,
             "{action}"
@@ -776,33 +883,35 @@ fn forms_need_csrf_and_origin_and_an_impersonated_session_does_nothing() {
 fn rename_allow_block_unblock_merge_work_and_refuse_what_they_must() {
     let pep = enabled(false);
     let cookie = pep.cookie(OWNER);
-    let (one, two, _) = three(&pep);
+    let Trio {
+        one, two, a1, a2, ..
+    } = trio(&pep);
     let csrf = csrf_of(&pep, &cookie);
     let post = |action: &str, fields: String| pep.post(&cookie, action, &csrf, &fields, None);
     // A name that is not valid: 422 with the page of the agent and the name that was typed. Nothing is saved.
-    let (st, _, page) = post(RENAME, format!("agent_id={A1}&name=bad%0Aname"));
+    let (st, _, page) = post(RENAME, format!("agent_id={a1}&name=bad%0Aname"));
     assert_eq!(st, 422, "{page}");
     assert!(page.contains("A name has 1 to 32 characters on one line."));
-    let (st, _, page) = post(RENAME, format!("agent_id={A1}&name={}", "x".repeat(33)));
+    let (st, _, page) = post(RENAME, format!("agent_id={a1}&name={}", "x".repeat(33)));
     assert_eq!(st, 422);
     assert!(page.contains("A name has 1 to 32 characters"));
-    let (st, _, page) = post(RENAME, format!("agent_id={A1}&name=a%E2%80%AEb"));
+    let (st, _, page) = post(RENAME, format!("agent_id={a1}&name=a%E2%80%AEb"));
     assert_eq!(st, 422);
     assert!(!page.contains('\u{202E}'));
     // A name that another agent of the key has, after the fold: 422.
-    let (st, _, page) = post(ALLOW, format!("agent_id={A2}&name=BILLING+bot"));
+    let (st, _, page) = post(ALLOW, format!("agent_id={a2}&name=BILLING+bot"));
     assert_eq!(st, 422, "{page}");
     assert!(page.contains("Another agent of this key has this name."));
     // The rename works and shows the new name everywhere at once.
-    let (st, head, _) = post(RENAME, format!("agent_id={A1}&name=Biller"));
+    let (st, head, _) = post(RENAME, format!("agent_id={a1}&name=Biller"));
     assert_eq!(st, 303);
-    assert!(common::location(&head).ends_with(&format!("{A1}?s=agent_renamed")));
+    assert!(common::location(&head).ends_with(&format!("{a1}?s=agent_renamed")));
     let (_, _, page) = pep.page(&cookie, INBOX);
     assert!(
         page.contains("<span class=\"agrp__name\">Biller</span>") && !page.contains("Billing bot")
     );
     // The allow with an empty name keeps the number. The new agent leaves the notice.
-    let (st, head, _) = post(ALLOW, format!("agent_id={A2}&name="));
+    let (st, head, _) = post(ALLOW, format!("agent_id={a2}&name="));
     assert_eq!(st, 303);
     assert!(common::location(&head).ends_with("?s=agent_allowed"));
     let (_, _, page) = pep.page(&cookie, INBOX);
@@ -812,7 +921,7 @@ fn rename_allow_block_unblock_merge_work_and_refuse_what_they_must() {
     );
     assert!(!page.contains("pill--new"));
     // The same action again is a success: it changes nothing.
-    assert_eq!(post(ALLOW, format!("agent_id={A2}")).0, 303);
+    assert_eq!(post(ALLOW, format!("agent_id={a2}")).0, 303);
     // A merge across two keys is refused with 422, and a merge into itself with 409.
     seed(
         &pep,
@@ -822,18 +931,18 @@ fn rename_allow_block_unblock_merge_work_and_refuse_what_they_must() {
             ..Seed::new(A3, "known", 1)
         },
     );
-    let (st, _, page) = post(MERGE, format!("agent_id={A2}&into={A3}"));
+    let (st, _, page) = post(MERGE, format!("agent_id={a2}&into={A3}"));
     assert_eq!(st, 422, "{page}");
     assert!(page.contains("You can merge only agents of the same key."));
-    let (st, _, _) = post(MERGE, format!("agent_id={A2}&into={A2}"));
+    let (st, _, _) = post(MERGE, format!("agent_id={a2}&into={a2}"));
     assert_eq!(st, 409);
-    let (st, _, page) = post(MERGE, format!("agent_id={A2}&into=nothing"));
+    let (st, _, page) = post(MERGE, format!("agent_id={a2}&into=nothing"));
     assert_eq!(st, 422);
     assert!(page.contains("Choose the agent to merge into."));
     // The merge works: the request moves, the agent is removed, and the page of the target opens.
-    let (st, head, _) = post(MERGE, format!("agent_id={A2}&into={A1}"));
+    let (st, head, _) = post(MERGE, format!("agent_id={a2}&into={a1}"));
     assert_eq!(st, 303, "{head}");
-    assert!(common::location(&head).ends_with(&format!("{A1}?s=agent_merged")));
+    assert!(common::location(&head).ends_with(&format!("{a1}?s=agent_merged")));
     let (_, _, page) = pep.page(&cookie, INBOX);
     assert_eq!(page.matches("<details class=\"agrp").count(), 2);
     let target = page
@@ -843,10 +952,10 @@ fn rename_allow_block_unblock_merge_work_and_refuse_what_they_must() {
         page.find(&item_path(&two)).unwrap() > target
             && page.find(&item_path(&one)).unwrap() > target
     );
-    let (_, _, merged) = pep.page(&cookie, &format!("{AGENTS}/{A2}"));
+    let (_, _, merged) = pep.page(&cookie, &format!("{AGENTS}/{a2}"));
     assert!(merged.contains("merged into") && !merged.contains(RENAME));
     // A merged agent takes no other action.
-    let (st, _, _) = post(RENAME, format!("agent_id={A2}&name=Again"));
+    let (st, _, _) = post(RENAME, format!("agent_id={a2}&name=Again"));
     assert_eq!(st, 409);
 }
 
@@ -854,9 +963,16 @@ fn rename_allow_block_unblock_merge_work_and_refuse_what_they_must() {
 fn a_blocked_agent_loses_its_open_requests_and_can_be_unblocked() {
     let pep = enabled(false);
     let cookie = pep.cookie(OWNER);
-    let (one, two, three) = three(&pep);
+    let Trio {
+        one,
+        two,
+        three,
+        a1,
+        a2,
+        ..
+    } = trio(&pep);
     let csrf = csrf_of(&pep, &cookie);
-    let (st, head, _) = pep.post(&cookie, BLOCK, &csrf, &format!("agent_id={A1}"), None);
+    let (st, head, _) = pep.post(&cookie, BLOCK, &csrf, &format!("agent_id={a1}"), None);
     assert_eq!(st, 303, "{head}");
     assert!(common::location(&head).ends_with("?s=agent_blocked"));
     // The requests of the agent are cancelled, and the others wait.
@@ -874,10 +990,10 @@ fn a_blocked_agent_loses_its_open_requests_and_can_be_unblocked() {
     let (_, _, history) = pep.page(&cookie, &format!("{INBOX}/items"));
     assert!(history.contains("Cancelled: the owner blocked the agent."));
     assert!(
-        history.contains(&format!("{INBOX}/items?agent={A1}")) && history.contains("Billing bot")
+        history.contains(&format!("{INBOX}/items?agent={a1}")) && history.contains("Billing bot")
     );
     // The page of the blocked agent shows the state, the count in the events and Unblock only.
-    let (_, _, agent) = pep.page(&cookie, &format!("{AGENTS}/{A1}"));
+    let (_, _, agent) = pep.page(&cookie, &format!("{AGENTS}/{a1}"));
     assert!(agent.contains("Blocked") && agent.contains("1 open request cancelled."));
     assert!(
         agent.contains(&format!("action=\"{UNBLOCK}\""))
@@ -885,27 +1001,27 @@ fn a_blocked_agent_loses_its_open_requests_and_can_be_unblocked() {
             && !agent.contains(BLOCK)
     );
     // Unblock gives a known agent again. It revives nothing.
-    let (st, head, _) = pep.post(&cookie, UNBLOCK, &csrf, &format!("agent_id={A1}"), None);
+    let (st, head, _) = pep.post(&cookie, UNBLOCK, &csrf, &format!("agent_id={a1}"), None);
     assert_eq!(st, 303);
-    assert!(common::location(&head).ends_with(&format!("{A1}?s=agent_unblocked")));
-    let (_, _, agent) = pep.page(&cookie, &format!("{AGENTS}/{A1}"));
+    assert!(common::location(&head).ends_with(&format!("{a1}?s=agent_unblocked")));
+    let (_, _, agent) = pep.page(&cookie, &format!("{AGENTS}/{a1}"));
     assert!(agent.contains(&format!("action=\"{BLOCK}\"")) && agent.contains("Unblocked by"));
     assert_eq!(pep.verdict(&one)["verdict"], "void");
     // A new agent can be blocked too: its request is cancelled.
     assert_eq!(
-        pep.post(&cookie, BLOCK, &csrf, &format!("agent_id={A2}"), None)
+        pep.post(&cookie, BLOCK, &csrf, &format!("agent_id={a2}"), None)
             .0,
         303
     );
     assert_eq!(pep.verdict(&two)["verdict"], "void");
     // Unblock gives a known agent. The same action again is a success that changes nothing.
     assert_eq!(
-        pep.post(&cookie, UNBLOCK, &csrf, &format!("agent_id={A2}"), None)
+        pep.post(&cookie, UNBLOCK, &csrf, &format!("agent_id={a2}"), None)
             .0,
         303
     );
     assert_eq!(
-        pep.post(&cookie, UNBLOCK, &csrf, &format!("agent_id={A2}"), None)
+        pep.post(&cookie, UNBLOCK, &csrf, &format!("agent_id={a2}"), None)
             .0,
         303
     );
@@ -917,7 +1033,14 @@ fn a_blocked_agent_loses_its_open_requests_and_can_be_unblocked() {
 fn history_filter_by_agent_and_the_agent_column() {
     let pep = enabled(false);
     let cookie = pep.cookie(OWNER);
-    let (one, two, three) = three(&pep);
+    let Trio {
+        one,
+        two,
+        three,
+        a1,
+        a2,
+        ..
+    } = trio(&pep);
     for id in [&one, &two, &three] {
         assert_eq!(pep.answer_form(&cookie, id, "decline", "").0, 303);
     }
@@ -926,19 +1049,19 @@ fn history_filter_by_agent_and_the_agent_column() {
     // The column names the agent, with a link to its filter, and the key after it.
     assert!(
         page.contains(&format!(
-            "<a href=\"{INBOX}/items?agent={A1}\">Billing bot</a>"
+            "<a href=\"{INBOX}/items?agent={a1}\">Billing bot</a>"
         )),
         "{page}"
     );
     assert!(page.contains(&format!(
-        "<a href=\"{INBOX}/items?agent={A2}\">{KEY} #2</a>"
+        "<a href=\"{INBOX}/items?agent={a2}\">{KEY} #2</a>"
     )));
     assert!(page.contains(&format!("Unattributed · {KEY}")));
     for id in [&one, &two, &three] {
         assert!(page.contains(&item_path(id)));
     }
     // The filter keeps the requests of one agent, shows a chip with its name and a link that removes it.
-    let (st, _, page) = pep.page(&cookie, &format!("{INBOX}/items?agent={A1}"));
+    let (st, _, page) = pep.page(&cookie, &format!("{INBOX}/items?agent={a1}"));
     assert_eq!(st, 200);
     assert!(
         page.contains(&item_path(&one))
@@ -947,7 +1070,7 @@ fn history_filter_by_agent_and_the_agent_column() {
     );
     assert!(page.contains("histAgent") && page.contains("Agent <b>Billing bot</b>"));
     assert!(
-        page.contains(&format!("name=\"agent\" value=\"{A1}\"")),
+        page.contains(&format!("name=\"agent\" value=\"{a1}\"")),
         "the search form keeps the filter"
     );
     // A bad id is a bad request. The agent of another owner shows nothing and no name.
@@ -956,7 +1079,7 @@ fn history_filter_by_agent_and_the_agent_column() {
         400
     );
     let erin = other_owner(&pep, "erin");
-    let (st, _, page) = pep.page(&erin, &format!("{INBOX}/items?agent={A1}"));
+    let (st, _, page) = pep.page(&erin, &format!("{INBOX}/items?agent={a1}"));
     assert_eq!(st, 200);
     assert!(
         page.contains("No request matches.")
@@ -970,13 +1093,13 @@ fn history_filter_by_agent_and_the_agent_column() {
             &cookie,
             MERGE,
             &csrf,
-            &format!("agent_id={A2}&into={A1}"),
+            &format!("agent_id={a2}&into={a1}"),
             None
         )
         .0,
         303
     );
-    let (_, _, page) = pep.page(&cookie, &format!("{INBOX}/items?agent={A2}"));
+    let (_, _, page) = pep.page(&cookie, &format!("{INBOX}/items?agent={a2}"));
     assert!(
         page.contains(&item_path(&one))
             && page.contains(&item_path(&two))
@@ -990,16 +1113,16 @@ fn history_filter_by_agent_and_the_agent_column() {
 fn pages_of_the_agents_never_name_the_product_and_carry_no_store() {
     let pep = enabled(true);
     let cookie = pep.cookie(OWNER);
-    let (_, two, _) = three(&pep);
+    let Trio { two, a1, a2, .. } = trio(&pep);
     let root = pep.s.session().cookie.clone();
     for path in [
         INBOX.to_string(),
         AGENTS.to_string(),
-        format!("{AGENTS}/{A1}"),
-        format!("{AGENTS}/{A2}"),
+        format!("{AGENTS}/{a1}"),
+        format!("{AGENTS}/{a2}"),
         item_path(&two),
         format!("{INBOX}/items"),
-        format!("{INBOX}/items?agent={A1}"),
+        format!("{INBOX}/items?agent={a1}"),
     ] {
         let (st, head, page) = pep.page(&cookie, &path);
         assert_eq!(st, 200, "{path}");
@@ -1015,7 +1138,7 @@ fn pages_of_the_agents_never_name_the_product_and_carry_no_store() {
         assert!(!page.contains("<script>"), "{path}");
     }
     // The superadmin has no agent: the list is empty, and the agents of dana are not found.
-    assert_eq!(pep.page(&root, &format!("{AGENTS}/{A1}")).0, 404);
+    assert_eq!(pep.page(&root, &format!("{AGENTS}/{a1}")).0, 404);
 }
 
 // The eyes --------------------------------------------------------------------------------------------

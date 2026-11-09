@@ -218,7 +218,7 @@ impl Similar {
             SimilarWhy::ClientAndNet => "it has the same client and the same address range",
         };
         format!(
-            r#"<p class="note similar">Looks like your agent <a href="{AGENTS}/{}">{}</a>: {why}. Hints can be copied. The portal never merges by itself.</p>"#,
+            r#"<p class="note similar">Looks like your agent <a href="{AGENTS}/{}">{}</a>: {why}. Hints can be copied. Nothing merges by itself.</p>"#,
             html_escape(&self.agent_id),
             html::escape(&self.label)
         )
@@ -1049,7 +1049,7 @@ mod tests {
             let html = first_use(&n);
             assert!(
                 html.contains(&format!(
-                    r#"Looks like your agent <a href="{AGENTS}/g1">Billing &lt;bot&gt;</a>: {text}. Hints can be copied. The portal never merges by itself."#
+                    r#"Looks like your agent <a href="{AGENTS}/g1">Billing &lt;bot&gt;</a>: {text}. Hints can be copied. Nothing merges by itself."#
                 )),
                 "{html}"
             );
