@@ -1153,6 +1153,10 @@ pub fn unknown_code(s: &Server) -> String {
 pub struct Conn {
     pub ws: Ws,
     pub session: Session,
+    /// The delivery ids of the frames that the test read. A server sends a frame again until it gets the receipt, so the
+    /// same frame can come two times: `nothing_arrives` ignores a copy of a frame that the test already read. A test that
+    /// opens a new session for the same phone gives the ids of the old one with `adopt_seen`.
+    pub seen: std::collections::HashSet<String>,
 }
 
 pub enum Recv {
@@ -1182,7 +1186,11 @@ impl Conn {
             other => panic!("unexpected handshake reply: {other:?}"),
         };
         let (session, _accept) = init.finish(&m2).unwrap();
-        let mut conn = Conn { ws, session };
+        let mut conn = Conn {
+            ws,
+            session,
+            seen: Default::default(),
+        };
         conn.send(&ClientMsg::Ready).await;
         match conn.recv(Duration::from_secs(5)).await {
             Recv::Msg(m @ ServerMsg::Welcome { .. }) => Ok((conn, m)),

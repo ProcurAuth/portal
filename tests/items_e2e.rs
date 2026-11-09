@@ -7,7 +7,8 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use common::approvals::{
-    command, next_request, next_result, next_settled, nothing_arrives, Pep, OWNER,
+    command, next_request, next_result, next_settled, nothing_arrives, nothing_new_arrives, Pep,
+    OWNER,
 };
 use common::{close_code, portal, portal_ok, Conn, Phone, Recv, Server};
 use inbox_core::noise::Initiator;
@@ -405,6 +406,7 @@ async fn offline_phone_receives_request_and_settled_on_reconnect() {
             Recv::Msg(ServerMsg::Request(r)) => {
                 assert_eq!(r.request_id, id);
                 cb.receipt(&r.id).await;
+                cb.seen.insert(r.id.clone());
                 kinds.push("request");
             }
             Recv::Msg(ServerMsg::Settled(s)) => {
@@ -414,16 +416,20 @@ async fn offline_phone_receives_request_and_settled_on_reconnect() {
                 );
                 assert_eq!(s.decision, Some(Decision::Deny));
                 cb.receipt(&s.id).await;
+                cb.seen.insert(s.id.clone());
                 kinds.push("settled");
             }
             _ => {}
         }
     }
     assert_eq!(kinds, ["request", "settled"]);
-    // The receipts are stored: a new session gets nothing.
+    // The receipts are stored: a new session gets nothing new. A copy of the last frame is possible when its receipt was
+    // lost with the dropped session.
+    let seen = cb.seen.clone();
     drop(cb);
     let mut cb = connect(&pep, &b).await;
-    nothing_arrives(&mut cb, Duration::from_secs(3)).await;
+    cb.adopt_seen(&seen);
+    nothing_new_arrives(&mut cb, Duration::from_secs(3)).await;
 }
 
 /// A phone that is revoked in the database while its session lives (another instance did it): its answer is refused,
@@ -608,10 +614,13 @@ async fn phone_enrolled_after_creation_receives_open_items() {
         [r1.request_id.as_str(), r2.request_id.as_str()],
         [first.as_str(), second.as_str()]
     );
-    // A new session does not send them again: the receipts are stored.
+    // A new session does not send them again: the receipts are stored. The receipt of the last frame can be lost when the
+    // session drops, so a copy of a frame that the first session read is not a failure.
+    let seen = conn.seen.clone();
     drop(conn);
     let mut conn = connect(&pep, &phone).await;
-    nothing_arrives(&mut conn, Duration::from_secs(3)).await;
+    conn.adopt_seen(&seen);
+    nothing_new_arrives(&mut conn, Duration::from_secs(3)).await;
     // The second phone of the owner gets the same two items.
     let other = pep.phone("later").await;
     let mut co = connect(&pep, &other).await;

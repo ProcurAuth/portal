@@ -557,7 +557,10 @@ pub async fn next_request(c: &mut Conn, wait: Duration) -> RequestMsg {
             .recv(deadline.saturating_duration_since(Instant::now()))
             .await
         {
-            Recv::Msg(ServerMsg::Request(r)) => return *r,
+            Recv::Msg(ServerMsg::Request(r)) => {
+                c.seen.insert(r.id.clone());
+                return *r;
+            }
             Recv::Msg(_) => continue,
             Recv::Closed(code) => panic!("closed while the phone waits for a request: {code:?}"),
             Recv::Timeout => panic!("no request within {wait:?}"),
@@ -572,7 +575,10 @@ pub async fn next_settled(c: &mut Conn, wait: Duration) -> SettledMsg {
             .recv(deadline.saturating_duration_since(Instant::now()))
             .await
         {
-            Recv::Msg(ServerMsg::Settled(s)) => return s,
+            Recv::Msg(ServerMsg::Settled(s)) => {
+                c.seen.insert(s.id.clone());
+                return s;
+            }
             Recv::Msg(_) => continue,
             Recv::Closed(code) => panic!("closed while the phone waits for settled: {code:?}"),
             Recv::Timeout => panic!("no settled within {wait:?}"),
@@ -587,7 +593,10 @@ pub async fn next_message(c: &mut Conn, wait: Duration) -> MessageMsg {
             .recv(deadline.saturating_duration_since(Instant::now()))
             .await
         {
-            Recv::Msg(ServerMsg::Message(m)) => return m,
+            Recv::Msg(ServerMsg::Message(m)) => {
+                c.seen.insert(m.id.clone());
+                return m;
+            }
             Recv::Msg(_) => continue,
             Recv::Closed(code) => panic!("closed while the phone waits for a message: {code:?}"),
             Recv::Timeout => panic!("no message within {wait:?}"),
@@ -611,7 +620,8 @@ pub async fn next_result(c: &mut Conn, wait: Duration) -> inbox_core::proto::Ans
     }
 }
 
-/// Nothing of this kind arrives within `wait`. A frame of another kind is skipped.
+/// Nothing of this kind arrives within `wait`. A frame of another kind is skipped. This is strict: a copy of a frame that
+/// the test read is a failure. A test of the receipts uses it (a frame must not come again after its receipt).
 pub async fn nothing_arrives(c: &mut Conn, wait: Duration) {
     let deadline = Instant::now() + wait;
     while Instant::now() < deadline {
@@ -628,7 +638,34 @@ pub async fn nothing_arrives(c: &mut Conn, wait: Duration) {
     }
 }
 
+/// Nothing new arrives within `wait`. A frame that the test read already (`Conn::seen`) is not new: it is a copy that the
+/// server sent again because the receipt of the last frame of a dropped session was lost. The copy gets its receipt. A
+/// frame with another delivery id is a failure.
+pub async fn nothing_new_arrives(c: &mut Conn, wait: Duration) {
+    let deadline = Instant::now() + wait;
+    while Instant::now() < deadline {
+        match c
+            .recv(deadline.saturating_duration_since(Instant::now()))
+            .await
+        {
+            Recv::Msg(ServerMsg::Request(r)) if c.seen.contains(&r.id) => c.receipt(&r.id).await,
+            Recv::Msg(ServerMsg::Settled(s)) if c.seen.contains(&s.id) => c.receipt(&s.id).await,
+            Recv::Msg(ServerMsg::Message(m)) if c.seen.contains(&m.id) => c.receipt(&m.id).await,
+            Recv::Msg(ServerMsg::Request(r)) => panic!("unexpected request {r:?}"),
+            Recv::Msg(ServerMsg::Settled(s)) => panic!("unexpected settled {s:?}"),
+            Recv::Msg(ServerMsg::Message(m)) => panic!("unexpected message {m:?}"),
+            Recv::Closed(code) => panic!("closed: {code:?}"),
+            _ => {}
+        }
+    }
+}
+
 impl Conn {
+    /// Takes the delivery ids that the old session of the same phone read (see `Conn::seen`).
+    pub fn adopt_seen(&mut self, old: &std::collections::HashSet<String>) {
+        self.seen.extend(old.iter().cloned());
+    }
+
     /// Sends the receipt of a frame by its delivery id.
     pub async fn receipt(&mut self, id: &str) {
         self.send(&ClientMsg::Ack {
