@@ -176,12 +176,13 @@ The plain text of a frame has at most 65519 bytes (`MAX_PLAINTEXT`).
 
 The messages `set_user_name` and `user_name` do not exist.
 The server refuses an unknown message.
-The codes of `error` are `unknown_group`, `forbidden_group`, `unavailable` and `not_enabled`.
+The codes of `error` are `unknown_group`, `forbidden_group`, `unavailable`, `not_enabled` and `invalid_prefs`.
 `unknown_group`: the group does not exist.
 `forbidden_group`: the account has no permission `inbox.receive` on the group.
 
 `unavailable`: the storage or the rights are not ready, so send the message again later.
 `not_enabled`: the server does not handle this frame.
+`invalid_prefs`: a value of `set_prefs` is not valid. The server stored nothing. The message names the field.
 A server without the blocks `inbox.items` and `inbox.at_rest` answers each of `answer`, `reply`, `refresh`, `sync` and `set_prefs` so.
 
 ## Receipts
@@ -260,7 +261,7 @@ Members of both kinds:
 | `seq` | u64 | Number of the last turn of the thread. 0 when there is no turn. |
 | `from` | object | `{label, key_name, owner, via, interaction}`. See below. |
 | `urgency` | string | `low`, `normal` or `high`. |
-| `quiet` | bool, optional | True when the item came inside the quiet hours. The server never holds an item back. |
+| `quiet` | bool, optional | True when the item came inside the quiet hours of the account, in the time zone of the window. The server never holds an item back. The flag does not depend on `urgency`: the phone reads `high_rings` of its preferences. |
 | `created_at_ms`, `chain_created_at_ms`, `agent_seen_at_ms` | time | |
 | `lease_mode` | string | `lease` or `until`. |
 | `lease_until_ms` | time | With `lease` only. |
@@ -385,6 +386,10 @@ A later version can add a reason. A device shows a reason that it does not know 
 ### `digest`
 
 The open items of the owner, as numbers. It has no body. The server sends no empty digest.
+It sends the frame at the due time of the digest of the account. The default is `inbox.items.digest`, and the preferences of the account replace it.
+
+A `daily` digest is due at `HH:MM` of each local day of its time zone. An `every` digest is due at the multiples of its period since the Unix epoch.
+Several instances of the server send one frame for each owner and due time.
 
 | Member | Type | Rule |
 |---|---|---|
@@ -467,8 +472,15 @@ It sends nothing for an item that the device holds in the newest state.
 The frame has the members of `prefs`. It replaces the preferences of the account.
 An absent block means: no preference of the account, use the default of the file of the portal.
 
-The server stores the frame and sends no answer. The next `welcome` has the stored values.
-The server applies no preference in version 5.1.0. The digest and the flag `quiet` come with a later lot.
+The server checks the frame before it stores it. The time zone names must be in the time zone database of the server, with the exact capital letters.
+The period `every_h` must be from 1 to 168. A value that is not valid gets the frame `error` with the code `invalid_prefs`. The message names the field, the expected form and the value.
+The server stores nothing in this case, and the session stays open.
+
+A valid frame gets no answer. The next `welcome` has the stored values. The page **Inbox > Preferences** of the owner reads and writes the same values.
+A change on the page reaches a connected phone at its next `welcome`: the protocol has no frame that pushes the preferences.
+
+The server uses the preferences in two ways. It sets the member `quiet` of a `request` that arrived inside the quiet hours.
+It also sends the frame `digest` at the due times of the account. The server never holds a `request` back.
 
 ## Preferences
 
@@ -476,11 +488,11 @@ The server applies no preference in version 5.1.0. The digest and the flag `quie
 |---|---|---|
 | `quiet` | object, optional | `{from, to, tz, high_rings}`. |
 | `quiet.from`, `quiet.to` | string | `HH:MM`, 24 hours. They differ. The window can cross midnight. |
-| `quiet.tz` | string | IANA name, 1 to 64 characters of `A-Z a-z 0-9 _ + - /`. |
+| `quiet.tz` | string | Name of a zone of the time zone database of the server, with its exact capital letters. 1 to 64 characters of `A-Z a-z 0-9 _ + - /`. |
 | `quiet.high_rings` | bool | True: an item with the urgency `high` still rings. |
 | `digest` | object, optional | `{mode, at?, tz?, every_h?}`. |
 | `digest.mode` | string | `off`, `daily` or `every`. |
-| `digest.at`, `digest.tz` | string | With `daily` only, and both. |
+| `digest.at`, `digest.tz` | string | With `daily` only, and both. `tz` follows the rule of `quiet.tz`. |
 | `digest.every_h` | u16 | 1 to 168. With `every` only. |
 
 `off` has no other member.

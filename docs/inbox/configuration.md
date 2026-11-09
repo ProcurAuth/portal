@@ -72,7 +72,9 @@ These limits contradict each other, and the program stops at start. The message 
 - `digest.at` or `digest.timezone` is present and the mode is not `daily`.
 - `digest.every` is present and the mode is not `every`.
 
-The program checks only the form of `digest.timezone`. A later release checks the name against a time zone database. No key of this block is editable from the web.
+The program checks `digest.timezone` against the time zone database that is inside the binary. The name needs its exact capital letters: `Europe/Paris` is valid and `europe/paris` is not. The program does not read the zone files of the host. No key of this block is editable from the web.
+
+The keys of `digest` are the defaults of every account. An account can replace them on the page **Inbox > Preferences** or with the frame `set_prefs` of the phone. The values of the account live in the database, not in the file. They never go past a limit of the file: the period of an account has the range of `digest.every`, from 1 hour to 7 days.
 
 ## Content keys
 

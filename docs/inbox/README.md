@@ -198,6 +198,7 @@ The page is `/auth/settings/inbox`. The pages of the requests are under it. The 
 | Zone **My phones** | `inbox.receive` on one group | The phones of the account, the plus button and **Revoke (N)**. |
 | Zone **Connections** | `phone.log` | The connection log, with a search on the login. |
 | Panel **Open items** | A request that waits | The requests to answer. The panel shows above the phones and below the alerts. |
+| **Preferences** | An account with the pages of the items | The summary and the quiet hours of the account. See "Preferences". |
 | **Send alert** | `alert.send` on one group at least | The form of a manual alert. The field `to` has the value `group:<id>` or `user:<login>`. A target `user:<login>` needs `alert.send_user`. |
 | The book icon | `alert.send` or `alert.read` | The routes, the groups and the header of the key. |
 
@@ -219,6 +220,22 @@ The owner of an agent key answers the approvals on the web. The pages have no sc
 - An account with `approval.read` sees the metadata of all requests. An account with `approval.cancel` can cancel an open request.
 - The page **Inbox limits** (`/auth/settings/inbox/limits`) shows the values of the file. It is read only. A secret key shows its id and its source.
 - With `inbox.at_rest.admin_body_read = true`, the superadmin can open `/auth/settings/inbox/items/{id}/body`. Each read writes one audit row. The row has no content.
+
+### Preferences
+
+The link **Preferences** is in the bar of the page, next to **History**. It opens `/auth/settings/inbox/prefs`. The page needs no script.
+Only the account itself can use it. A session that the superadmin opens as the account gets `403`.
+
+The page sets the summary of open items and the quiet hours.
+
+- The summary has three choices: **Daily at** a time, **Every** N hours, or **None**. It is one quiet message with the count and the age. It never holds a content.
+- The quiet hours have a start, an end and the box **Urgent items still ring**. A new item in this window reaches the phone with the flag `quiet`. The server delivers it at once.
+- The page has one time zone for the daily summary and for the quiet hours. The list has all the IANA zones of the database in the binary.
+- The values of the account replace the defaults of `inbox.items.digest`. The button **Use the defaults of the file** removes them. The period never goes past the range of the key `digest.every`: 1 hour to 7 days.
+- The server refuses a bad value with status `422`. It stores nothing and it changes no value. The name of a zone needs its exact capital letters.
+- The phone and the page read and write the same row of `account_prefs`. A change of the phone shows on the page at once. A change of the page reaches the phone at its next connection.
+
+The summary of a day is due once at the local time of the account. A change of summer time does not make it twice or skip it. The server sends no summary when no item is open at the due time. Two instances send one summary.
 
 ## Notifications in the browser
 
