@@ -1240,6 +1240,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-tungstenite",
+ "unicode-normalization",
  "webpki-root-certs",
  "zeroize",
 ]

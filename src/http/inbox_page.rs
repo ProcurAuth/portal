@@ -1090,6 +1090,7 @@ async fn to_answer(app: &InboxApp, held: &Held, login: &str) -> u32 {
         owner: Some(login.to_string()),
         open: Some(true),
         limit: 100,
+        agent_id: None,
         ..ListFilter::default()
     };
     let rows: Vec<Loaded> = items.list(filter).await.unwrap_or_default();

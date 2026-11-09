@@ -19,6 +19,14 @@
 //! - `metrics`, `log`: the Prometheus text and the JSON log.
 
 pub mod admin;
+pub mod agents;
+mod agents_db;
+mod agents_ops;
+mod agents_pg;
+mod agents_sql;
+mod agents_store;
+#[cfg(test)]
+mod agents_tests;
 mod api;
 pub mod approvals;
 
@@ -87,6 +95,7 @@ pub(crate) mod page_items {
 /// What the tests of the portal take from the inbox.
 #[cfg(test)]
 pub(crate) mod testing {
+    pub(crate) use super::agents_ops::AgentOp;
     pub(crate) use super::device_items::{digest_for_test, Builder, Built};
     pub(crate) use super::items::{owner_text_payload, Caller, Loaded, Wait};
     pub(crate) use super::items_ops::{AnswerVia, CancelBy, Cancelled, NewItem, TurnOut};

@@ -276,6 +276,7 @@ impl Rig {
             key_id: subject.strip_prefix("key:").unwrap().to_string(),
             owner: OWNER.into(),
             interaction,
+            agent: Default::default(),
         }
     }
 
@@ -1947,6 +1948,9 @@ mod agent_channel;
 
 #[path = "prefs_tests.rs"]
 mod prefs;
+
+#[path = "agent_binding_tests.rs"]
+mod agent_binding;
 
 // ---------------------------------------------------------------- the phone side of the thread (lot L8)
 //

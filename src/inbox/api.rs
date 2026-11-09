@@ -818,6 +818,8 @@ fn agent_key(app: &App, headers: &HeaderMap) -> Result<super::approvals::Request
             key_id: key.key_id,
             owner: key.owner,
             interaction: key.interaction,
+            // The token and the hints come with the channel arguments (lot G1b).
+            agent: Default::default(),
         }),
         AgentCheck::NotReady => Err(not_ready()),
         AgentCheck::NotAKey | AgentCheck::Invalid => {

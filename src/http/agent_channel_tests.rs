@@ -1342,6 +1342,7 @@ fn get_answer_returns_the_answers_of_a_form_in_untrusted() {
             allow_ask_back: false,
             idempotency_key: "form-1".into(),
             previous_id: None,
+            agent_id: None,
             body_size: 0,
             approval: None,
             require_device: false,

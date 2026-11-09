@@ -149,6 +149,54 @@ CREATE TABLE content_key_check (
     check_value BLOB NOT NULL
 ) STRICT;
 
+-- 5.1.0, in place: the agents of a key (lot G1a). An agent is what the owner wants to see in the Inbox: one program, or
+-- one conversation, that asks. The portal gives it a token; the table keeps only the SHA-256 digest of the token.
+-- The name is set by the owner only. `kind = 'bucket'` is the pseudo agent "Unattributed" of a key: no token, one for
+-- each key. For a bucket, `ordinal` is the last number that the key gave to an agent: the counter never goes back, so
+-- the label "<key name> #<ordinal>" of an agent is never given twice. The hints (what the agent says, the client, the
+-- address range) are sealed: they hold text that a client sent.
+CREATE TABLE agents (
+    agent_id      TEXT PRIMARY KEY,
+    key_id        TEXT NOT NULL,
+    owner         TEXT NOT NULL,
+    kind          TEXT NOT NULL CHECK (kind IN ('agent', 'bucket')),
+    state         TEXT NOT NULL CHECK (state IN ('new', 'known', 'blocked', 'merged')),
+    origin        TEXT NOT NULL CHECK (origin IN ('call', 'owner', 'key')),
+    ordinal       INTEGER NOT NULL,
+    name          TEXT,
+    name_key      TEXT,
+    token_digest  TEXT,
+    merged_into   TEXT,
+    rev           INTEGER NOT NULL DEFAULT 1,
+    created_at    INTEGER NOT NULL,
+    named_at      INTEGER,
+    last_seen_at  INTEGER NOT NULL,
+    hints_kid     TEXT,
+    hints_ct      BLOB,
+    UNIQUE (agent_id, key_id),
+    UNIQUE (token_digest),
+    CHECK ((kind = 'bucket') = (token_digest IS NULL)),
+    CHECK (state <> 'merged' OR merged_into IS NOT NULL)
+) STRICT;
+CREATE UNIQUE INDEX agents_name ON agents(key_id, name_key) WHERE name_key IS NOT NULL;
+CREATE UNIQUE INDEX agents_bucket ON agents(key_id) WHERE kind = 'bucket';
+CREATE INDEX agents_owner ON agents(owner, state);
+CREATE INDEX agents_seen ON agents(last_seen_at);
+CREATE INDEX agents_merged ON agents(merged_into) WHERE merged_into IS NOT NULL;
+CREATE INDEX agents_hints_kid ON agents(hints_kid) WHERE hints_kid IS NOT NULL;
+
+-- One row for each human action and each event of the life of an agent. It holds ids and numbers, never a text that
+-- an agent sent.
+CREATE TABLE agent_events (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id  TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+    at        INTEGER NOT NULL,
+    event     TEXT NOT NULL,
+    actor     TEXT NOT NULL,
+    detail    TEXT
+) STRICT;
+CREATE INDEX agent_events_agent ON agent_events(agent_id, at);
+
 -- 5.1.0, in place: the items (approvals and questions). The body of an item is sealed (see
 -- `content_box.rs`); every other column is metadata. A delivery of an item is a row of `alerts` with
 -- the kind of the item and its `request_id`.
@@ -161,6 +209,7 @@ CREATE TABLE items (
     previous_id       TEXT,
     requester_key_id  TEXT NOT NULL,
     requester_owner   TEXT NOT NULL,
+    agent_id          TEXT NOT NULL,
     source            TEXT NOT NULL CHECK (source IN ('mcp', 'api')),
     interaction       TEXT NOT NULL CHECK (interaction IN ('conversational', 'one_shot')),
     urgency           TEXT NOT NULL CHECK (urgency IN ('low', 'normal', 'high')),
@@ -190,11 +239,14 @@ CREATE TABLE items (
     final_at          INTEGER,
     idempotency_key   TEXT NOT NULL,
     CHECK ((lease_s IS NULL) <> (until_at IS NULL)),
-    UNIQUE (requester_key_id, idempotency_key)
+    UNIQUE (requester_key_id, idempotency_key),
+    -- The database refuses an item that names an agent of another key, whatever the code does.
+    FOREIGN KEY (agent_id, requester_key_id) REFERENCES agents(agent_id, key_id)
 ) STRICT;
 CREATE INDEX items_open ON items(state, lease_until);
 CREATE INDEX items_owner ON items(requester_owner, state);
 CREATE INDEX items_key ON items(requester_key_id, state);
+CREATE INDEX items_agent ON items(agent_id, state);
 CREATE INDEX items_chain ON items(chain_id);
 CREATE INDEX items_final ON items(final_at) WHERE final_at IS NOT NULL;
 CREATE INDEX items_kid ON items(body_kid) WHERE body_kid IS NOT NULL;
@@ -256,6 +308,7 @@ CREATE INDEX item_events_at ON item_events(at);
 CREATE TABLE approval_intents (
     ref_digest       TEXT PRIMARY KEY,
     requester_key_id TEXT NOT NULL,
+    agent_id         TEXT NOT NULL,
     lease_s          INTEGER,
     until_at         INTEGER,
     allow_custom     INTEGER NOT NULL DEFAULT 0,
@@ -266,10 +319,12 @@ CREATE TABLE approval_intents (
     expires_at       INTEGER NOT NULL,
     used_at          INTEGER,
     request_id       TEXT,
-    previous_id      TEXT
+    previous_id      TEXT,
+    FOREIGN KEY (agent_id, requester_key_id) REFERENCES agents(agent_id, key_id)
 ) STRICT;
 CREATE INDEX approval_intents_kid ON approval_intents(body_kid) WHERE body_kid IS NOT NULL;
 CREATE INDEX approval_intents_expires ON approval_intents(expires_at);
+CREATE INDEX approval_intents_agent ON approval_intents(agent_id);
 
 CREATE TABLE approval_mute (
     subject     TEXT PRIMARY KEY,

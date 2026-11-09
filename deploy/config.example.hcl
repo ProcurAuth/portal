@@ -180,6 +180,13 @@ inbox {
   # mcp {
   # }
 
+  # Optional: the agents of a key. The portal gives each agent a token and shows the items by agent. It needs the blocks
+  # items and at_rest. Without this block, each key is one agent. Defaults: max_per_key = 16, new_per_hour = 6,
+  # lock_new = false (true: the owner must allow a new agent before it can get an approval), idle_after = "14d",
+  # purge_after = "365d". A call over a limit goes to the bucket "Unattributed" and the owner gets an alert.
+  # agents {
+  # }
+
   group "infra" {
     name        = "Infra prod"
     description = "Production outages"

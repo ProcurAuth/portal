@@ -293,6 +293,10 @@ pub const BLOCKS: &[(&str, &str)] = &[
         "This block is optional and is inside the block `inbox`. Its presence starts the MCP endpoint of the portal for the agents. The endpoint gives the tools `approval_intent`, `get_answer`, `keepalive`, `say`, `supersede` and `cancel`. The agent sends its explanation and its talk to the portal here, and the service never sees them. The endpoint takes the keys of the kind `mcp` only. The block needs the block `inbox.items` and `keys.mcp = true`. A call checks the origin, the client address, the key, the rate and the size of the body, in this order. Each instance keeps its own limits.",
     ),
     (
+        "inbox.agents",
+        "This block is optional and is inside the block `inbox`. Its presence starts the agents of a key: the portal gives each agent of one key a token, and it groups the items by agent. Without this block, each key is one agent. A new agent is allowed at once, and its owner gets a notice. The block needs the blocks `inbox.items` and `inbox.at_rest`. The mode of each key (`key`, `discover` or `enrolled`) is an attribute of the key, not of the file.",
+    ),
+    (
         "inbox.approvals",
         "This block is optional and is inside the block `inbox`. Its presence starts the approval of an action: the PDP answers `approval_required` for a grant with `confirm`, and it consumes an approval once. The block needs the blocks `inbox.items` and `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. A server gets approvals only with `approvals = true` in its block `pdp_client`.",
     ),
@@ -1659,6 +1663,46 @@ pub static KEYS: &[Key] = &[
         doc: "`true`: a person can approve from the web page. `false`: the page lists the requests and does not decide them, so an owner with no phone cannot receive a request (`409 no_device`).",
     },
     Key {
+        block: "inbox.agents",
+        name: "max_per_key",
+        kind: Kind::Int { min: 1, max: 1000 },
+        presence: Presence::Default("16"),
+        when: When::Always,
+        doc: "The most agents of one key that are `new`, `known` or `blocked`. The next call that would make an agent goes to the bucket `Unattributed` of the key, and the owner gets one alert each hour. The call does not fail.",
+    },
+    Key {
+        block: "inbox.agents",
+        name: "new_per_hour",
+        kind: Kind::Int { min: 1, max: 1000 },
+        presence: Presence::Default("6"),
+        when: When::Always,
+        doc: "The most agents that the calls of one key can make in one hour. The next call goes to the bucket `Unattributed`, as when `max_per_key` is reached. Agents that the owner makes by hand do not count.",
+    },
+    Key {
+        block: "inbox.agents",
+        name: "lock_new",
+        kind: Kind::Bool,
+        presence: Presence::Default("false"),
+        when: When::Always,
+        doc: "`true`: a `new` agent cannot get an approval or an answer accepted until its owner allows it. A refusal and a talk stay open. `false`: a new agent is allowed at once, and its owner still gets a notice.",
+    },
+    Key {
+        block: "inbox.agents",
+        name: "idle_after",
+        kind: Kind::Duration { min: secs(HOUR), max: secs(365 * DAY) },
+        presence: Presence::Default("14d"),
+        when: When::Always,
+        doc: "An agent with no open item and no call for this time leaves the active views. It still works, and a call makes it active again. It must not be above `purge_after`.",
+    },
+    Key {
+        block: "inbox.agents",
+        name: "purge_after",
+        kind: Kind::Duration { min: secs(7 * DAY), max: secs(3650 * DAY) },
+        presence: Presence::Default("365d"),
+        when: When::Always,
+        doc: "The sweeper erases an agent that has no item, no live intent and no call for this time. The token of an erased agent is unknown. It must not be below `idle_after`.",
+    },
+    Key {
         block: "inbox.mcp",
         name: "path",
         kind: Kind::Text {
@@ -1973,6 +2017,7 @@ pub const NESTED_PLAIN_BLOCKS: &[(&str, &str)] = &[
     ("inbox", "items"),
     ("inbox", "at_rest"),
     ("inbox", "approvals"),
+    ("inbox", "agents"),
     ("inbox", "mcp"),
     ("inbox.items", "lease"),
     ("inbox.items", "digest"),
@@ -2023,6 +2068,7 @@ pub fn gate(block: &str) -> Option<&'static str> {
         "inbox.items" | "inbox.items.lease" | "inbox.items.digest" => Some("inbox.items"),
         "inbox.at_rest" => Some("inbox.at_rest"),
         "inbox.approvals" => Some("inbox.approvals"),
+        "inbox.agents" => Some("inbox.agents"),
         "inbox.mcp" => Some("inbox.mcp"),
         _ => None,
     }

@@ -40,9 +40,13 @@ impl Cols for rusqlite::Row<'_> {
     fn text(&self, i: usize) -> Result<Option<String>, DbError> {
         Ok(self.get(i)?)
     }
+
+    fn blob(&self, i: usize) -> Result<Option<Vec<u8>>, DbError> {
+        Ok(self.get(i)?)
+    }
 }
 
-fn value(v: &V) -> Value {
+pub(super) fn value(v: &V) -> Value {
     match v {
         V::Int(i) => Value::Integer(*i),
         V::Text(t) => Value::Text(t.clone()),
@@ -51,7 +55,7 @@ fn value(v: &V) -> Value {
     }
 }
 
-fn ph(n: usize) -> String {
+pub(super) fn ph(n: usize) -> String {
     format!("?{n}")
 }
 
@@ -265,6 +269,20 @@ impl ItemTx for SqliteTx<'_, '_> {
         Ok(())
     }
 
+    async fn event_exists(
+        &mut self,
+        request_id: &str,
+        event: &str,
+        detail: &str,
+    ) -> Result<bool, DbError> {
+        let n: i64 = self.0.query_row(
+            "SELECT COUNT(*) FROM item_events WHERE request_id = ?1 AND event = ?2 AND detail = ?3",
+            params![request_id, event, detail],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     async fn pending_item_deliveries(
         &mut self,
         device_id: &str,
@@ -419,6 +437,7 @@ impl ItemTx for SqliteTx<'_, '_> {
         for (column, wanted) in [
             ("requester_owner", &f.owner),
             ("requester_key_id", &f.key_id),
+            ("agent_id", &f.agent_id),
         ] {
             if let Some(w) = wanted {
                 args.push(Value::Text(w.clone()));
@@ -490,9 +509,9 @@ impl ItemTx for SqliteTx<'_, '_> {
 
     async fn insert_intent(&mut self, row: &IntentRow) -> Result<(), DbError> {
         self.0.execute(
-            "INSERT INTO approval_intents (ref_digest, requester_key_id, lease_s, until_at, allow_custom, allow_ask_back,
+            "INSERT INTO approval_intents (ref_digest, requester_key_id, agent_id, lease_s, until_at, allow_custom, allow_ask_back,
                  body_kid, body_ct, body_size, expires_at, used_at, request_id, previous_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             VALUES (?1, ?2, ?14, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 row.ref_digest,
                 row.requester_key_id,
@@ -506,7 +525,8 @@ impl ItemTx for SqliteTx<'_, '_> {
                 row.expires_at,
                 row.used_at,
                 row.request_id,
-                row.previous_id
+                row.previous_id,
+                row.agent_id
             ],
         )?;
         Ok(())
@@ -525,7 +545,7 @@ impl ItemTx for SqliteTx<'_, '_> {
             .0
             .query_row(
                 "SELECT requester_key_id, lease_s, until_at, allow_custom, allow_ask_back, body_kid, body_ct, body_size,
-                        expires_at, used_at, request_id, previous_id
+                        expires_at, used_at, request_id, previous_id, agent_id
                  FROM approval_intents WHERE ref_digest = ?1",
                 params![digest],
                 |r| {
@@ -544,6 +564,7 @@ impl ItemTx for SqliteTx<'_, '_> {
                         used_at: r.get(9)?,
                         request_id: r.get(10)?,
                         previous_id: r.get(11)?,
+                        agent_id: r.get(12)?,
                     })
                 },
             )
@@ -715,7 +736,8 @@ impl ItemTx for SqliteTx<'_, '_> {
         let mut stmt = self.0.prepare_cached(
             "SELECT body_kid, COUNT(*) FROM items WHERE body_ct IS NOT NULL AND body_kid IS NOT NULL GROUP BY body_kid
              UNION ALL SELECT body_kid, COUNT(*) FROM turns WHERE payload_ct IS NOT NULL AND body_kid IS NOT NULL GROUP BY body_kid
-             UNION ALL SELECT body_kid, COUNT(*) FROM approval_intents WHERE body_ct IS NOT NULL AND body_kid IS NOT NULL GROUP BY body_kid",
+             UNION ALL SELECT body_kid, COUNT(*) FROM approval_intents WHERE body_ct IS NOT NULL AND body_kid IS NOT NULL GROUP BY body_kid
+             UNION ALL SELECT hints_kid, COUNT(*) FROM agents WHERE hints_ct IS NOT NULL AND hints_kid IS NOT NULL GROUP BY hints_kid",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
@@ -725,7 +747,7 @@ impl ItemTx for SqliteTx<'_, '_> {
         ))
     }
 
-    async fn purge_key(&mut self, kid: &str, now: i64) -> Result<(u64, u64, u64), DbError> {
+    async fn purge_key(&mut self, kid: &str, now: i64) -> Result<(u64, u64, u64, u64), DbError> {
         let items = self.0.execute(
             "UPDATE items SET body_ct = NULL, body_purged_at = ?1 WHERE body_kid = ?2 AND body_ct IS NOT NULL",
             params![now, kid],
@@ -738,7 +760,11 @@ impl ItemTx for SqliteTx<'_, '_> {
             "UPDATE approval_intents SET body_ct = NULL WHERE body_kid = ?1 AND body_ct IS NOT NULL",
             params![kid],
         )?;
-        Ok((items as u64, turns as u64, intents as u64))
+        let agents = self.0.execute(
+            "UPDATE agents SET hints_ct = NULL WHERE hints_kid = ?1 AND hints_ct IS NOT NULL",
+            params![kid],
+        )?;
+        Ok((items as u64, turns as u64, intents as u64, agents as u64))
     }
 }
 
@@ -756,7 +782,7 @@ pub fn in_tx<R>(
 
 /// `portal inbox content-purge` on a SQLite file. It opens the file as a plain connection: it does not run the
 /// migrations and it does not touch the rows of the sessions that a running instance owns.
-pub fn purge_key_file(path: &std::path::Path, kid: &str) -> Result<(u64, u64, u64), String> {
+pub fn purge_key_file(path: &std::path::Path, kid: &str) -> Result<(u64, u64, u64, u64), String> {
     let mut conn = rusqlite::Connection::open(path)
         .map_err(|e| format!("storage.database: cannot open {}: {e}", path.display()))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))

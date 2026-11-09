@@ -23,16 +23,16 @@ use super::items_store::{
 use super::pg::tests::TestDatabase;
 use super::store::Store;
 
-const T0: i64 = 1_800_000_000_000;
-const CANARY: &str = "canary-8f3a91c7-do-not-log";
-const DAY: Duration = Duration::from_secs(86_400);
+pub(super) const T0: i64 = 1_800_000_000_000;
+pub(super) const CANARY: &str = "canary-8f3a91c7-do-not-log";
+pub(super) const DAY: Duration = Duration::from_secs(86_400);
 
-struct Env {
-    name: &'static str,
-    store: Store,
-    clock: Arc<ManualClock>,
-    content: ContentBox,
-    rules: Rules,
+pub(super) struct Env {
+    pub(super) name: &'static str,
+    pub(super) store: Store,
+    pub(super) clock: Arc<ManualClock>,
+    pub(super) content: ContentBox,
+    pub(super) rules: Rules,
     pg: Option<TestDatabase>,
     path: Option<std::path::PathBuf>,
     _closed: Option<Closed>,
@@ -46,7 +46,7 @@ fn key(seed: u8) -> Zeroizing<[u8; KEY_BYTES]> {
     k
 }
 
-fn content(ids: &[(&str, u8)], active: &str) -> ContentBox {
+pub(super) fn content(ids: &[(&str, u8)], active: &str) -> ContentBox {
     let keys: Vec<_> = ids
         .iter()
         .map(|(id, s)| (id.to_string(), key(*s)))
@@ -55,7 +55,7 @@ fn content(ids: &[(&str, u8)], active: &str) -> ContentBox {
 }
 
 /// The databases of the test: SQLite always, PostgreSQL when the server is there.
-async fn envs() -> Vec<Env> {
+pub(super) async fn envs() -> Vec<Env> {
     let mut out = Vec::new();
     let dir = std::env::temp_dir().join(format!(
         "portal-items-{}-{}",
@@ -92,7 +92,7 @@ async fn envs() -> Vec<Env> {
 }
 
 impl Env {
-    fn items(&self) -> Items<'_> {
+    pub(super) fn items(&self) -> Items<'_> {
         Items {
             store: &self.store,
             content: &self.content,
@@ -106,11 +106,11 @@ impl Env {
         }
     }
 
-    fn advance(&self, by: Duration) {
+    pub(super) fn advance(&self, by: Duration) {
         self.clock.advance(by);
     }
 
-    async fn sql(&self, sql: &str) {
+    pub(super) async fn sql(&self, sql: &str) {
         match (&self.store, &self.pg) {
             (Store::Sqlite(db), _) => {
                 let sql = sql.to_string();
@@ -121,7 +121,7 @@ impl Env {
         }
     }
 
-    async fn count(&self, sql: &str) -> i64 {
+    pub(super) async fn count(&self, sql: &str) -> i64 {
         match (&self.store, &self.pg) {
             (Store::Sqlite(db), _) => {
                 let sql = sql.to_string();
@@ -141,7 +141,7 @@ impl Env {
     }
 
     /// A phone of `login`, not revoked.
-    async fn device(&self, id: &str, login: &str) {
+    pub(super) async fn device(&self, id: &str, login: &str) {
         let hex: String = id.bytes().map(|b| format!("{b:02x}")).collect();
         let sql = match self.store {
             Store::Sqlite(_) => format!(
@@ -155,7 +155,7 @@ impl Env {
     }
 
     /// A pass of the sweeper, as if it had run every 2 seconds up to now: the heartbeat is one second old.
-    async fn sweep(&self) -> super::items_ops::SweepReport {
+    pub(super) async fn sweep(&self) -> super::items_ops::SweepReport {
         let beat = self.clock.now_ms() - 1000;
         self.sql(&format!(
             "INSERT INTO items_heartbeat (id, swept_at) VALUES (1, {beat}) ON CONFLICT (id) DO UPDATE SET swept_at = {beat}"
@@ -164,7 +164,7 @@ impl Env {
         self.items().sweep().await.unwrap()
     }
 
-    async fn column(&self, id: &str, column: &str) -> i64 {
+    pub(super) async fn column(&self, id: &str, column: &str) -> i64 {
         self.count(&format!(
             "SELECT {column} FROM items WHERE request_id = '{id}'"
         ))
@@ -172,14 +172,14 @@ impl Env {
     }
 
     /// The messages of the kind of the item for one request.
-    async fn notices(&self, id: &str) -> i64 {
+    pub(super) async fn notices(&self, id: &str) -> i64 {
         self.count(&format!(
             "SELECT COUNT(*) FROM alerts WHERE request_id = '{id}' AND kind = 'approval'"
         ))
         .await
     }
 
-    async fn state_of(&self, id: &str) -> ItemState {
+    pub(super) async fn state_of(&self, id: &str) -> ItemState {
         self.items()
             .get(id, &Caller::System)
             .await
@@ -191,7 +191,7 @@ impl Env {
 }
 
 /// An approval of the key `key1` for `alice`. The effect is the real hash of the operation.
-fn approval(n: u32) -> (NewItem, Vec<u8>) {
+pub(super) fn approval(n: u32) -> (NewItem, Vec<u8>) {
     let op = json!({"sql": format!("DELETE FROM staging.events WHERE day = {n}")});
     let effect = effect_hash("db", "run_write_query", "/db/analytics", &op).unwrap();
     let body = serde_json::to_vec(&json!({
@@ -211,6 +211,7 @@ fn approval(n: u32) -> (NewItem, Vec<u8>) {
         allow_ask_back: true,
         idempotency_key: format!("idem-{n}"),
         previous_id: None,
+        agent_id: None,
         body_size: 0,
         approval: Some(NewApproval {
             service: "db".into(),
@@ -227,7 +228,7 @@ fn approval(n: u32) -> (NewItem, Vec<u8>) {
     (item, body)
 }
 
-fn question(n: u32) -> (NewItem, Vec<u8>) {
+pub(super) fn question(n: u32) -> (NewItem, Vec<u8>) {
     let (mut item, _) = approval(n);
     item.kind = Kind::Question;
     item.approval = None;
@@ -235,7 +236,7 @@ fn question(n: u32) -> (NewItem, Vec<u8>) {
     (item, format!("{{\"title\":\"question {n}\"}}").into_bytes())
 }
 
-async fn created(items: &Items<'_>, n: u32) -> String {
+pub(super) async fn created(items: &Items<'_>, n: u32) -> String {
     let (item, body) = approval(n);
     match items.create(item, &body).await.unwrap() {
         Created::New(l) => l.item.request_id.clone(),
@@ -243,7 +244,7 @@ async fn created(items: &Items<'_>, n: u32) -> String {
     }
 }
 
-fn answer(device: &str, effect: &str, action: Action) -> Answer {
+pub(super) fn answer(device: &str, effect: &str, action: Action) -> Answer {
     Answer {
         login: "alice".into(),
         via: AnswerVia::Device(device.into()),
@@ -255,7 +256,7 @@ fn answer(device: &str, effect: &str, action: Action) -> Answer {
     }
 }
 
-async fn effect_of(items: &Items<'_>, id: &str) -> String {
+pub(super) async fn effect_of(items: &Items<'_>, id: &str) -> String {
     items
         .get(id, &Caller::System)
         .await
@@ -352,6 +353,7 @@ async fn caps_per_key_owner_total() {
                 key_id: Some("k1".into()),
                 open: Some(true),
                 limit: 10,
+                agent_id: None,
                 ..Default::default()
             })
             .await
@@ -1427,9 +1429,10 @@ async fn orphan_body_kid_stops_start_with_count() {
         );
         assert!(error.contains("content-purge"), "{error}");
         // The command erases the contents and keeps the metadata: the start goes on.
-        let (items_n, turns_n, intents_n) = super::items_store::purge_key(&env.store, "k1")
-            .await
-            .unwrap();
+        let (items_n, turns_n, intents_n, _agents_n) =
+            super::items_store::purge_key(&env.store, "k1")
+                .await
+                .unwrap();
         assert_eq!((items_n, turns_n, intents_n), (2, 1, 0));
         assert!(start_checks(&env.store, &other).await.is_ok());
         assert_eq!(

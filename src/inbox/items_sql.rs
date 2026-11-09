@@ -31,7 +31,7 @@ impl V {
 }
 
 /// The columns of the table `items`, in the order of [`item_values`].
-pub const ITEM_COLUMNS: [&str; 35] = [
+pub const ITEM_COLUMNS: [&str; 36] = [
     "request_id",
     "kind",
     "chain_id",
@@ -67,6 +67,7 @@ pub const ITEM_COLUMNS: [&str; 35] = [
     "answered_via",
     "final_at",
     "idempotency_key",
+    "agent_id",
 ];
 
 /// The columns of the table `approvals`, in the order of [`approval_values`].
@@ -156,6 +157,7 @@ pub fn item_values(i: &ItemRow) -> Vec<V> {
         V::text(i.answered_via.as_deref()),
         V::int(i.final_at),
         V::Text(i.idempotency_key.clone()),
+        V::Text(i.agent_id.clone()),
     ]
 }
 
@@ -232,6 +234,7 @@ pub fn update_sql(table: &str, columns: &[&str], ph: &dyn Fn(usize) -> String) -
 pub trait Cols {
     fn int(&self, i: usize) -> Result<Option<i64>, DbError>;
     fn text(&self, i: usize) -> Result<Option<String>, DbError>;
+    fn blob(&self, i: usize) -> Result<Option<Vec<u8>>, DbError>;
 }
 
 fn bad(column: &str, value: &str) -> DbError {
@@ -292,24 +295,25 @@ pub fn decode(r: &impl Cols) -> Result<Loaded, DbError> {
         answered_via: r.text(32)?,
         final_at: r.int(33)?,
         idempotency_key: need_text(34)?,
+        agent_id: need_text(35)?,
     };
-    let approval = match r.text(35)? {
+    let approval = match r.text(36)? {
         None => None,
         Some(request_id) => Some(ApprovalRow {
             request_id,
-            service: need_text(36)?,
-            subject: need_text(37)?,
-            action: need_text(38)?,
-            resource_path: need_text(39)?,
-            effect: need_text(40)?,
-            key_hash: need_text(41)?,
-            evaluation_id: r.text(42)?,
-            code: need_text(43)?,
-            decision: opt("decision", r.text(44)?)?,
-            shown_effect: r.text(45)?,
-            consume_before: r.int(46)?,
-            consumed_at: r.int(47)?,
-            lapsed_at: r.int(48)?,
+            service: need_text(37)?,
+            subject: need_text(38)?,
+            action: need_text(39)?,
+            resource_path: need_text(40)?,
+            effect: need_text(41)?,
+            key_hash: need_text(42)?,
+            evaluation_id: r.text(43)?,
+            code: need_text(44)?,
+            decision: opt("decision", r.text(45)?)?,
+            shown_effect: r.text(46)?,
+            consume_before: r.int(47)?,
+            consumed_at: r.int(48)?,
+            lapsed_at: r.int(49)?,
         }),
     };
     Ok(Loaded { item, approval })

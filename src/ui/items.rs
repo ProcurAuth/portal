@@ -52,6 +52,10 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             false,
         ),
         "no_text" => ("This agent does not take a text with a refusal.", false),
+        "locked" => (
+            "Approve is locked until you allow this agent. You can decline now.",
+            false,
+        ),
         "no_reply" => ("This agent does not take a question.", false),
         "too_long" => ("The text is too long.", false),
         "no_text_given" => ("Type a text.", false),
@@ -168,6 +172,7 @@ fn outcome(l: &Loaded, now: i64) -> String {
         ItemState::Cancelled => match i.settle_reason.as_deref() {
             Some("agent_cancelled") => "Cancelled by the agent.".to_string(),
             Some("key_revoked") => "Cancelled: the key was revoked.".to_string(),
+            Some("agent_blocked") => "Cancelled: the owner blocked the agent.".to_string(),
             Some("owner_deleted") => "Cancelled: the owner was deleted.".to_string(),
             Some("admin_cancelled") => "Cancelled by an administrator.".to_string(),
             _ => "Cancelled.".to_string(),
@@ -1280,6 +1285,7 @@ mod tests {
                 previous_id: None,
                 requester_key_id: "k1".into(),
                 requester_owner: "alice".into(),
+                agent_id: "a1".into(),
                 via: Via::Mcp,
                 interaction: Interaction::Conversational,
                 urgency: Urgency::Normal,

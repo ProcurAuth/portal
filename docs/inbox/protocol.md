@@ -377,7 +377,7 @@ An item is final. The device removes it from the list "to answer" and withdraws 
 | `at_ms` | time | |
 
 The reasons that the server sends now are `answered`, `lease_lapsed`, `until_reached`, `max_lifetime`,
-`agent_cancelled`, `key_revoked`, `owner_deleted`, `admin_cancelled`, `superseded` and `item_gone`.
+`agent_cancelled`, `agent_blocked`, `key_revoked`, `owner_deleted`, `admin_cancelled`, `superseded` and `item_gone`.
 `item_gone` answers a `refresh` or a `sync` for an item that the server does not hold any more. The item is `cancelled`.
 
 The phone that answered gets `answer_result`, not `settled`. The server sends `settled` to the other phones of the owner.

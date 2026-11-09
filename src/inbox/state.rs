@@ -201,8 +201,12 @@ impl App {
             content,
             rules: {
                 let rules = super::items::Rules::from_config(config);
-                match &self.config.approvals {
+                let rules = match &self.config.approvals {
                     Some(approvals) => rules.with_approvals(approvals),
+                    None => rules,
+                };
+                match &self.config.agents {
+                    Some(agents) => rules.with_agents(agents),
                     None => rules,
                 }
             },

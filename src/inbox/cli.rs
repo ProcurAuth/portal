@@ -139,7 +139,7 @@ fn content_purge(config_path: &std::path::Path, kid: &str) -> Result<(), String>
             "inbox.at_rest.key {kid:?} is in the file: its contents are not lost, and this command does not erase them (it erases the contents of a key that the file lost)"
         ));
     }
-    let (items, turns, intents) = match &config.storage.backend {
+    let (items, turns, intents, agents) = match &config.storage.backend {
         StorageBackend::Sqlite(path) => super::items_db::purge_key_file(path, kid)?,
         StorageBackend::Postgres(pg) => {
             let password = secrets
@@ -171,7 +171,7 @@ fn content_purge(config_path: &std::path::Path, kid: &str) -> Result<(), String>
         }
     };
     println!(
-        "erased the sealed contents of the key {kid:?}: {items} items, {turns} turns, {intents} intents (the metadata stays)"
+        "erased the sealed contents of the key {kid:?}: {items} items, {turns} turns, {intents} intents, {agents} agent hints (the metadata stays)"
     );
     Ok(())
 }

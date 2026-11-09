@@ -19,7 +19,7 @@ use inbox_core::proto::Prefs;
 /// An open transaction of the inbox.
 pub struct PgTx<'a>(pub Transaction<'a>);
 
-type Arg = Box<dyn ToSql + Sync + Send>;
+pub(super) type Arg = Box<dyn ToSql + Sync + Send>;
 
 impl Cols for tokio_postgres::Row {
     fn int(&self, i: usize) -> Result<Option<i64>, DbError> {
@@ -29,9 +29,13 @@ impl Cols for tokio_postgres::Row {
     fn text(&self, i: usize) -> Result<Option<String>, DbError> {
         self.try_get(i).map_err(db_error)
     }
+
+    fn blob(&self, i: usize) -> Result<Option<Vec<u8>>, DbError> {
+        self.try_get(i).map_err(db_error)
+    }
 }
 
-fn args(values: &[V]) -> Vec<Arg> {
+pub(super) fn args(values: &[V]) -> Vec<Arg> {
     values
         .iter()
         .map(|v| -> Arg {
@@ -53,7 +57,7 @@ fn refs(a: &[Arg]) -> Vec<&(dyn ToSql + Sync)> {
         .collect()
 }
 
-fn ph(n: usize) -> String {
+pub(super) fn ph(n: usize) -> String {
     format!("${n}")
 }
 
@@ -62,11 +66,15 @@ fn ids(rows: Vec<tokio_postgres::Row>) -> Vec<String> {
 }
 
 impl PgTx<'_> {
-    async fn run(&self, sql: &str, a: &[Arg]) -> Result<u64, DbError> {
+    pub(super) async fn run(&self, sql: &str, a: &[Arg]) -> Result<u64, DbError> {
         self.0.execute(sql, &refs(a)).await.map_err(db_error)
     }
 
-    async fn rows(&self, sql: &str, a: &[Arg]) -> Result<Vec<tokio_postgres::Row>, DbError> {
+    pub(super) async fn rows(
+        &self,
+        sql: &str,
+        a: &[Arg],
+    ) -> Result<Vec<tokio_postgres::Row>, DbError> {
         self.0.query(sql, &refs(a)).await.map_err(db_error)
     }
 }
@@ -308,6 +316,25 @@ impl ItemTx for PgTx<'_> {
         Ok(())
     }
 
+    async fn event_exists(
+        &mut self,
+        request_id: &str,
+        event: &str,
+        detail: &str,
+    ) -> Result<bool, DbError> {
+        let rows = self
+            .rows(
+                "SELECT COUNT(*)::bigint FROM item_events WHERE request_id = $1 AND event = $2 AND detail = $3",
+                &[
+                    Box::new(request_id.to_string()),
+                    Box::new(event.to_string()),
+                    Box::new(detail.to_string()),
+                ],
+            )
+            .await?;
+        Ok(rows[0].get::<_, i64>(0) > 0)
+    }
+
     async fn pending_item_deliveries(
         &mut self,
         device_id: &str,
@@ -501,6 +528,7 @@ impl ItemTx for PgTx<'_> {
         for (column, wanted) in [
             ("requester_owner", &f.owner),
             ("requester_key_id", &f.key_id),
+            ("agent_id", &f.agent_id),
         ] {
             if let Some(w) = wanted {
                 a.push(Box::new(w.clone()));
@@ -584,6 +612,7 @@ impl ItemTx for PgTx<'_> {
         let a: Vec<Arg> = vec![
             Box::new(row.ref_digest.clone()),
             Box::new(row.requester_key_id.clone()),
+            Box::new(row.agent_id.clone()),
             Box::new(row.lease_s),
             Box::new(row.until_at),
             Box::new(row.allow_custom as i64),
@@ -597,9 +626,9 @@ impl ItemTx for PgTx<'_> {
             Box::new(row.previous_id.clone()),
         ];
         self.run(
-            "INSERT INTO approval_intents (ref_digest, requester_key_id, lease_s, until_at, allow_custom, allow_ask_back,
+            "INSERT INTO approval_intents (ref_digest, requester_key_id, agent_id, lease_s, until_at, allow_custom, allow_ask_back,
                  body_kid, body_ct, body_size, expires_at, used_at, request_id, previous_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
             &a,
         )
         .await?;
@@ -620,7 +649,7 @@ impl ItemTx for PgTx<'_> {
         let rows = self
             .rows(
                 "SELECT requester_key_id, lease_s, until_at, allow_custom, allow_ask_back, body_kid, body_ct, body_size,
-                        expires_at, used_at, request_id, previous_id
+                        expires_at, used_at, request_id, previous_id, agent_id
                  FROM approval_intents WHERE ref_digest = $1",
                 &one(digest.to_string()),
             )
@@ -641,6 +670,7 @@ impl ItemTx for PgTx<'_> {
                 used_at: r.get(9),
                 request_id: r.get(10),
                 previous_id: r.get(11),
+                agent_id: r.get(12),
             }
         }))
     }
@@ -837,7 +867,8 @@ impl ItemTx for PgTx<'_> {
             .rows(
                 "SELECT body_kid, COUNT(*)::bigint FROM items WHERE body_ct IS NOT NULL AND body_kid IS NOT NULL GROUP BY body_kid
                  UNION ALL SELECT body_kid, COUNT(*)::bigint FROM turns WHERE payload_ct IS NOT NULL AND body_kid IS NOT NULL GROUP BY body_kid
-                 UNION ALL SELECT body_kid, COUNT(*)::bigint FROM approval_intents WHERE body_ct IS NOT NULL AND body_kid IS NOT NULL GROUP BY body_kid",
+                 UNION ALL SELECT body_kid, COUNT(*)::bigint FROM approval_intents WHERE body_ct IS NOT NULL AND body_kid IS NOT NULL GROUP BY body_kid
+                 UNION ALL SELECT hints_kid, COUNT(*)::bigint FROM agents WHERE hints_ct IS NOT NULL AND hints_kid IS NOT NULL GROUP BY hints_kid",
                 &[],
             )
             .await?;
@@ -848,7 +879,7 @@ impl ItemTx for PgTx<'_> {
         ))
     }
 
-    async fn purge_key(&mut self, kid: &str, now: i64) -> Result<(u64, u64, u64), DbError> {
+    async fn purge_key(&mut self, kid: &str, now: i64) -> Result<(u64, u64, u64, u64), DbError> {
         let items = self
             .run(
                 "UPDATE items SET body_ct = NULL, body_purged_at = $1 WHERE body_kid = $2 AND body_ct IS NOT NULL",
@@ -867,6 +898,12 @@ impl ItemTx for PgTx<'_> {
                 &one(kid.to_string()),
             )
             .await?;
-        Ok((items, turns, intents))
+        let agents = self
+            .run(
+                "UPDATE agents SET hints_ct = NULL WHERE hints_kid = $1 AND hints_ct IS NOT NULL",
+                &one(kid.to_string()),
+            )
+            .await?;
+        Ok((items, turns, intents, agents))
     }
 }

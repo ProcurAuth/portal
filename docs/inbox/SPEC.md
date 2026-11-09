@@ -264,6 +264,34 @@ The agent talks to the portal for everything except the command. The portal has 
 
 3.8.9 **[5.1.0]** The block `inbox.mcp` MUST give the path, the maximum wait, the allowed origins and the allowed client addresses. It MUST also give the rate limits and the size of the body. A contradiction in the block MUST stop the start (6.9.6).
 
+An agent is one program, or one conversation of a model, that asks. Several agents can share one key. The portal gives each agent a token, and the owner gives it a name. The requirements 3.8.10 to 3.8.22 are the rules for the agents of a key. They hold for `approval_intent` now and for `ask` in 5.2.0.
+
+3.8.10 **[5.1.0]** The portal MUST give a token that has the prefix `agt_` and 43 more characters. The database MUST keep the SHA-256 digest of the token and MUST NOT keep the token. The token MUST show once, in the result of the call that made the agent. A call MAY send the token in the header `Agent-Token` or in the argument `agent_token`. A call with both values that differ MUST get `422 agent_token_conflict`. A token in a query string MUST be refused.
+
+3.8.11 **[5.1.0]** A call that makes an item MUST be the only call that makes an agent. A read, a `say`, a `cancel` and a `supersede` MUST NOT make an agent or a row. A token that is unknown, of another key or of another owner MUST get the same error `422 agent_unknown`. A text that is not in the form of a token MUST get this error with no read of the database.
+
+3.8.12 **[5.1.0]** A read (`get_answer`, `keepalive`) MUST need the key only. A token on a read MUST be the agent of the item, else `403 agent_mismatch`. A write (`say`, `cancel`, `supersede`) on the item of a real agent MUST need the token (`422 agent_token_required`). The token MUST be the agent of the item. A write on an item of the bucket MUST need the key only.
+
+3.8.13 **[5.1.0]** The limits of a key (`max_per_key`, `new_per_hour`, the rate, the mute and the deny time) MUST be per key, never per agent. A call over `max_per_key` or `new_per_hour` MUST NOT fail. It MUST go to the bucket, with `agent_status` `unattributed` and no token. The portal MUST send one alert each hour and each key to the owner. The portal MUST count the limits in the transaction that inserts the agent.
+
+3.8.14 **[5.1.0]** Each key MUST have one bucket, the pseudo agent "Unattributed". The bucket MUST have no token. The owner MUST NOT name it, merge it, block it or lock it. A submission of a service with no `approval_ref` MUST go to the bucket of its key. The mode `key` MUST put all items in the bucket.
+
+3.8.15 **[5.1.0]** Only an action of the owner MUST set the name of an agent. A name MUST have 1 to 32 characters, no control character, no format character, no line separator and no white space at its ends. The portal MUST refuse a bad name and MUST NOT clean it. Two names of one key MUST differ after NFKC and lower case. Until the owner names an agent, the portal MUST show "<key name> #<ordinal>". The ordinal MUST be per key and MUST NOT be given twice.
+
+3.8.16 **[5.1.0]** With `inbox.agents.lock_new` true, the server MUST refuse `accept` for an item of a `new` agent until the owner allows the agent. The refusal MUST write nothing. A decline, a reply and a name MUST stay open. With `lock_new` false, a new agent MUST be allowed at once, and the owner MUST still get a notice. An item of the bucket MUST never be locked.
+
+3.8.17 **[5.1.0]** `previous_id` of `approval_intent` MUST name an item of the agent that the call gets, else `403 agent_mismatch`. A call that makes a new agent MUST NOT have a `previous_id`. `supersedes` of a submission MUST name an item of the same agent, else `422 invalid_argument`. The database transaction of the write MUST check the agent, so a race cannot cross two agents.
+
+3.8.18 **[5.1.0]** The service MUST NOT see the token, the id, the label or the hints of an agent. `approval_intent` MUST keep the agent in the row of the intent, and a submission that names the `approval_ref` MUST give its item to that agent. A blocked agent MUST have no live reference, so a submission that names one MUST get `422 invalid_argument`. When another agent asks for an effect that has an open request, the portal MUST give that request. The item MUST keep its first agent. The portal MUST write the event `also_requested` once for each other agent.
+
+3.8.19 **[5.1.0]** A key MUST have one mode: `key`, `discover` or `enrolled`. The mode `key` MUST ignore the token. The mode `enrolled` MUST refuse a call that makes an item and has no token (`422 agent_token_required`). Without the block `inbox.agents`, each key MUST act in the mode `key`.
+
+3.8.20 **[5.1.0]** The documents MUST say that a group of agents is not a sandbox. The agents of one key share the key. An approval stays bound to its effect and not to an agent. Another agent of the key can run the same effect with the same arguments.
+
+3.8.21 **[5.1.0]** An action of the owner on an agent (rename, allow, block, unblock and merge) MUST need the owner of the agent. An action on an agent of another owner MUST get the same answer as an unknown agent. Each action MUST be idempotent, MUST write one row in `agent_events` and MUST raise `rev`. A block MUST cancel the open items of the agent with the reason `agent_blocked` and MUST make its live intents dead. A merge MUST stay inside one key. It MUST move the items and the intents, and the token of the merged agent MUST give the target.
+
+3.8.22 **[5.1.0]** The portal MUST seal the hints of an agent (what it says, its client and its address range) with the content keys. An event of an agent MUST hold ids and numbers and MUST NOT hold a text that an agent sent. The sweeper MUST erase an agent that has no item, no live intent, no merged alias and no call for `inbox.agents.purge_after`. The command `content-purge` MUST erase the hints of a lost key.
+
 ### 3.9 Preferences
 
 Each account has two preferences: the digest and the quiet hours. They are in the database. Release: 5.1.0.
@@ -438,6 +466,8 @@ The agent is not trusted. Its text is shown with care. Release: 5.1.0.
 
 5.12.4 **[5.2.0]** A screen with a free text field MUST warn: "Do not enter a password or a secret. An agent reads this answer."
 
+5.12.6 **[5.1.0]** The text that an agent says about itself (`agent_label`), its client and its address range are not verified. A screen MUST show them in a box marked "Not verified" and MUST NOT use them as the title of an agent. The portal MUST refuse a label that has a control character or a format character. A screen MUST warn the owner when the label of a new agent equals the name of a known agent of the same key. The fold of 3.8.15 decides the equality.
+
 ## 6. Technical requirements
 
 6.1 The Inbox is a module of the one Rust binary `portal`. It uses Hyper for HTTP. It has no embedded front.
@@ -494,6 +524,8 @@ The blocks `inbox.items`, `inbox.at_rest`, `inbox.approvals` and `inbox.mcp` fol
 
 6.9.8 **[5.2.0]** The block `inbox.questions` MUST activate the questions. It needs `inbox.items` and `inbox.at_rest`. It has the key `max_options` with the range 2 to 12 and the default 8.
 
+6.9.9 **[5.1.0]** The block `inbox.agents` is optional. Its keys have the ranges and the defaults of the table of keys: `max_per_key` 16, `new_per_hour` 6, `lock_new` false, `idle_after` 14d and `purge_after` 365d. The block MUST need `inbox.items` and `inbox.at_rest`. `idle_after` above `purge_after` MUST stop the start. The error names the key, the range and the value.
+
 ### 6.10 Protocol 5
 
 6.10.1 **[5.1.0]** `PROTOCOL_VERSION` MUST be 5. The server MUST close the session of an older app with the code 4426. The protocol 5 has no compatibility with protocol 4.
@@ -502,7 +534,7 @@ The blocks `inbox.items`, `inbox.at_rest`, `inbox.approvals` and `inbox.mcp` fol
 
 6.10.3 **[5.1.0]** A frame MUST fit in one Noise message. The protocol MUST add no new cryptography. The body goes in clear inside the Noise session. No frame MUST go to a service.
 
-6.10.4 **[5.1.0]** The Inbox of 5.0.x has no table `items`. A database from 5.0.x MUST stop the start. The error names the table and points to the section "Upgrades" of the README. The base schema changes in place, and no migration exists.
+6.10.4 **[5.1.0]** The Inbox of 5.0.x has no table `items`, and a build of 5.1.0 before the agents has no table `agents`. A database of this kind MUST stop the start. The error names the table and points to the section "Upgrades" of the README. The base schema changes in place, and no migration exists.
 
 ### 6.11 Log, metrics and tests
 
@@ -586,6 +618,19 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.8.7 | 5.1.0 | L8, L10, A2 | L8: `frames::tests::the_line_from_never_holds_text_of_an_agent`. L10: `items_web_e2e::command_above_explanation_and_explanation_labelled_unverified` (the line from has the name of the key and the owner). A2: to fill |
 | 3.8.8 | 5.1.0 | L9 | `agent_channel::get_answer_renews_lease_without_budget_unit` (an item that the service made with `lease_s` and no intent), `approval_api_tests::pep_observation_unit` (L7) |
 | 3.8.9 | 5.1.0 | L9 | `config::tests::the_block_mcp_has_the_documented_defaults_and_the_set_values_apply`, `a_bad_key_of_the_block_mcp_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` |
+| 3.8.10 | 5.1.0 | G1a, G1b | G1a: `agents::tests::token_has_prefix_and_43_chars_and_only_digest_is_stored`, `a_text_of_another_form_is_not_a_token`. G1b: to fill (the header, the argument, the conflict, the query string) |
+| 3.8.11 | 5.1.0 | G1a, G1b | G1a: `agents_tests::no_token_on_a_read_never_creates_an_agent`, `resolve_unknown_foreign_key_and_foreign_owner_token_give_the_same_error`. G1b: to fill (the channel) |
+| 3.8.12 | 5.1.0 | G1a, G1b | G1a: `agents::tests::binding_a_read_goes_by_the_key_and_a_write_goes_by_the_agent`, `agents_tests::per_key_reads_vs_per_agent_writes_at_engine_level`. G1b: to fill (the tools and the routes) |
+| 3.8.13 | 5.1.0 | G1a | `agents_tests::cap_and_rate_are_counted_in_the_transaction_two_writers`, `over_cap_goes_to_bucket_without_token_and_alerts_once_per_hour`, `config::tests::agents_block_closed_schema_and_defaults` |
+| 3.8.14 | 5.1.0 | G1a | `agents_tests::resolve_mode_key_returns_bucket_and_ignores_token`, `bucket_cannot_be_named_merged_or_blocked`, `approval_api_tests::agent_binding::submission_without_intent_goes_to_the_bucket` |
+| 3.8.15 | 5.1.0 | G1a | `agents::tests::name_rules_refuse_control_bidi_zero_width_and_never_clean`, `agents_tests::name_unique_on_nfkc_lowercase_inside_the_key_only`, `ordinal_is_per_key_and_never_reused` |
+| 3.8.16 | 5.1.0 | G1a, G2, G3 | G1a: `agents_tests::accept_of_a_new_agent_is_agent_locked_but_decline_and_reply_work`, `lock_new_false_lets_a_new_agent_be_approved`. G2: to fill (the status `agent_locked` of the frame). G3: to fill (the web form) |
+| 3.8.17 | 5.1.0 | G1a | `agents_tests::a_chain_stays_inside_one_agent`, `approval_api_tests::agent_binding::supersedes_across_agents_is_invalid_argument`, `previous_id_of_another_agent_is_refused` |
+| 3.8.18 | 5.1.0 | G1a, G5 | G1a: `approval_api_tests::agent_binding::intent_with_token_gives_the_item_to_that_agent` (no answer to the service holds the token or the id), `blocked_agent_intent_ref_is_dead`, `same_effect_by_a_second_agent_returns_the_first_item_and_records_also_requested`. G5: to fill (the canary of 3.10.4) |
+| 3.8.19 | 5.1.0 | G1a, G1b | G1a: `agents_tests::without_the_block_every_mode_is_the_mode_key`, `resolve_mode_key_returns_bucket_and_ignores_token`, `no_token_on_a_read_never_creates_an_agent` (the mode `enrolled`), `agents::tests::modes_and_states_have_one_text_each`. G1b: to fill (the attribute of the key) |
+| 3.8.20 | 5.1.0 | G1b | to fill (`docs/inbox/agents.md`) |
+| 3.8.21 | 5.1.0 | G1a | `agents_tests::the_actions_are_for_the_owner_and_each_one_is_idempotent`, `merge_moves_items_and_intents_and_keeps_the_alias`, `merge_across_keys_refused`, `block_cancels_open_items_with_reason_agent_blocked_and_kills_intents`, `resolve_blocked_merged_follows_alias_one_hop` |
+| 3.8.22 | 5.1.0 | G1a | `agents_tests::the_hints_are_sealed_updated_when_they_change_and_never_in_an_event`, `rekey_and_key_purge_visit_the_hints`, `sweeper_purges_only_unreferenced_idle_agents` |
 | 3.9.1 | 5.1.0 | L11 | `items_tests::prefs_override_file_defaults_never_a_cap`, `prefs_e2e::prefs_page_refused_for_impersonated_session`, `prefs_e2e::set_prefs_from_phone_synced_to_page` |
 | 3.9.2 | 5.1.0 | L11 | `prefs_e2e::bad_timezone_name_refused_422_no_coercion`, `ui::prefs::tests::a_bad_value_is_the_error_with_its_field_and_nothing_is_changed`, `config::tests::the_digest_mode_decides_which_keys_apply` (a zone that the database does not hold) |
 | 3.9.3 | 5.1.0 | L11 | `items_tests::digest_two_instances_one_frame`, `items_tests::digest_empty_not_sent`, `approval_api_tests::prefs::digest_row_becomes_a_frame_with_numbers_only` |
@@ -640,6 +685,7 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 5.12.2 | 5.1.0 | L10, A2 | L10: `items_web_e2e::xss_bidi_control_zero_width_rendered_visible`, `ui::markdown_html::tests::a_command_has_a_span_for_each_line_and_marks_the_hidden_and_look_alike_characters`. A2: to fill |
 | 5.12.3 | 5.1.0 | L10 | `items_web_e2e::xss_bidi_control_zero_width_rendered_visible`, `ui::items::tests::the_explanation_folds_after_400_characters_and_markdown_has_its_tag` |
 | 5.12.4 | 5.2.0 | L14, A4 | to fill |
+| 5.12.6 | 5.1.0 | G1a, G1b, G3 | G1a: `agents::tests::says_with_hidden_characters_is_refused_and_equal_to_a_name_is_flagged`, `agents_tests::the_hints_are_sealed_updated_when_they_change_and_never_in_an_event`. G1b: to fill (`invalid_agent_label`). G3: to fill (the screens) |
 | 6.9.1 | 5.1.0 | L4 | `no_default_for_mandatory_keys_message_names_key_range_value`, `the_blocks_items_and_at_rest_give_typed_values_with_documented_defaults` |
 | 6.9.2 | 5.1.0 | L4 | `the_blocks_items_and_at_rest_give_typed_values_with_documented_defaults`, `no_default_for_mandatory_keys_message_names_key_range_value` |
 | 6.9.3 | 5.1.0 | L6, L7 | L6: `the_block_approvals_gives_typed_values_with_documented_defaults_and_the_flag_of_a_client`, `a_contradiction_of_the_approvals_stops_the_start_with_the_key_the_range_and_the_value` (`consume_within`, `evaluation_ttl`, `deny_cooldown`, the blocks `pdp` and `keys.mcp`). L7: `config::tests::the_keys_of_the_approval_api_have_the_documented_defaults_and_the_set_values_apply`, `a_bad_key_of_the_approval_api_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` |
@@ -648,10 +694,11 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 6.9.6 | 5.1.0 | L4, L6, L7, L9 | L4: `the_digest_mode_decides_which_keys_apply`, `the_blocks_items_and_at_rest_need_each_other`; L6 has no contradiction in this list. L7: `config::tests::a_bad_key_of_the_approval_api_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` (`max_command_bytes` above `pdp.max_body_bytes`, `require_explanation` with `max_explanation_chars = 0`). L9: `config::tests::a_bad_key_of_the_block_mcp_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` (`inbox.mcp` without `keys.mcp = true`, `max_wait` above `wait_max`, the path of the metrics) |
 | 6.9.7 | 5.1.0 | L4 | `print_config_masks_secret_shows_kid_and_source`, `plain_secret_in_file_stops_start` |
 | 6.9.8 | 5.2.0 | L13 | to fill |
+| 6.9.9 | 5.1.0 | G1a | `config::tests::agents_block_closed_schema_and_defaults`, `idle_after_above_purge_after_stops_the_start`, `agents_block_needs_items_and_at_rest` |
 | 6.10.1 | 5.1.0 | L3 | `old_hello_protocol_4_gets_4426`, `frames::old_hello_and_old_ack_do_not_parse` |
 | 6.10.2 | 5.1.0 | L3 | `frames::frames_round_trip_golden`, `frames::every_frame_rejects_unknown_field`, `frames::title_with_newline_or_control_rejected`. L8: `approve_on_phone_then_pdp_true_once`, `sync_reconciles_open_and_closed`, `frames::tests::a_digest_has_the_count_and_the_oldest_first_and_never_comes_empty` |
 | 6.10.3 | 5.1.0 | L3 | `frames::request_fits_one_noise_message_at_max_sizes`, `frames::encode_refuses_a_frame_above_one_noise_message` |
-| 6.10.4 | 5.1.0 | L5 | `old_inbox_schema_stops_start` |
+| 6.10.4 | 5.1.0 | L5, G1a | L5: `old_inbox_schema_stops_start`. G1a: `agents_tests::base_database_without_agents_table_stops_the_start` |
 | 6.11.1 | 5.1.0 | L5 | `the_journal_and_the_metrics_follow_the_names_of_the_specification` |
 | 6.11.2 | 5.1.0 | L5 | `ninety_days_are_simulated_without_a_pause_and_supersede_does_not_extend`; each test of `items_tests.rs` runs on SQLite and on PostgreSQL |
 | 6.11.3 | 5.1.0 | L12 | to fill |

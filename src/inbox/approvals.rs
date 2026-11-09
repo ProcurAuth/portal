@@ -13,6 +13,9 @@
 //! - One request is open for each effect (idempotence): a second submission gives the same id and renews nothing.
 //! - The creation limits (cap each hour, mute, deny time) run in the transaction of the creation, so two instances
 //!   cannot both pass them.
+//! - An item belongs to an agent (lot G1a). The intent resolves the agent of the call and keeps its id. A submission
+//!   that names the intent gives its item to that agent. A submission with no intent goes to the bucket of the key. A
+//!   chain (`previous_id`, `supersedes`) stays inside one agent.
 
 // The agent channel (`mcp_tools.rs`) calls `intent` and its types. Some other functions and fields are used by the tests only.
 #![allow(dead_code)]
@@ -23,6 +26,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use super::agents::{AgentCall, AgentError, Resolved};
 use super::items::{approval_key_hash, check_wait, Caller, Loaded, Wait, WaitError};
 use super::items_ops::{Guard, NewApproval, NewItem, Refused, Renewed, SupersedeOut};
 use super::items_store::{Created, ItemError, Items, NewIntent};
@@ -103,9 +107,22 @@ impl ApprovalError {
     }
 }
 
+impl From<AgentError> for ApprovalError {
+    /// The code and the status of the table of the channel: `agent_unknown`, `agent_blocked`, `agent_token_required`
+    /// and `agent_mismatch`.
+    fn from(e: AgentError) -> Self {
+        match e {
+            AgentError::Storage(e) => storage(e),
+            other => ApprovalError::new(other.status(), other.code()),
+        }
+    }
+}
+
 const NOT_FOUND: ApprovalError = ApprovalError::new(404, "not_found");
 const INVALID_ARGUMENT: ApprovalError = ApprovalError::new(422, "invalid_argument");
 const INVALID_LEASE: ApprovalError = ApprovalError::new(422, "invalid_lease");
+/// A `previous_id` that belongs to another agent (the table of the channel gives 403).
+const AGENT_MISMATCH: ApprovalError = ApprovalError::new(403, "agent_mismatch");
 
 fn storage(e: ItemError) -> ApprovalError {
     match e {
@@ -130,6 +147,9 @@ pub struct Requester {
     pub key_id: String,
     pub owner: String,
     pub interaction: Interaction,
+    /// What the call tells about its agent: the mode of the key, the token and the hints. The agent channel fills it
+    /// (lot G1b). `Default` is a key in the mode `key`: no token, the bucket of the key.
+    pub agent: AgentCall,
 }
 
 impl Requester {
@@ -223,54 +243,79 @@ pub async fn submit(app: &App, who: &Requester, s: Submission) -> Result<Submitt
         Control::UntilMs(at_ms) => check_control(Wait::Until { at_ms: *at_ms }, &items)?,
         Control::Reference(_) => {}
     }
-    // A second submission of an open request gives the same id. It renews nothing and replaces nothing.
+    // A second submission of an open request gives the same id. It renews nothing and replaces nothing. When the second
+    // submission comes from another agent, the item keeps its first agent and the event `also_requested` records the
+    // other one.
     if let Some(existing) = items.open_approval(&key_hash).await.map_err(storage)? {
+        let other = match &s.control {
+            Control::Reference(reference) => items
+                .read_intent(&ref_digest(reference), &who.key_id)
+                .await
+                .map_err(storage)?
+                .map(|intent| intent.agent_id),
+            _ => Some(
+                items
+                    .bucket(&who.key_id, &who.owner)
+                    .await
+                    .map_err(storage)?
+                    .agent_id,
+            ),
+        };
+        if let Some(other) = other.filter(|id| *id != existing.item.agent_id) {
+            items
+                .record_also_requested(&existing, &other)
+                .await
+                .map_err(storage)?;
+        }
         return Ok(submitted(&existing, false));
     }
     let digest = match &s.control {
         Control::Reference(reference) => Some(ref_digest(reference)),
         _ => None,
     };
-    let (wait, allow_custom, allow_ask_back, previous_id, explanation, hint, shape) = match &digest
-    {
-        Some(digest) => {
-            let Some(intent) = items
-                .read_intent(digest, &who.key_id)
-                .await
-                .map_err(storage)?
-            else {
-                return Err(INVALID_ARGUMENT);
-            };
-            let content: Value =
-                serde_json::from_slice(&intent.content).map_err(|_| INVALID_ARGUMENT)?;
-            (
-                intent.wait,
-                intent.allow_custom,
-                intent.allow_ask_back,
-                intent.previous_id,
-                content.get("explanation").cloned().filter(|v| !v.is_null()),
-                content.get("hint").cloned().filter(|v| !v.is_null()),
-                // How to show the texts: the format of the explanation and the language of the command.
-                ["explanation_format", "language"]
-                    .into_iter()
-                    .filter_map(|k| content.get(k).cloned().map(|v| (k, v)))
-                    .collect::<Vec<_>>(),
-            )
-        }
-        None => (
-            match s.control {
-                Control::LeaseSeconds(n) => Wait::Lease { lease_s: n },
-                Control::UntilMs(at_ms) => Wait::Until { at_ms },
-                Control::Reference(_) => unreachable!("a reference has a digest"),
-            },
-            false,
-            false,
-            None,
-            None,
-            None,
-            Vec::new(),
-        ),
-    };
+    let (agent_id, wait, allow_custom, allow_ask_back, previous_id, explanation, hint, shape) =
+        match &digest {
+            Some(digest) => {
+                let Some(intent) = items
+                    .read_intent(digest, &who.key_id)
+                    .await
+                    .map_err(storage)?
+                else {
+                    return Err(INVALID_ARGUMENT);
+                };
+                let content: Value =
+                    serde_json::from_slice(&intent.content).map_err(|_| INVALID_ARGUMENT)?;
+                (
+                    Some(intent.agent_id),
+                    intent.wait,
+                    intent.allow_custom,
+                    intent.allow_ask_back,
+                    intent.previous_id,
+                    content.get("explanation").cloned().filter(|v| !v.is_null()),
+                    content.get("hint").cloned().filter(|v| !v.is_null()),
+                    // How to show the texts: the format of the explanation and the language of the command.
+                    ["explanation_format", "language"]
+                        .into_iter()
+                        .filter_map(|k| content.get(k).cloned().map(|v| (k, v)))
+                        .collect::<Vec<_>>(),
+                )
+            }
+            // No intent: the request belongs to the bucket of the key. A service never names an agent.
+            None => (
+                None,
+                match s.control {
+                    Control::LeaseSeconds(n) => Wait::Lease { lease_s: n },
+                    Control::UntilMs(at_ms) => Wait::Until { at_ms },
+                    Control::Reference(_) => unreachable!("a reference has a digest"),
+                },
+                false,
+                false,
+                None,
+                None,
+                None,
+                Vec::new(),
+            ),
+        };
     if config.require_explanation && explanation.is_none() {
         return Err(ApprovalError::new(422, "explanation_required"));
     }
@@ -298,6 +343,7 @@ pub async fn submit(app: &App, who: &Requester, s: Submission) -> Result<Submitt
         allow_ask_back,
         idempotency_key: random_id(),
         previous_id,
+        agent_id,
         body_size: 0,
         approval: Some(NewApproval {
             service: s.service.clone(),
@@ -326,6 +372,8 @@ pub async fn submit(app: &App, who: &Requester, s: Submission) -> Result<Submitt
         Created::Repeat(l) => Ok(submitted(&l, false)),
         Created::Refused(Refused::Duplicate(l)) => Ok(submitted(&l, false)),
         Created::Conflict => Err(ApprovalError::new(503, "unavailable")),
+        // The agent of the intent was blocked or erased after the intent was read: the reference is dead.
+        Created::BadAgent | Created::AgentBlocked => Err(INVALID_ARGUMENT),
         Created::BadWait(e) => Err(wait_error(e)),
         Created::NoDevice => Err(ApprovalError::new(409, "no_device")),
         Created::TooMany(_) => Err(ApprovalError::rate_limited(RETRY_WHEN_FULL_MS)),
@@ -398,6 +446,8 @@ async fn supersede(
         // The old request is final and not consumed: nothing to withdraw.
         SupersedeOut::Closed(_) => items.create(new, body).await.map_err(storage),
         SupersedeOut::NotFound => Err(INVALID_ARGUMENT),
+        // A chain stays inside one agent. The code set of the PEP is frozen: the answer is `invalid_argument`.
+        SupersedeOut::AgentMismatch | SupersedeOut::BadAgent => Err(INVALID_ARGUMENT),
         SupersedeOut::ChainFull => Err(ApprovalError::rate_limited(RETRY_WHEN_FULL_MS)),
     }
 }
@@ -509,6 +559,9 @@ pub struct IntentIn {
 pub struct IntentOut {
     pub approval_ref: String,
     pub expires_at_ms: i64,
+    /// The agent of the call: its id, the `agent_status`, and the token when this call made the agent. The token is
+    /// shown once: the portal keeps its digest only.
+    pub agent: Resolved,
 }
 
 fn check_hint(hint: &Value) -> bool {
@@ -561,19 +614,37 @@ pub async fn intent(
     if input.hint.as_ref().is_some_and(|h| !check_hint(h)) {
         return Err(INVALID_ARGUMENT);
     }
+    // A `previous_id` must name a closed item of the same key and of the same agent as this call. A new agent has no
+    // item, so it can never borrow the thread of another. The check comes before the agent is made.
+    let mut previous_agent = None;
     if let Some(previous) = &input.previous_id {
         let found = items
             .get(previous, &Caller::Agent(who.key_id.clone()))
             .await
             .map_err(storage)?;
-        if found.is_none_or(|l| l.item.is_open()) {
+        let Some(found) = found.filter(|l| !l.item.is_open()) else {
             return Err(INVALID_ARGUMENT);
+        };
+        let target = items
+            .agent_target(&who.key_id, &who.owner, &who.agent)
+            .await?;
+        if target.as_deref() != Some(found.item.agent_id.as_str()) {
+            return Err(AGENT_MISMATCH);
         }
+        previous_agent = Some(found.item.agent_id);
     }
     if items.live_intents(&who.key_id).await.map_err(storage)?
         >= config.max_requests_per_key_per_hour as i64
     {
         return Err(ApprovalError::rate_limited(RETRY_WHEN_FULL_MS));
+    }
+    // The agent: found by the token, or made now. The last check of the call, so a refusal above makes no agent.
+    let agent = items
+        .resolve_agent(&who.key_id, &who.owner, &who.agent, true)
+        .await?
+        .ok_or(ApprovalError::new(503, "unavailable"))?;
+    if previous_agent.is_some_and(|id| id != agent.agent_id) {
+        return Err(AGENT_MISMATCH);
     }
     let reference = {
         use base64ct::{Base64UrlUnpadded, Encoding};
@@ -598,6 +669,7 @@ pub async fn intent(
         .create_intent(NewIntent {
             digest: &digest,
             key_id: &who.key_id,
+            agent_id: &agent.agent_id,
             wait,
             allow_custom: input.allow_custom,
             allow_ask_back: input.allow_ask_back,
@@ -610,5 +682,6 @@ pub async fn intent(
     Ok(IntentOut {
         approval_ref: reference,
         expires_at_ms,
+        agent,
     })
 }

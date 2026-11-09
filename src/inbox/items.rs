@@ -115,6 +115,8 @@ pub struct Rules {
     pub mute_after_refusals: u32,
     /// `inbox.approvals.mute_for`, in milliseconds.
     pub mute_for_ms: i64,
+    /// The limits and the lock of the agents of a key. Off without the block `inbox.agents`.
+    pub agents: super::agents::AgentRules,
 }
 
 impl Rules {
@@ -137,7 +139,14 @@ impl Rules {
             audit_retention_ms: ms(c.audit_retention),
             mute_after_refusals: 0,
             mute_for_ms: 0,
+            agents: super::agents::AgentRules::off(),
         }
+    }
+
+    /// The same rules with the values of the block `inbox.agents`.
+    pub fn with_agents(mut self, a: &crate::config::AgentsConfig) -> Rules {
+        self.agents = super::agents::AgentRules::from_config(a);
+        self
     }
 
     /// The same rules with the values of the block `inbox.approvals`.
@@ -233,6 +242,9 @@ pub struct ItemRow {
     pub previous_id: Option<String>,
     pub requester_key_id: String,
     pub requester_owner: String,
+    /// The agent of the item (lot G1a): a row of `agents` of the same key. The bucket of the key when no agent is
+    /// known. A merge moves the item to another agent, so this value can change.
+    pub agent_id: String,
     pub via: Via,
     pub interaction: Interaction,
     pub urgency: Urgency,
@@ -750,6 +762,14 @@ pub(crate) mod tests {
             audit_retention_ms: 365 * day,
             mute_after_refusals: 3,
             mute_for_ms: 3_600_000,
+            agents: crate::inbox::agents::AgentRules {
+                enabled: true,
+                max_per_key: 4,
+                new_per_hour: 3,
+                lock_new: false,
+                idle_after_ms: 14 * day,
+                purge_after_ms: 365 * day,
+            },
         }
     }
 
@@ -763,6 +783,7 @@ pub(crate) mod tests {
             previous_id: None,
             requester_key_id: "key".into(),
             requester_owner: "alice".into(),
+            agent_id: "agent".into(),
             via: Via::Mcp,
             interaction: Interaction::Conversational,
             urgency: Urgency::Normal,
