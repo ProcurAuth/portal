@@ -1,0 +1,7 @@
+{
+  "t": "answer_result",
+  "request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "client_msg_id": "m-0002",
+  "status": "agent_locked",
+  "state": "pending"
+}

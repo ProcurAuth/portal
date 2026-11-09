@@ -1,0 +1,15 @@
+{
+  "t": "agent",
+  "id": "ffffffffffffffffffffffffffffffff",
+  "agent_id": "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+  "rev": 1,
+  "key_name": "claude-laptop",
+  "kind": "bucket",
+  "state": "known",
+  "label": "Unattributed · claude-laptop",
+  "named": false,
+  "created_at_ms": 1787000000000,
+  "last_seen_ms": 1788000300000,
+  "open": 1,
+  "lock_accept": false
+}
