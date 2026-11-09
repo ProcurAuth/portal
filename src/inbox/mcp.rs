@@ -430,21 +430,27 @@ async fn message(
             if !tool_visible(app, who.interaction, name) {
                 return error(INVALID_PARAMS, "unknown tool");
             }
-            // The agent of the call: the token of the header, and the hints that the transport shows.
-            let outcome = match tools::with_transport(
-                who,
-                headers,
-                ip,
-                client_info(params).as_deref(),
-            ) {
-                Ok(who) => call_tool(app, config, &who, name, arguments).await,
-                Err(e) => Err(e),
-            };
+            // The agent of the call: the token of the header, and the hints that the transport shows. The call tells its
+            // agent for the log: the id of the agent, never the token.
+            let (outcome, agent) = tools::CALL_AGENT
+                .scope(std::cell::RefCell::new(None), async {
+                    let outcome = match tools::with_transport(
+                        who,
+                        headers,
+                        ip,
+                        client_info(params).as_deref(),
+                    ) {
+                        Ok(who) => call_tool(app, config, &who, name, arguments).await,
+                        Err(e) => Err(e),
+                    };
+                    (outcome, tools::CALL_AGENT.with(|cell| cell.borrow().clone()))
+                })
+                .await;
             let logged = match &outcome {
                 Ok(_) => "ok",
                 Err(e) => e.code,
             };
-            log::info!(event = "mcp_call", tool = name, key = %who.key_id, outcome = logged);
+            log::info!(event = "mcp_call", tool = name, key = %who.key_id, agent = %agent.as_deref().unwrap_or("-"), outcome = logged);
             ok(&tool_result(outcome))
         }
         _ => error(METHOD_NOT_FOUND, "method not found"),

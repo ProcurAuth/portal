@@ -970,6 +970,28 @@ fn the_agent_cases_a01_to_a09() {
         is_error && e["error"]["code"] == "agent_unknown",
         "A09 {e}: the token of another key is unknown"
     );
+
+    // A10: the log line of a call has the field `agent` with the id of the agent, and no log line holds a token.
+    let log = s.log();
+    let calls: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("\"event\":\"mcp_call\"") && l.contains("\"tool\":\"approval_intent\""))
+        .collect();
+    assert!(!calls.is_empty(), "A10");
+    let id_of = |line: &str| -> Option<String> {
+        let rest = line.split("\"agent\":\"").nth(1)?;
+        Some(rest.split('"').next()?.to_string())
+    };
+    let first_call = id_of(calls[0]).expect("A10: the field agent");
+    assert!(
+        first_call.len() == 32 && first_call.bytes().all(|b| b.is_ascii_hexdigit()),
+        "A10 {first_call}"
+    );
+    // A call with the token of the agent, and a call that its header makes, log the same id.
+    assert!(calls.iter().filter(|l| id_of(l).as_deref() == Some(first_call.as_str())).count() >= 4, "A10");
+    // A call that is refused before it has an agent logs `-`.
+    assert!(calls.iter().any(|l| id_of(l).as_deref() == Some("-")), "A10");
+    assert!(!log.contains(&token[4..]), "A10: a log line holds the token");
 }
 
 #[test]

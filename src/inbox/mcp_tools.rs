@@ -202,6 +202,17 @@ fn agent(who: &Requester) -> Caller {
 /// The name of the header that carries the token of an agent.
 pub const TOKEN_HEADER: &str = "agent-token";
 
+tokio::task_local! {
+    /// The id of the agent of the call that runs. The endpoint writes it in the field `agent` of its log line. It is an id
+    /// and never the token.
+    pub static CALL_AGENT: std::cell::RefCell<Option<String>>;
+}
+
+/// Tells the endpoint which agent the call belongs to. A call that runs outside the endpoint has no place for it.
+fn note_agent(id: &str) {
+    let _ = CALL_AGENT.try_with(|cell| *cell.borrow_mut() = Some(id.to_string()));
+}
+
 /// A hint from the transport is text that a client sent. It is bounded, and each control, format or line separator
 /// character becomes U+FFFD, so no hidden character reaches the store. An empty text is no hint.
 fn hint_text(raw: &str, max: usize) -> Option<String> {
@@ -303,6 +314,9 @@ async fn bound(
     let resolved = items
         .resolve_agent(&who.key_id, &who.owner, &who.agent, false)
         .await?;
+    if let Some(found) = &resolved {
+        note_agent(&found.agent_id);
+    }
     if resolved.is_none() && !write {
         return Ok(None);
     }
@@ -311,6 +325,9 @@ async fn bound(
         .await?
         .ok_or_else(AgentError::not_found)?;
     items.check_item_agent(&l, resolved.as_ref(), write).await?;
+    if resolved.is_none() {
+        note_agent(&l.item.agent_id);
+    }
     Ok(Some(l))
 }
 
@@ -859,6 +876,7 @@ pub async fn approval_intent(app: &App, who: &Requester, args: IntentArgs) -> Re
         },
     )
     .await?;
+    note_agent(&out.agent.agent_id);
     let now = Clock::now_ms(&*app.clock);
     let mut result = json!({
         "approval_ref": out.approval_ref,

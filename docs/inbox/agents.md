@@ -151,6 +151,8 @@ A read goes by the key. A write goes by the agent.
 
 The portal records hints about each agent: the label, the name of the client, the `User-Agent` and the address range of the client. The range is the first 24 bits of an IPv4 address, or the first 48 bits of an IPv6 address. The client name is `clientInfo` when the call has it, else the `User-Agent`. The portal seals the hints with the content keys. The owner sees them in a box "Not verified". Anyone who holds the key can send the same text, so the hints are no proof.
 
+The log line `mcp_call` has the field `agent` with the id of the agent, or `-` when the call has no agent. The portal never writes a token in a log, a metric or a trace.
+
 ### The mode of a key
 
 The mode is an attribute of the key. The owner sets it in the form of the key, when the file has the block `inbox.agents`. Without the block, each key acts as `key`.

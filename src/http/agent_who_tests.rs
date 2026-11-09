@@ -21,7 +21,16 @@ fn each(test: impl Fn(&Rig, &str)) {
 
 // ---------------------------------------------------------------- the calls
 
-/// A tool call with more headers. The result is the flag `isError`, the structured content and the reply.
+/// The codes of a refusal that a loaded machine can give for a moment: the shared database answers late.
+fn is_busy(code: Option<&str>) -> bool {
+    matches!(
+        code,
+        Some("storage_degraded" | "unavailable" | "replication_unavailable")
+    )
+}
+
+/// A tool call with more headers. The result is the flag `isError`, the structured content and the reply. A call that the
+/// storage refused for a moment is tried again a few times: the database of the test shares its server.
 fn call_h(
     r: &Rig,
     a: &Agent,
@@ -37,17 +46,27 @@ fn call_h(
     headers.extend_from_slice(extra);
     let body = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
                       "params": {"name": name, "arguments": args}});
-    let reply = send(r.node.port, "POST", "/mcp", &headers, &body.to_string());
-    assert_eq!(reply.status, 200, "{}", reply.body);
-    let result = &reply.json()["result"];
-    let text = result["content"][0]["text"].as_str().expect("a text");
-    let parsed: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(parsed, result["structuredContent"], "{text}");
-    (
-        result["isError"] == true,
-        result["structuredContent"].clone(),
-        reply,
-    )
+    let mut attempt = 0;
+    loop {
+        let reply = send(r.node.port, "POST", "/mcp", &headers, &body.to_string());
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        let result = &reply.json()["result"];
+        let text = result["content"][0]["text"].as_str().expect("a text");
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed, result["structuredContent"], "{text}");
+        let busy = result["isError"] == true
+            && is_busy(parsed["error"]["code"].as_str());
+        attempt += 1;
+        if busy && attempt < 12 {
+            std::thread::sleep(Duration::from_millis(400));
+            continue;
+        }
+        return (
+            result["isError"] == true,
+            result["structuredContent"].clone(),
+            reply,
+        );
+    }
 }
 
 fn ok_h(r: &Rig, a: &Agent, extra: &[(&str, &str)], name: &str, args: Value) -> Value {
@@ -76,7 +95,15 @@ fn rest_h(
         ("Authorization", auth.as_str()),
     ];
     headers.extend_from_slice(extra);
-    send(r.node.port, method, path, &headers, body)
+    let mut reply = send(r.node.port, method, path, &headers, body);
+    for _ in 0..11 {
+        if reply.status != 503 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(400));
+        reply = send(r.node.port, method, path, &headers, body);
+    }
+    reply
 }
 
 fn intent_args() -> Value {
@@ -98,11 +125,21 @@ fn agent_rows(r: &Rig) -> i64 {
 
 /// The item that the service makes with the reference of an intent.
 fn item_of(r: &Rig, a: &Agent, n: u32, intent: &Value) -> String {
-    let created = r.submit_with(
-        &a.subject,
-        n,
-        json!({"approval_ref": intent["approval_ref"]}),
-    );
+    let make = || {
+        r.submit_with(
+            &a.subject,
+            n,
+            json!({"approval_ref": intent["approval_ref"]}),
+        )
+    };
+    let mut created = make();
+    for _ in 0..11 {
+        if created.status != 503 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(400));
+        created = make();
+    }
     assert_eq!(created.status, 201, "{}", created.body);
     created.id()
 }
@@ -112,10 +149,7 @@ fn agent_of(r: &Rig, id: &str) -> String {
 }
 
 fn agent_row(r: &Rig, agent_id: &str) -> crate::inbox::agents::AgentRow {
-    runtime()
-        .block_on(r.items().agent(agent_id))
-        .unwrap()
-        .unwrap()
+    eventually(|| runtime().block_on(r.items().agent(agent_id))).expect("the agent")
 }
 
 /// What the portal remembers of the hints of an agent.
@@ -126,19 +160,17 @@ fn observed_of(r: &Rig, agent_id: &str) -> crate::inbox::agents::Observed {
 }
 
 fn events_of(r: &Rig, agent_id: &str) -> Vec<String> {
-    runtime()
-        .block_on(r.items().agent_events(agent_id, 50))
-        .unwrap()
+    eventually(|| runtime().block_on(r.items().agent_events(agent_id, 50)))
         .into_iter()
         .map(|e| e.event)
         .collect()
 }
 
 fn owner_op(r: &Rig, agent_id: &str, op: AgentOp) {
-    let done = runtime()
-        .block_on(r.items().agent_op(OWNER, agent_id, op, "web"))
-        .unwrap()
-        .unwrap();
+    let done = eventually(|| {
+        runtime().block_on(r.items().agent_op(OWNER, agent_id, op.clone(), "web"))
+    })
+    .unwrap();
     assert!(done.changed);
 }
 
@@ -1156,7 +1188,7 @@ fn hints_recorded() {
         assert_eq!(seen.nets_seen(), 1, "[{name}]");
         // The label shows on the item, as text that is not verified, in the sealed body.
         let loaded = r.loaded(&id);
-        let body = runtime().block_on(r.items().serve_body(&loaded)).unwrap();
+        let body = eventually(|| runtime().block_on(r.items().serve_body(&loaded)));
         let crate::inbox::testing::Served::Body(plain) = body else {
             panic!("[{name}] no body")
         };
