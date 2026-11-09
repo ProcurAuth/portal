@@ -35,6 +35,20 @@ class TalkBackLabelTest {
     }
 
     @Test
+    fun aRowNamesThePortalFirstAndSaysWhyAPortalIsDown() {
+        val label = TalkBackLabels.itemRow(approval(), created + 3 * 3_600_000, "Production", "Offline 3 h. answer waits")
+        assertTrue(label.startsWith("Portal Production. Approval K7QF from claude-laptop"))
+        assertTrue(label.endsWith(". Offline 3 h. answer waits"))
+        assertFalse(TalkBackLabels.itemRow(approval(), created).startsWith("Portal"))
+    }
+
+    @Test
+    fun aHiddenCharacterInThePortalNameShowsAsAMarkInTheLabel() {
+        val label = TalkBackLabels.itemRow(approval(), created, "Pr\u202Eod")
+        assertTrue(label.startsWith("Portal Pr<U+202E>od. "))
+    }
+
+    @Test
     fun aQuestionRowSaysTheChoicesAndTheAgeInFullWords() {
         engine.onRequest(server, Make.question(rid, Make.hex(2), createdAtMs = created) { it.put("agent_seen_at_ms", created + 6 * day - 180_000) })
         val label = TalkBackLabels.itemRow(repo.item(server, rid)!!, created + 6 * day)
