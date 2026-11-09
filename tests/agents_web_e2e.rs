@@ -17,7 +17,7 @@ use common::approvals::{command, hidden_in, item_path, Pep, INBOX, OWNER};
 use common::{http_full, users_csrf};
 use hmac::{Hmac, Mac};
 use serde_json::json;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 const ANSWER: &str = "/auth/settings/inbox/items/answer";
 const AGENTS: &str = "/auth/settings/inbox/agents";
@@ -1139,6 +1139,504 @@ fn pages_of_the_agents_never_name_the_product_and_carry_no_store() {
     }
     // The superadmin has no agent: the list is empty, and the agents of dana are not found.
     assert_eq!(pep.page(&root, &format!("{AGENTS}/{a1}")).0, 404);
+}
+
+// The mode `enrolled` (lot G6) -------------------------------------------------------------------------
+
+const ENROLL: &str = "/auth/settings/inbox/agents/enroll";
+const RESET: &str = "/auth/settings/inbox/agents/reset";
+
+/// A server whose key is in the mode `enrolled`. `max` is `inbox.agents.max_per_key`.
+fn enrolled_rig(max: u32) -> Pep {
+    Pep::with_mode(
+        |s| {
+            s.add_to_inbox(&format!(
+                "  agents {{ lock_new = true max_per_key = {max} }}"
+            ));
+        },
+        Some("enrolled"),
+    )
+}
+
+/// The value of the input `id` of a page.
+fn input_value(page: &str, id: &str) -> String {
+    let marker = format!("id=\"{id}\" type=\"text\" readonly value=\"");
+    let at = page.find(&marker).unwrap_or_else(|| panic!("no {id}")) + marker.len();
+    common::unescape(page[at..].split('"').next().unwrap())
+}
+
+/// A call of the agent that makes an item. The result is the flag `isError` and the answer.
+fn intent_with(pep: &Pep, token: Option<&str>) -> (bool, serde_json::Value) {
+    pep.tool_as(token, UA, "approval_intent", json!({"lease_s": 600}))
+}
+
+#[test]
+fn enrolled_cycle_enroll_call_with_and_without_the_token_reset_old_token_dead_new_works() {
+    let pep = enrolled_rig(8);
+    let cookie = pep.cookie(OWNER);
+    // The list has the form "Add agent" with the key of the owner, and no agent.
+    let (st, _, list) = pep.page(&cookie, AGENTS);
+    assert_eq!(st, 200);
+    assert!(list.contains(&format!("action=\"{ENROLL}\"")), "{list}");
+    assert!(list.contains(&format!("<option value=\"{}\">{KEY}</option>", pep.key_id)));
+    assert!(text(&list).contains("shows it one time"));
+    // A call with no token is refused. It makes no agent.
+    let (is_error, e) = intent_with(&pep, None);
+    assert!(
+        is_error && e["error"]["code"] == "agent_token_required",
+        "{e}"
+    );
+    assert_eq!(
+        pep.s
+            .scalar("SELECT COUNT(*) FROM agents WHERE kind = 'agent'"),
+        Some("0".into())
+    );
+
+    // Enroll: the page shows the token one time, in a box with a copy button, and the header line.
+    let (st, head, page) = pep.enroll_via_web(&cookie, "Refund cleaner");
+    assert_eq!(st, 200, "{page}");
+    assert_eq!(
+        common::approvals::header_of(&head, "cache-control").as_deref(),
+        Some("no-store")
+    );
+    let referrer = common::approvals::header_of(&head, "referrer-policy").unwrap_or_default();
+    assert!(
+        referrer == "same-origin" || referrer == "no-referrer",
+        "{referrer}"
+    );
+    let token = Pep::token_of(&page);
+    assert!(token.starts_with("agt_") && token.len() == 47, "{token}");
+    assert_eq!(
+        input_value(&page, "agent-header"),
+        format!("Agent-Token: {token}")
+    );
+    assert!(
+        page.contains("data-copy=\"agent-token\"") && page.contains("data-copy=\"agent-header\"")
+    );
+    let t = text(&page);
+    for needle in [
+        "Refund cleaner",
+        "shows it one time",
+        "Copy its token now",
+        "agent_token",
+        "A call with no token, or with a wrong token, is refused.",
+    ] {
+        assert!(t.contains(needle), "{needle} is not in {t}");
+    }
+    for word in ["portal", "inbox", "inbox", "circular"] {
+        assert!(!Pep::text_of(&page).contains(word), "the word {word}");
+    }
+    assert!(!page.contains("<script>"));
+    // The row: known, made by the owner, named, with a digest and no token.
+    let row = |col: &str| {
+        pep.s.scalar(&format!(
+            "SELECT {col} FROM agents WHERE kind = 'agent' AND name = 'Refund cleaner'"
+        ))
+    };
+    assert_eq!(row("state"), Some("known".into()));
+    assert_eq!(row("origin"), Some("owner".into()));
+    let id = row("agent_id").unwrap();
+    assert_ne!(row("token_digest").unwrap(), token);
+    assert_eq!(row("token_digest").unwrap().len(), 64);
+
+    // The call with the token works as that agent. It is known: no notice, no lock, no first-use text.
+    let first = pep.agent_request(
+        Some(&token),
+        UA,
+        &command(1),
+        json!({"agent_label": "refunds"}),
+    );
+    assert_eq!(first.status, "known", "{first:?}");
+    assert_eq!(agent_of(&pep, &first.request_id), id);
+    let (_, _, inbox) = pep.page(&cookie, INBOX);
+    assert!(
+        inbox.contains("<span class=\"agrp__name\">Refund cleaner</span>"),
+        "{inbox}"
+    );
+    assert!(!inbox.contains("firstuse") && !inbox.contains("A new agent is using"));
+    assert!(!text(&inbox).contains("Approve is locked"));
+    // The owner can approve at once, although `lock_new` is on: the agent never was new.
+    let (st, head, _) = pep.answer_form(&cookie, &first.request_id, "accept", "");
+    assert_eq!(st, 303, "{head}");
+    assert_eq!(pep.verdict(&first.request_id)["verdict"], "approved");
+    // A call with no token, and a call with a token of another form or another agent, are refused.
+    let (is_error, e) = intent_with(&pep, None);
+    assert!(
+        is_error && e["error"]["code"] == "agent_token_required",
+        "{e}"
+    );
+    let (is_error, e) = intent_with(&pep, Some("agt_not-a-token"));
+    assert!(is_error && e["error"]["code"] == "agent_unknown", "{e}");
+    // The agent page has the button "Reset token" and the warning.
+    let (st, _, agent_page) = pep.page(&cookie, &format!("{AGENTS}/{id}"));
+    assert_eq!(st, 200);
+    assert!(agent_page.contains(&format!("action=\"{RESET}\"")));
+    assert_eq!(hidden_in(&agent_page, RESET, "agent_id"), id);
+    let t = text(&agent_page);
+    assert!(t.contains("Reset token") && t.contains("The old token stops at once."));
+    assert!(t.contains(&format!("Added by {OWNER}")), "{t}");
+
+    // Reset: the page shows the new token one time. The old token is dead at once.
+    let (st, head, page) = pep.reset_via_web(&cookie, &id);
+    assert_eq!(st, 200, "{page}");
+    assert_eq!(
+        common::approvals::header_of(&head, "cache-control").as_deref(),
+        Some("no-store")
+    );
+    let fresh = Pep::token_of(&page);
+    assert_ne!(fresh, token);
+    assert!(text(&page).contains("The old token stopped at once"));
+    let (is_error, e) = intent_with(&pep, Some(&token));
+    assert!(
+        is_error && e["error"]["code"] == "agent_unknown",
+        "the old token: {e}"
+    );
+    let second = pep.agent_request(Some(&fresh), UA, &command(2), json!({}));
+    assert_eq!(second.status, "known");
+    assert_eq!(
+        agent_of(&pep, &second.request_id),
+        id,
+        "the same agent after the reset"
+    );
+    // The agent keeps its name, its state and its request.
+    let (_, _, agent_page) = pep.page(&cookie, &format!("{AGENTS}/{id}"));
+    let t = text(&agent_page);
+    assert!(t.contains("Refund cleaner") && t.contains("Known"));
+    assert!(
+        t.contains("Token reset by") && t.contains("The old token stopped at once."),
+        "{t}"
+    );
+
+    // The tokens are on no other page, in no history, in no event, in no row of the database and in no log line.
+    for path in [
+        INBOX.to_string(),
+        AGENTS.to_string(),
+        format!("{AGENTS}/{id}"),
+        item_path(&first.request_id),
+        item_path(&second.request_id),
+        format!("{INBOX}/items"),
+        format!("{INBOX}/items?agent={id}"),
+        "/auth/settings".to_string(),
+    ] {
+        let (_, head, page) = pep.page(&cookie, &path);
+        for t in [&token, &fresh] {
+            assert!(!page.contains(&t[4..]), "{path} holds a token");
+        }
+        assert!(!head.contains(&token[4..]));
+    }
+    let database = pep.s.database_text();
+    let log = pep.s.log();
+    for t in [&token, &fresh] {
+        assert!(!database.contains(&t[4..]), "the database holds a token");
+        assert!(!log.contains(&t[4..]), "a log line holds a token");
+    }
+    assert!(log.contains("\"event\":\"agent_enrolled\""));
+    assert!(log.contains("\"op\":\"reset_token\""));
+    // The events hold ids and numbers. The reset has no detail.
+    assert_eq!(
+        pep.s.scalar(&format!(
+            "SELECT COUNT(*) FROM agent_events WHERE agent_id = '{id}' AND event = 'token_reset' AND detail IS NULL AND actor = '{OWNER}'"
+        )),
+        Some("1".into())
+    );
+}
+
+#[test]
+fn the_service_at_the_end_of_the_chain_never_sees_the_token_of_an_enrolled_agent() {
+    let pep = enrolled_rig(8);
+    let cookie = pep.cookie(OWNER);
+    let (_, _, page) = pep.enroll_via_web(&cookie, "Refund cleaner");
+    let token = Pep::token_of(&page);
+    // The agent calls with the token in the header and in the argument; the service asks the PDP and submits the request.
+    // What the service reads in each answer holds no token, no `agt_` and no word of the agents.
+    let (is_error, intent) = pep.tool_as(
+        Some(&token),
+        UA,
+        "approval_intent",
+        json!({"lease_s": 600, "agent_label": "canary-label-7c1e", "agent_token": token}),
+    );
+    assert!(!is_error, "{intent}");
+    assert_eq!(intent["agent_status"], "known");
+    let reference = intent["approval_ref"].as_str().unwrap();
+    let evaluation = pep.evaluation(&command(5).effect, false).to_string();
+    let reply = pep.submit_with(&command(5), json!({"approval_ref": reference}));
+    assert!(reply.status == 200 || reply.status == 201, "{}", reply.body);
+    let verdict = pep
+        .verdict(reply.json()["request_id"].as_str().unwrap())
+        .to_string();
+    for seen in [evaluation, reply.body.clone(), verdict] {
+        for needle in [
+            &token[4..],
+            "agt_",
+            "canary-label-7c1e",
+            "Refund cleaner",
+            "agent_token",
+            "agent_id",
+        ] {
+            assert!(!seen.contains(needle), "the service saw {needle:?}: {seen}");
+        }
+    }
+}
+
+#[test]
+fn also_asked_by_names_the_other_agents_that_asked_the_same_effect_with_text_of_the_server() {
+    let pep = enrolled_rig(8);
+    let cookie = pep.cookie(OWNER);
+    let enroll = |name: &str| {
+        let (st, _, page) = pep.enroll_via_web(&cookie, name);
+        assert_eq!(st, 200, "{page}");
+        Pep::token_of(&page)
+    };
+    let (ta, tb, tc) = (
+        enroll("Night ETL"),
+        enroll("Report writer"),
+        enroll("Third one"),
+    );
+    let first = pep.agent_request(
+        Some(&ta),
+        UA,
+        &command(9),
+        json!({"agent_label": "etl-says"}),
+    );
+    // Two other agents ask for the same effect while the request is open. They get the same request.
+    let by_b = pep.agent_request(
+        Some(&tb),
+        UA,
+        &command(9),
+        json!({"agent_label": "SNEAKY-<b>says</b>"}),
+    );
+    let by_c = pep.agent_request(
+        Some(&tc),
+        UA,
+        &command(9),
+        json!({"agent_label": "third-says"}),
+    );
+    assert_eq!(
+        (&by_b.request_id, &by_c.request_id),
+        (&first.request_id, &first.request_id)
+    );
+    let (st, _, page) = pep.page(&cookie, &item_path(&first.request_id));
+    assert_eq!(st, 200);
+    assert!(page.contains("class=\"sender__also\""), "{page}");
+    let t = text(&page);
+    assert!(t.contains("Also asked by Report writer, Third one"), "{t}");
+    // The sender stays the first agent. The text of the other agents is on no part of the page.
+    assert!(t.contains("Night ETL"));
+    assert!(page.contains("etl-says"));
+    for words in ["SNEAKY", "third-says"] {
+        assert!(!page.contains(words), "{words} is on the page");
+    }
+    // The names link to the agent pages of the owner.
+    let id_of = |name: &str| {
+        pep.s
+            .scalar(&format!(
+                "SELECT agent_id FROM agents WHERE name = '{name}'"
+            ))
+            .unwrap()
+    };
+    assert!(page.contains(&format!(
+        "href=\"{AGENTS}/{}\">Report writer</a>",
+        id_of("Report writer")
+    )));
+    // A request that nobody else asked for has no line.
+    let alone = pep.agent_request(Some(&ta), UA, &command(10), json!({}));
+    let (_, _, page) = pep.page(&cookie, &item_path(&alone.request_id));
+    assert!(!page.contains("sender__also") && !text(&page).contains("Also asked by"));
+}
+
+#[test]
+fn enroll_and_reset_need_csrf_origin_the_owner_and_a_key_in_the_mode_enrolled() {
+    let pep = enrolled_rig(2);
+    let cookie = pep.cookie(OWNER);
+    let (side_id, _) = pep.make_key_in_mode("side-key", "discover");
+    let (st, _, page) = pep.enroll_via_web(&cookie, "Mine");
+    assert_eq!(st, 200, "{page}");
+    let id = pep
+        .s
+        .scalar("SELECT agent_id FROM agents WHERE name = 'Mine'")
+        .unwrap();
+    let csrf = csrf_of(&pep, &cookie);
+    let enroll_fields = format!("key={}&name=Other", pep.key_id);
+    let reset_fields = format!("agent_id={id}");
+    for (action, fields) in [(ENROLL, &enroll_fields), (RESET, &reset_fields)] {
+        assert_eq!(
+            pep.post(&cookie, action, "", fields, None).0,
+            403,
+            "{action}"
+        );
+        assert_eq!(pep.post(&cookie, action, "wrong", fields, None).0, 403);
+        assert_eq!(pep.post(&cookie, action, &csrf, fields, Some("")).0, 403);
+        assert_eq!(
+            pep.post(&cookie, action, &csrf, fields, Some("http://evil.example"))
+                .0,
+            403
+        );
+        assert_eq!(pep.page(&cookie, action).0, 405, "a GET is not a page");
+        assert_eq!(
+            pep.post(&cookie, action, &csrf, &format!("{fields}&extra=1"), None)
+                .0,
+            400
+        );
+    }
+    assert_eq!(pep.post(&cookie, ENROLL, &csrf, "name=x", None).0, 400);
+    assert_eq!(
+        pep.post(&cookie, RESET, &csrf, "agent_id=short", None).0,
+        400
+    );
+    // Nothing changed after the refusals: one agent.
+    let count = || {
+        pep.s
+            .scalar("SELECT COUNT(*) FROM agents WHERE kind = 'agent'")
+    };
+    assert_eq!(count(), Some("1".into()));
+
+    // The session of "Log in as" reads no form and acts on none.
+    let as_dana = impersonate(&pep, OWNER);
+    let icsrf = csrf_of(&pep, &as_dana);
+    assert_eq!(
+        pep.post(&as_dana, ENROLL, &icsrf, &enroll_fields, None).0,
+        403
+    );
+    assert_eq!(
+        pep.post(&as_dana, RESET, &icsrf, &reset_fields, None).0,
+        403
+    );
+    assert_eq!(count(), Some("1".into()));
+
+    // Another owner: the key, the agent and the pages are the same as unknown ones.
+    let erin = other_owner(&pep, "erin");
+    let ecsrf = csrf_of(&pep, &erin);
+    let (st, _, foreign) = pep.post(&erin, ENROLL, &ecsrf, &enroll_fields, None);
+    let (st_unknown, _, unknown) = pep.post(
+        &erin,
+        ENROLL,
+        &ecsrf,
+        &format!("key={}&name=Other", "9".repeat(32)),
+        None,
+    );
+    assert_eq!((st, st_unknown), (422, 422));
+    assert!(text(&foreign).contains("Choose a key in the mode Enrolled."));
+    assert!(!foreign.contains("id=\"agent-token\"") && !unknown.contains("id=\"agent-token\""));
+    let (st, head, _) = pep.post(&erin, RESET, &ecsrf, &reset_fields, None);
+    assert_eq!(st, 303, "{head}");
+    assert!(head.contains("s=agent_gone"), "{head}");
+    let (st_missing, head_missing, _) = pep.post(
+        &erin,
+        RESET,
+        &ecsrf,
+        &format!("agent_id={}", "8".repeat(32)),
+        None,
+    );
+    assert_eq!(
+        (st_missing, head_missing.contains("s=agent_gone")),
+        (303, true)
+    );
+    assert_eq!(count(), Some("1".into()));
+    // Erin has no key in the mode `enrolled`: her list has no form.
+    assert!(!pep.page(&erin, AGENTS).2.contains(ENROLL));
+    // The old token of Mine still works: the foreign reset changed nothing.
+    let digest = pep
+        .s
+        .scalar(&format!(
+            "SELECT token_digest FROM agents WHERE agent_id = '{id}'"
+        ))
+        .unwrap();
+    let token = Pep::token_of(&page);
+    assert_eq!(digest, hex(&Sha256::digest(token.as_bytes())));
+
+    // A key of another mode of the owner: the same answer as an unknown key.
+    let (st, _, page) = pep.post(
+        &cookie,
+        ENROLL,
+        &csrf,
+        &format!("key={side_id}&name=Nope"),
+        None,
+    );
+    assert_eq!(st, 422, "{page}");
+    assert!(text(&page).contains("Choose a key in the mode Enrolled."));
+    // The name rules of a rename apply, and the cap of the key applies (here two agents).
+    for bad in ["", "%20x", "a%09b", "a%E2%80%AEb", "x%E2%80%8Bx"] {
+        let (st, _, page) = pep.post(
+            &cookie,
+            ENROLL,
+            &csrf,
+            &format!("key={}&name={bad}", pep.key_id),
+            None,
+        );
+        assert_eq!(st, 422, "{bad}");
+        assert!(
+            text(&page).contains("A name has 1 to 32 characters"),
+            "{bad}"
+        );
+    }
+    let (st, _, page) = pep.post(
+        &cookie,
+        ENROLL,
+        &csrf,
+        &format!("key={}&name=MINE", pep.key_id),
+        None,
+    );
+    assert_eq!(st, 422);
+    assert!(text(&page).contains("Another agent of this key has this name"));
+    // The refused name comes back in the form.
+    assert!(page.contains("value=\"MINE\""));
+    let (st, _, _) = pep.post(
+        &cookie,
+        ENROLL,
+        &csrf,
+        &format!("key={}&name=Second", pep.key_id),
+        None,
+    );
+    assert_eq!(st, 200);
+    let (st, _, page) = pep.post(
+        &cookie,
+        ENROLL,
+        &csrf,
+        &format!("key={}&name=Third", pep.key_id),
+        None,
+    );
+    assert_eq!(st, 409, "{page}");
+    assert!(text(&page).contains("the most agents that the file allows"));
+    assert_eq!(count(), Some("2".into()));
+}
+
+#[test]
+fn a_key_that_is_not_enrolled_has_no_form_add_agent_and_no_reset() {
+    let pep = enabled(false);
+    let cookie = pep.cookie(OWNER);
+    let Trio { a1, .. } = trio(&pep);
+    let (_, _, list) = pep.page(&cookie, AGENTS);
+    assert!(!list.contains(ENROLL) && !text(&list).contains("Add agent"));
+    let (_, _, page) = pep.page(&cookie, &format!("{AGENTS}/{a1}"));
+    assert!(!page.contains(RESET) && !text(&page).contains("Reset token"));
+    // The server refuses the forms too.
+    let csrf = csrf_of(&pep, &cookie);
+    let (st, _, page) = pep.post(
+        &cookie,
+        ENROLL,
+        &csrf,
+        &format!("key={}&name=Mine", pep.key_id),
+        None,
+    );
+    assert_eq!(st, 422, "{page}");
+    assert!(!page.contains("id=\"agent-token\""));
+    // An agent that a call made has no token to reset, and a key that is not enrolled does not reset any.
+    let (st, _, page) = pep.post(&cookie, RESET, &csrf, &format!("agent_id={a1}"), None);
+    assert_eq!(st, 409, "{page}");
+    assert!(!page.contains("id=\"agent-token\""));
+    // Without the block `inbox.agents` the form does not exist.
+    let plain = Pep::new();
+    let cookie = plain.cookie(OWNER);
+    assert_eq!(plain.page(&cookie, AGENTS).0, 404);
+    let csrf = csrf_of(&plain, &cookie);
+    let (st, _, _) = plain.post(
+        &cookie,
+        ENROLL,
+        &csrf,
+        &format!("key={}&name=Mine", plain.key_id),
+        None,
+    );
+    assert_eq!(st, 403);
 }
 
 // The eyes --------------------------------------------------------------------------------------------

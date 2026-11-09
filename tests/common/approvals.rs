@@ -151,6 +151,12 @@ impl Pep {
 
     /// The same, after `tweak` changed the files of the server and before it starts.
     pub fn with(tweak: impl FnOnce(&Server)) -> Pep {
+        Pep::with_mode(tweak, None)
+    }
+
+    /// The same, with the mode of the agents of the key of the rig (`Some("enrolled")`). The field exists only when the file has
+    /// the block `inbox.agents`, so `tweak` adds the block.
+    pub fn with_mode(tweak: impl FnOnce(&Server), agents: Option<&str>) -> Pep {
         let mut s = Server::setup();
         // The test phones send no heartbeat: the session must outlive the pauses of the test.
         let text = std::fs::read_to_string(s.config())
@@ -226,12 +232,12 @@ discovery {{
             key_id: String::new(),
             key_text: String::new(),
         };
-        pep.make_owner_and_key();
+        pep.make_owner_and_key(agents);
         pep
     }
 
     /// The owner, with the grants on the service `db`, and its agent key.
-    fn make_owner_and_key(&mut self) {
+    fn make_owner_and_key(&mut self, agents: Option<&str>) {
         let s = &self.s;
         users_form(
             s,
@@ -287,8 +293,9 @@ discovery {{
         let start = form + page[form..].find(marker).unwrap() + marker.len();
         let csrf = page[start..].split('"').next().unwrap().to_string();
         let body = format!(
-            "csrf={csrf}&kind=mcp&name=agent-laptop&expires_at=&interaction=conversational\
+            "csrf={csrf}&kind=mcp&name=agent-laptop&expires_at=&interaction=conversational{}\
              &grant0={}&grant1={}&confirm1=1",
+            agents.map_or(String::new(), |m| format!("&agents={m}")),
             form_value("access on service:db"),
             form_value(&format!("data.write on service:db/{RESOURCE}")),
         );
@@ -321,6 +328,64 @@ discovery {{
         let head = &list[..at];
         let id = head.rfind("title=\"Id ").expect("the id of the key") + "title=\"Id ".len();
         self.key_id = list[id..].split(['.', '"']).next().unwrap().to_string();
+    }
+
+    /// A second key of the owner, made through the form of the keys, in the given mode of the agents (lot G6). The result is
+    /// the id of the key and its text. The key has the same grants as the key of the rig.
+    pub fn make_key_in_mode(&self, name: &str, agents: &str) -> (String, String) {
+        let s = &self.s;
+        let cookie = self.cookie(OWNER);
+        let host = format!("127.0.0.1:{}", s.port);
+        let (st, _, page) = http_full(
+            s.port,
+            &host,
+            "GET",
+            "/auth/keys/new?kind=mcp",
+            &[("Cookie", cookie.clone())],
+            "",
+        );
+        assert_eq!(st, 200, "{page}");
+        let form = page.find("id=\"key-form\"").expect("the form of a new key");
+        let marker = "name=\"csrf\" value=\"";
+        let start = form + page[form..].find(marker).unwrap() + marker.len();
+        let csrf = page[start..].split('"').next().unwrap().to_string();
+        let body = format!(
+            "csrf={csrf}&kind=mcp&name={name}&expires_at=&interaction=conversational&agents={agents}\
+             &grant0={}&grant1={}&confirm1=1",
+            form_value("access on service:db"),
+            form_value(&format!("data.write on service:db/{RESOURCE}")),
+        );
+        let (st, _, page) = http_full(
+            s.port,
+            &host,
+            "POST",
+            "/auth/keys/create",
+            &[
+                ("Content-Type", "application/x-www-form-urlencoded".into()),
+                ("Origin", format!("http://{host}")),
+                ("Cookie", cookie.clone()),
+            ],
+            &body,
+        );
+        assert_eq!(st, 200, "the key is not made: {page}");
+        let marker = "id=\"key-text\" type=\"text\" readonly value=\"";
+        let at = page.find(marker).expect("the text of the key") + marker.len();
+        let text = page[at..].split('"').next().unwrap().to_string();
+        let (_, _, list) = http_full(
+            s.port,
+            &host,
+            "GET",
+            "/auth/settings",
+            &[("Cookie", cookie)],
+            "",
+        );
+        let at = list.find(name).expect("the key is listed");
+        let head = &list[..at];
+        let id = head.rfind("title=\"Id ").expect("the id of the key") + "title=\"Id ".len();
+        (
+            list[id..].split(['.', '"']).next().unwrap().to_string(),
+            text,
+        )
     }
 
     pub fn subject(&self) -> String {
@@ -794,6 +859,8 @@ impl Server {
                     "item_events",
                     "approval_intents",
                     "devices",
+                    "agents",
+                    "agent_events",
                 ],
             ),
             None => {
@@ -936,6 +1003,48 @@ impl Pep {
             fields.push_str(extra);
         }
         self.post(cookie, &answer, &csrf, &fields, None)
+    }
+
+    /// The token `csrf` of any form of the page of the Inbox, for a session.
+    pub fn inbox_csrf(&self, cookie: &str) -> String {
+        let (_, _, page) = self.page(cookie, INBOX);
+        let at = page
+            .find("action=\"/auth/settings/inbox/")
+            .expect("a form of the page");
+        let marker = "name=\"csrf\" value=\"";
+        let at = at + page[at..].find(marker).unwrap() + marker.len();
+        super::unescape(page[at..].split('"').next().unwrap())
+    }
+
+    /// The owner makes an agent for the key of the rig with the form "Add agent" (lot G6; the key is in the mode `enrolled`).
+    pub fn enroll_via_web(&self, cookie: &str, name: &str) -> (u16, String, String) {
+        let csrf = self.inbox_csrf(cookie);
+        self.post(
+            cookie,
+            "/auth/settings/inbox/agents/enroll",
+            &csrf,
+            &format!("key={}&name={}", self.key_id, form_value(name)),
+            None,
+        )
+    }
+
+    /// The owner resets the token of an agent with the form of its page.
+    pub fn reset_via_web(&self, cookie: &str, agent_id: &str) -> (u16, String, String) {
+        let csrf = self.inbox_csrf(cookie);
+        self.post(
+            cookie,
+            "/auth/settings/inbox/agents/reset",
+            &csrf,
+            &format!("agent_id={agent_id}"),
+            None,
+        )
+    }
+
+    /// The token that the page of the token shows.
+    pub fn token_of(page: &str) -> String {
+        let marker = "id=\"agent-token\" type=\"text\" readonly value=\"";
+        let at = page.find(marker).expect("the page shows a token") + marker.len();
+        page[at..].split('"').next().unwrap().to_string()
     }
 
     /// The text of the page that a person reads, in lower case: the part of `main`.
