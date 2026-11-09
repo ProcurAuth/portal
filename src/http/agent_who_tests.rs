@@ -267,7 +267,11 @@ fn agent_without_token_makes_a_new_agent_each_time_until_the_cap() {
         assert_eq!(agent_rows(r), 3, "[{name}] no fourth agent");
         let id = item_of(r, &k, 1, &flood);
         let row = agent_row(r, &agent_of(r, &id));
-        assert_eq!(row.kind, AgentKind::Bucket, "[{name}] the item is in the bucket");
+        assert_eq!(
+            row.kind,
+            AgentKind::Bucket,
+            "[{name}] the item is in the bucket"
+        );
         // The same on the REST door.
         let c = agent_in(
             r,
@@ -339,7 +343,10 @@ fn token_in_header_and_in_argument_must_agree() {
         }
         assert_eq!(agent_rows(r), rows, "[{name}]");
         assert_eq!(count(r, "approval_intents"), intents, "[{name}]");
-        assert_eq!(r.loaded(&id).item.state, inbox_core::proto::ItemState::Pending);
+        assert_eq!(
+            r.loaded(&id).item.state,
+            inbox_core::proto::ItemState::Pending
+        );
         // Two headers with two values are a conflict too.
         let e = err_h(
             r,
@@ -471,7 +478,10 @@ fn unknown_token_is_agent_unknown_and_the_same_for_every_cause() {
         assert_eq!(reply.status, 422, "[{name}] {}", reply.body);
         assert_eq!(reply.json()["error"]["code"], "agent_unknown");
         // The item of the agent is still pending, and the reads of the key still work with no token.
-        assert_eq!(ok_h(r, &a, &[], "get_answer", json!({"request_id": id}))["status"], "pending");
+        assert_eq!(
+            ok_h(r, &a, &[], "get_answer", json!({"request_id": id}))["status"],
+            "pending"
+        );
     });
 }
 
@@ -500,7 +510,11 @@ fn blocked_agent_gets_agent_blocked_on_every_tool() {
             "approval_intent",
             with(intent_args(), "agent_token", json!(token)),
         );
-        assert_eq!((e["code"].as_str(), &e["retryable"]), (Some("agent_blocked"), &json!(false)), "[{name}] {e}");
+        assert_eq!(
+            (e["code"].as_str(), &e["retryable"]),
+            (Some("agent_blocked"), &json!(false)),
+            "[{name}] {e}"
+        );
         for (tool, extra) in [
             ("get_answer", json!({})),
             ("keepalive", json!({})),
@@ -521,9 +535,20 @@ fn blocked_agent_gets_agent_blocked_on_every_tool() {
             KeyInteraction::Conversational,
             AgentsMode::Discover,
         );
-        let made = rest_h(r, &c, &[], "POST", "/api/v1/approval-intents", &intent_args().to_string());
+        let made = rest_h(
+            r,
+            &c,
+            &[],
+            "POST",
+            "/api/v1/approval-intents",
+            &intent_args().to_string(),
+        );
         let c_token = made.json()["agent_token"].as_str().unwrap().to_string();
-        owner_op(r, &agent_of(r, &item_of(r, &c, 2, &made.json())), AgentOp::Block);
+        owner_op(
+            r,
+            &agent_of(r, &item_of(r, &c, 2, &made.json())),
+            AgentOp::Block,
+        );
         let reply = rest_h(
             r,
             &c,
@@ -570,7 +595,11 @@ fn enrolled_mode_refuses_a_call_without_token() {
             intent_args(),
         );
         assert!(by_header.get("agent_token").is_none(), "[{name}]");
-        assert_eq!(agent_of(r, &item_of(r, &k, 2, &by_header)), agent_of(r, &id), "[{name}]");
+        assert_eq!(
+            agent_of(r, &item_of(r, &k, 2, &by_header)),
+            agent_of(r, &id),
+            "[{name}]"
+        );
         let by_argument = ok_h(
             r,
             &k,
@@ -585,10 +614,17 @@ fn enrolled_mode_refuses_a_call_without_token() {
             &k,
             &[],
             "approval_intent",
-            with(intent_args(), "agent_token", json!(crate::inbox::agents::new_token().to_string())),
+            with(
+                intent_args(),
+                "agent_token",
+                json!(crate::inbox::agents::new_token().to_string()),
+            ),
         );
         assert_eq!(e["code"], "agent_unknown", "[{name}]");
-        assert_eq!(ok_h(r, &k, &[], "get_answer", json!({"request_id": id}))["status"], "pending");
+        assert_eq!(
+            ok_h(r, &k, &[], "get_answer", json!({"request_id": id}))["status"],
+            "pending"
+        );
         // The mode `key` ignores the token and gives the bucket.
         set_mode(r, ID_A, AgentsMode::Key);
         let plain = ok_h(r, &k, &[], "approval_intent", intent_args());
@@ -603,7 +639,11 @@ fn enrolled_mode_refuses_a_call_without_token() {
         );
         assert_eq!(ignored["agent_status"], "key", "[{name}]");
         let bucket = item_of(r, &k, 3, &ignored);
-        assert_eq!(agent_row(r, &agent_of(r, &bucket)).kind, AgentKind::Bucket, "[{name}]");
+        assert_eq!(
+            agent_row(r, &agent_of(r, &bucket)).kind,
+            AgentKind::Bucket,
+            "[{name}]"
+        );
         // The REST door, for a key of the kind api in the mode enrolled.
         let c = agent_in(
             r,
@@ -612,7 +652,14 @@ fn enrolled_mode_refuses_a_call_without_token() {
             KeyInteraction::Conversational,
             AgentsMode::Enrolled,
         );
-        let reply = rest_h(r, &c, &[], "POST", "/api/v1/approval-intents", &intent_args().to_string());
+        let reply = rest_h(
+            r,
+            &c,
+            &[],
+            "POST",
+            "/api/v1/approval-intents",
+            &intent_args().to_string(),
+        );
         assert_eq!(reply.status, 422, "[{name}] {}", reply.body);
         assert_eq!(reply.json()["error"]["code"], "agent_token_required");
     });
@@ -625,13 +672,24 @@ fn a_key_of_the_mode_key_and_a_file_without_the_block_give_the_bucket() {
         r.fix_clock(T0);
         r.device();
         let c = agent(r, ID_C, KeyKind::Api, KeyInteraction::Conversational);
-        let reply = rest_h(r, &c, &[], "POST", "/api/v1/approval-intents", &intent_args().to_string());
+        let reply = rest_h(
+            r,
+            &c,
+            &[],
+            "POST",
+            "/api/v1/approval-intents",
+            &intent_args().to_string(),
+        );
         assert_eq!(reply.status, 201, "[{name}] {}", reply.body);
         assert_eq!(reply.json()["agent_status"], "key", "[{name}]");
         assert!(reply.json().get("agent_token").is_none(), "[{name}]");
         assert_eq!(agent_rows(r), 0, "[{name}]");
         let id = item_of(r, &c, 1, &reply.json());
-        assert_eq!(agent_row(r, &agent_of(r, &id)).kind, AgentKind::Bucket, "[{name}]");
+        assert_eq!(
+            agent_row(r, &agent_of(r, &id)).kind,
+            AgentKind::Bucket,
+            "[{name}]"
+        );
     });
     // Without the block `inbox.agents`, a key of the mode `discover` acts as the mode `key`.
     each_agent_rig("", |r, name| {
@@ -658,7 +716,10 @@ fn read_without_token_is_allowed_read_with_wrong_token_is_agent_mismatch() {
         let id = item_of(r, &k, 1, &one);
         let seen_before = r.loaded(&id).item.agent_seen_at;
         // A read with no token, and a read with the token of the agent of the item.
-        for extra in [vec![], vec![("Agent-Token", one["agent_token"].as_str().unwrap())]] {
+        for extra in [
+            vec![],
+            vec![("Agent-Token", one["agent_token"].as_str().unwrap())],
+        ] {
             for (tool, args) in [
                 ("get_answer", json!({"request_id": id})),
                 ("keepalive", json!({"request_id": id})),
@@ -693,12 +754,26 @@ fn read_without_token_is_allowed_read_with_wrong_token_is_agent_mismatch() {
             KeyInteraction::Conversational,
             AgentsMode::Discover,
         );
-        let first = rest_h(r, &c, &[], "POST", "/api/v1/approval-intents", &intent_args().to_string());
+        let first = rest_h(
+            r,
+            &c,
+            &[],
+            "POST",
+            "/api/v1/approval-intents",
+            &intent_args().to_string(),
+        );
         let own_token = first.json()["agent_token"].as_str().unwrap().to_string();
         let own = item_of(r, &c, 2, &first.json());
         let other_token = ok_h_rest(r, &c, "POST", "/api/v1/approval-intents");
         let path = format!("/api/v1/items/{own}?wait=0");
-        let reply = rest_h(r, &c, &[("Agent-Token", other_token.as_str())], "GET", &path, "");
+        let reply = rest_h(
+            r,
+            &c,
+            &[("Agent-Token", other_token.as_str())],
+            "GET",
+            &path,
+            "",
+        );
         assert_eq!(reply.status, 403, "[{name}] {}", reply.body);
         assert_eq!(reply.json()["error"]["code"], "agent_mismatch");
         for extra in [vec![], vec![("Agent-Token", own_token.as_str())]] {
@@ -722,31 +797,57 @@ fn per_key_reads_vs_per_agent_writes() {
         r.device();
         let k = conversational(r, ID_A);
         let flags = json!({"allow_ask_back": true});
-        let one = ok_h(r, &k, &[], "approval_intent", with(intent_args(), "allow_ask_back", flags["allow_ask_back"].clone()));
+        let one = ok_h(
+            r,
+            &k,
+            &[],
+            "approval_intent",
+            with(
+                intent_args(),
+                "allow_ask_back",
+                flags["allow_ask_back"].clone(),
+            ),
+        );
         let two = ok_h(r, &k, &[], "approval_intent", intent_args());
         let (ta, tb) = (token_of(&one), token_of(&two));
         let id = item_of(r, &k, 1, &one);
         // Another agent of the same key reads the item with no token, but it cannot write: it has no token, or it has
         // the token of another agent.
-        assert_eq!(ok_h(r, &k, &[], "get_answer", json!({"request_id": id}))["status"], "pending");
+        assert_eq!(
+            ok_h(r, &k, &[], "get_answer", json!({"request_id": id}))["status"],
+            "pending"
+        );
         for (tool, args) in [
             ("say", json!({"request_id": id, "text": "I am the agent A"})),
             ("cancel", json!({"request_id": id})),
             ("supersede", json!({"request_id": id})),
         ] {
             let e = err_h(r, &k, &[], tool, args.clone());
-            assert_eq!(e["code"], "agent_token_required", "[{name}] {tool} with no token: {e}");
+            assert_eq!(
+                e["code"], "agent_token_required",
+                "[{name}] {tool} with no token: {e}"
+            );
             assert_eq!(e["retryable"], false);
             let e = err_h(r, &k, &[("Agent-Token", tb.as_str())], tool, args.clone());
-            assert_eq!(e["code"], "agent_mismatch", "[{name}] {tool} with another token: {e}");
+            assert_eq!(
+                e["code"], "agent_mismatch",
+                "[{name}] {tool} with another token: {e}"
+            );
             let mut by_argument = args;
             by_argument["agent_token"] = json!(tb);
             let e = err_h(r, &k, &[], tool, by_argument);
-            assert_eq!(e["code"], "agent_mismatch", "[{name}] {tool} by the argument");
+            assert_eq!(
+                e["code"], "agent_mismatch",
+                "[{name}] {tool} by the argument"
+            );
         }
         // Nothing changed: no turn and no cancel.
         assert_eq!(count(r, "turns"), 0, "[{name}]");
-        assert_eq!(r.loaded(&id).item.state, inbox_core::proto::ItemState::Pending, "[{name}]");
+        assert_eq!(
+            r.loaded(&id).item.state,
+            inbox_core::proto::ItemState::Pending,
+            "[{name}]"
+        );
         // The agent of the item writes: the header or the argument.
         let said = ok_h(
             r,
@@ -757,7 +858,13 @@ fn per_key_reads_vs_per_agent_writes() {
         );
         assert_eq!(said["request_id"], json!(id), "[{name}] {said}");
         // `supersede` for an approval gives its own answer with the right token.
-        let e = err_h(r, &k, &[], "supersede", json!({"request_id": id, "agent_token": ta}));
+        let e = err_h(
+            r,
+            &k,
+            &[],
+            "supersede",
+            json!({"request_id": id, "agent_token": ta}),
+        );
         assert_eq!(e["code"], "use_service_tool", "[{name}] {e}");
         let cancelled = ok_h(
             r,
@@ -770,12 +877,28 @@ fn per_key_reads_vs_per_agent_writes() {
         // The item of the bucket: a read goes by the key, and a token that is present must still match. A write needs the
         // key only, whatever the token.
         let own = r.submit_with(&k.subject, 2, json!({"lease_s": 900})).id();
-        assert_eq!(agent_row(r, &agent_of(r, &own)).kind, AgentKind::Bucket, "[{name}]");
+        assert_eq!(
+            agent_row(r, &agent_of(r, &own)).kind,
+            AgentKind::Bucket,
+            "[{name}]"
+        );
         let read = ok_h(r, &k, &[], "keepalive", json!({"request_id": own}));
         assert_eq!(read["status"], "pending", "[{name}]");
-        let e = err_h(r, &k, &[("Agent-Token", tb.as_str())], "keepalive", json!({"request_id": own}));
+        let e = err_h(
+            r,
+            &k,
+            &[("Agent-Token", tb.as_str())],
+            "keepalive",
+            json!({"request_id": own}),
+        );
         assert_eq!(e["code"], "agent_mismatch", "[{name}]");
-        let done = ok_h(r, &k, &[("Agent-Token", tb.as_str())], "cancel", json!({"request_id": own}));
+        let done = ok_h(
+            r,
+            &k,
+            &[("Agent-Token", tb.as_str())],
+            "cancel",
+            json!({"request_id": own}),
+        );
         assert_eq!(done["status"], "cancelled", "[{name}]");
         // The REST door: the header or the body member, and the status of each error.
         let c = agent_in(
@@ -799,10 +922,35 @@ fn per_key_reads_vs_per_agent_writes() {
         );
         let turns = format!("/api/v1/items/{rest_item}/turns");
         let no_token = rest_h(r, &c, &[], "POST", &turns, r#"{"text":"hello"}"#);
-        assert_eq!((no_token.status, no_token.json()["error"]["code"].as_str().map(str::to_string)), (422, Some("agent_token_required".into())), "[{name}] {}", no_token.body);
-        let wrong = rest_h(r, &c, &[("Agent-Token", tb.as_str())], "POST", &turns, r#"{"text":"hello"}"#);
+        assert_eq!(
+            (
+                no_token.status,
+                no_token.json()["error"]["code"]
+                    .as_str()
+                    .map(str::to_string)
+            ),
+            (422, Some("agent_token_required".into())),
+            "[{name}] {}",
+            no_token.body
+        );
+        let wrong = rest_h(
+            r,
+            &c,
+            &[("Agent-Token", tb.as_str())],
+            "POST",
+            &turns,
+            r#"{"text":"hello"}"#,
+        );
         // A token of an agent of another key is unknown for this key.
-        assert_eq!((wrong.status, wrong.json()["error"]["code"].as_str().map(str::to_string)), (422, Some("agent_unknown".into())), "[{name}] {}", wrong.body);
+        assert_eq!(
+            (
+                wrong.status,
+                wrong.json()["error"]["code"].as_str().map(str::to_string)
+            ),
+            (422, Some("agent_unknown".into())),
+            "[{name}] {}",
+            wrong.body
+        );
         let by_body = rest_h(
             r,
             &c,
@@ -812,7 +960,14 @@ fn per_key_reads_vs_per_agent_writes() {
             &json!({"text": "hello", "agent_token": rest_token}).to_string(),
         );
         assert_eq!(by_body.status, 201, "[{name}] {}", by_body.body);
-        let by_header = rest_h(r, &c, &[("Agent-Token", rest_token.as_str())], "POST", &format!("/api/v1/items/{rest_item}/keepalive"), "");
+        let by_header = rest_h(
+            r,
+            &c,
+            &[("Agent-Token", rest_token.as_str())],
+            "POST",
+            &format!("/api/v1/items/{rest_item}/keepalive"),
+            "",
+        );
         assert_eq!(by_header.status, 200, "[{name}] {}", by_header.body);
         let keep_body = rest_h(
             r,
@@ -832,9 +987,23 @@ fn per_key_reads_vs_per_agent_writes() {
             r#"{"agent_token": 5}"#,
         );
         assert_eq!(bad_member.status, 422, "[{name}] {}", bad_member.body);
-        let gone = rest_h(r, &c, &[], "DELETE", &format!("/api/v1/items/{rest_item}"), "");
+        let gone = rest_h(
+            r,
+            &c,
+            &[],
+            "DELETE",
+            &format!("/api/v1/items/{rest_item}"),
+            "",
+        );
         assert_eq!(gone.status, 422, "[{name}] {}", gone.body);
-        let gone = rest_h(r, &c, &[("Agent-Token", rest_token.as_str())], "DELETE", &format!("/api/v1/items/{rest_item}"), "");
+        let gone = rest_h(
+            r,
+            &c,
+            &[("Agent-Token", rest_token.as_str())],
+            "DELETE",
+            &format!("/api/v1/items/{rest_item}"),
+            "",
+        );
         assert_eq!(gone.status, 200, "[{name}] {}", gone.body);
     });
 }
@@ -973,8 +1142,16 @@ fn hints_recorded() {
         let agent_id = agent_of(r, &id);
         let seen = observed_of(r, &agent_id);
         assert_eq!(seen.says.as_deref(), Some("billing-bot"), "[{name}]");
-        assert_eq!(seen.user_agent.as_deref(), Some("canary-ua-7d2e/1.4 (tests)"), "[{name}]");
-        assert_eq!(seen.client.as_deref(), Some("canary-ua-7d2e/1.4 (tests)"), "[{name}]");
+        assert_eq!(
+            seen.user_agent.as_deref(),
+            Some("canary-ua-7d2e/1.4 (tests)"),
+            "[{name}]"
+        );
+        assert_eq!(
+            seen.client.as_deref(),
+            Some("canary-ua-7d2e/1.4 (tests)"),
+            "[{name}]"
+        );
         assert_eq!(seen.net.as_deref(), Some("127.0.0.0/24"), "[{name}]");
         assert_eq!(seen.nets_seen(), 1, "[{name}]");
         // The label shows on the item, as text that is not verified, in the sealed body.
@@ -1008,13 +1185,26 @@ fn hints_recorded() {
                 ("Mcp-Name", "get_answer"),
                 ("User-Agent", "canary-ua-7d2e/1.4 (tests)"),
             ],
-            &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}).to_string(),
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params})
+                .to_string(),
         );
         assert_eq!(reply.status, 200, "[{name}] {}", reply.body);
-        assert_eq!(reply.json()["result"]["structuredContent"]["status"], "pending", "[{name}]");
+        assert_eq!(
+            reply.json()["result"]["structuredContent"]["status"],
+            "pending",
+            "[{name}]"
+        );
         let seen = observed_of(r, &agent_id);
-        assert_eq!(seen.client.as_deref(), Some("claude-code/2.1.0"), "[{name}]");
-        assert_eq!(seen.user_agent.as_deref(), Some("canary-ua-7d2e/1.4 (tests)"), "[{name}]");
+        assert_eq!(
+            seen.client.as_deref(),
+            Some("claude-code/2.1.0"),
+            "[{name}]"
+        );
+        assert_eq!(
+            seen.user_agent.as_deref(),
+            Some("canary-ua-7d2e/1.4 (tests)"),
+            "[{name}]"
+        );
         // A new text that the agent says is an event, and the first text stays.
         ok_h(
             r,
@@ -1029,11 +1219,18 @@ fn hints_recorded() {
         );
         let seen = observed_of(r, &agent_id);
         assert_eq!(
-            (seen.says.as_deref(), seen.says_first.as_deref(), seen.says_changes),
+            (
+                seen.says.as_deref(),
+                seen.says_first.as_deref(),
+                seen.says_changes
+            ),
             (Some("night-etl"), Some("billing-bot"), 1),
             "[{name}]"
         );
-        assert!(events_of(r, &agent_id).contains(&"says_changed".to_string()), "[{name}]");
+        assert!(
+            events_of(r, &agent_id).contains(&"says_changed".to_string()),
+            "[{name}]"
+        );
     });
 }
 
@@ -1049,25 +1246,70 @@ fn rest_get_with_token_in_query_is_refused() {
             KeyInteraction::Conversational,
             AgentsMode::Discover,
         );
-        let made = rest_h(r, &c, &[], "POST", "/api/v1/approval-intents", &intent_args().to_string());
+        let made = rest_h(
+            r,
+            &c,
+            &[],
+            "POST",
+            "/api/v1/approval-intents",
+            &intent_args().to_string(),
+        );
         let token = made.json()["agent_token"].as_str().unwrap().to_string();
         let id = item_of(r, &c, 1, &made.json());
         for (method, path, body) in [
             ("GET", format!("/api/v1/items/{id}?agent_token={token}"), ""),
-            ("GET", format!("/api/v1/items/{id}?wait=0&agent-token={token}"), ""),
-            ("DELETE", format!("/api/v1/items/{id}?agent_token={token}"), ""),
-            ("POST", format!("/api/v1/items/{id}/keepalive?agent_token={token}"), ""),
-            ("POST", format!("/api/v1/items/{id}/turns?agent_token={token}"), r#"{"text":"x"}"#),
-            ("POST", "/api/v1/approval-intents?agent_token=x".to_string(), r#"{"lease_s":900}"#),
+            (
+                "GET",
+                format!("/api/v1/items/{id}?wait=0&agent-token={token}"),
+                "",
+            ),
+            (
+                "DELETE",
+                format!("/api/v1/items/{id}?agent_token={token}"),
+                "",
+            ),
+            (
+                "POST",
+                format!("/api/v1/items/{id}/keepalive?agent_token={token}"),
+                "",
+            ),
+            (
+                "POST",
+                format!("/api/v1/items/{id}/turns?agent_token={token}"),
+                r#"{"text":"x"}"#,
+            ),
+            (
+                "POST",
+                "/api/v1/approval-intents?agent_token=x".to_string(),
+                r#"{"lease_s":900}"#,
+            ),
         ] {
             let reply = rest_h(r, &c, &[], method, &path, body);
-            assert_eq!(reply.status, 400, "[{name}] {method} {path}: {}", reply.body);
+            assert_eq!(
+                reply.status, 400,
+                "[{name}] {method} {path}: {}",
+                reply.body
+            );
             assert_eq!(reply.json()["error"]["code"], "invalid_query", "[{name}]");
-            assert!(!reply.body.contains(&token[4..]), "[{name}] the answer repeats the token");
+            assert!(
+                !reply.body.contains(&token[4..]),
+                "[{name}] the answer repeats the token"
+            );
         }
-        assert_eq!(r.loaded(&id).item.state, inbox_core::proto::ItemState::Pending, "[{name}]");
+        assert_eq!(
+            r.loaded(&id).item.state,
+            inbox_core::proto::ItemState::Pending,
+            "[{name}]"
+        );
         // The header is the way: the same call works.
-        let reply = rest_h(r, &c, &[("Agent-Token", token.as_str())], "GET", &format!("/api/v1/items/{id}"), "");
+        let reply = rest_h(
+            r,
+            &c,
+            &[("Agent-Token", token.as_str())],
+            "GET",
+            &format!("/api/v1/items/{id}"),
+            "",
+        );
         assert_eq!(reply.status, 200, "[{name}] {}", reply.body);
     });
 }
@@ -1159,12 +1401,39 @@ fn agent_token_never_in_results_after_the_first() {
         replies.push(call_h(r, &k, &header, "approval_intent", intent_args()).2);
         replies.push(call_h(r, &k, &header, "get_answer", json!({"request_id": id})).2);
         replies.push(call_h(r, &k, &header, "keepalive", json!({"request_id": id})).2);
-        replies.push(call_h(r, &k, &header, "say", json!({"request_id": id, "text": "hello"})).2);
+        replies.push(
+            call_h(
+                r,
+                &k,
+                &header,
+                "say",
+                json!({"request_id": id, "text": "hello"}),
+            )
+            .2,
+        );
         replies.push(call_h(r, &k, &header, "supersede", json!({"request_id": id})).2);
         replies.push(call_h(r, &k, &header, "cancel", json!({"request_id": id})).2);
         // The errors of the table do not repeat the token either.
-        replies.push(call_h(r, &k, &header, "get_answer", json!({"request_id": id, "agent_token": "agt_other"})).2);
-        replies.push(call_h(r, &k, &[], "get_answer", json!({"request_id": id, "agent_token": token})).2);
+        replies.push(
+            call_h(
+                r,
+                &k,
+                &header,
+                "get_answer",
+                json!({"request_id": id, "agent_token": "agt_other"}),
+            )
+            .2,
+        );
+        replies.push(
+            call_h(
+                r,
+                &k,
+                &[],
+                "get_answer",
+                json!({"request_id": id, "agent_token": token}),
+            )
+            .2,
+        );
         for reply in &replies {
             assert!(!reply.body.contains(secret), "[{name}] {}", reply.body);
             assert!(
@@ -1208,7 +1477,10 @@ fn the_tools_carry_the_token_the_label_and_the_fixed_sentence() {
         for tool in &tools {
             let tool_name = tool["name"].as_str().unwrap();
             let properties = &tool["inputSchema"]["properties"];
-            assert_eq!(properties["agent_token"]["type"], "string", "[{name}] {tool_name}");
+            assert_eq!(
+                properties["agent_token"]["type"], "string",
+                "[{name}] {tool_name}"
+            );
             assert!(
                 tool["description"].as_str().unwrap().contains(sentence),
                 "[{name}] {tool_name}: the fixed sentence"
@@ -1222,14 +1494,20 @@ fn the_tools_carry_the_token_the_label_and_the_fixed_sentence() {
             assert_eq!(tool["inputSchema"]["additionalProperties"], false);
         }
         let intent = &tools[0]["inputSchema"]["properties"]["agent_label"];
-        assert_eq!((&intent["minLength"], &intent["maxLength"]), (&json!(1), &json!(64)));
+        assert_eq!(
+            (&intent["minLength"], &intent["maxLength"]),
+            (&json!(1), &json!(64))
+        );
         let init = rpc(
             r,
             &k.token,
             &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}),
         );
         assert!(
-            init.json()["result"]["instructions"].as_str().unwrap().contains(sentence),
+            init.json()["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains(sentence),
             "[{name}] the instructions"
         );
     });

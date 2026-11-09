@@ -9,10 +9,10 @@ use std::sync::Weak;
 
 use super::pdp::{decide_key_for, UseVerdict};
 use super::*;
+use crate::inbox::agents::AgentMode;
 use crate::inbox::rights::{
     AgentCheck, AgentKey, Authorizer, Decision, Door, KeyCheck, Services, Standing, Subscribable,
 };
-use crate::inbox::agents::AgentMode;
 use crate::keyauth::{self, Cause};
 use crate::portal_actions as actions;
 

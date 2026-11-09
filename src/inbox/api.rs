@@ -848,7 +848,11 @@ fn agent_key(
 /// Whether the query string has a parameter that looks like the token of an agent.
 fn token_in_query(uri: &Uri) -> bool {
     uri.query().unwrap_or_default().split('&').any(|pair| {
-        let name = pair.split('=').next().unwrap_or_default().to_ascii_lowercase();
+        let name = pair
+            .split('=')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         matches!(name.as_str(), "agent_token" | "agent-token")
     })
 }

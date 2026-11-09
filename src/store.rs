@@ -1601,37 +1601,16 @@ mod tests {
                 (Some("alice"), "missing"),
             ] {
                 assert_eq!(
-                    store.update_key(
-                        id,
-                        owner,
-                        "renamed",
-                        modes(),
-                        &one,
-                        &caps()
-                    ),
+                    store.update_key(id, owner, "renamed", modes(), &one, &caps()),
                     Err(KeyWriteError::UnknownKey),
                     "{owner:?} {id}"
                 );
             }
             store
-                .update_key(
-                    "k1",
-                    Some("alice"),
-                    "renamed",
-                    modes(),
-                    &one,
-                    &caps(),
-                )
+                .update_key("k1", Some("alice"), "renamed", modes(), &one, &caps())
                 .unwrap();
             store
-                .update_key(
-                    "s1",
-                    None,
-                    "root",
-                    modes(),
-                    &one,
-                    &caps(),
-                )
+                .update_key("s1", None, "root", modes(), &one, &caps())
                 .unwrap();
             let directory = store.load_directory().unwrap();
             let k1 = directory.keys.iter().find(|k| k.id == "k1").unwrap();

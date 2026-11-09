@@ -788,7 +788,10 @@ fn the_agent_cases_a01_to_a09() {
     };
     assert_eq!(checked(&new_key_page(&s, "mcp").1), ["discover"], "A01");
     assert_eq!(checked(&new_key_page(&s, "api").1), ["key"], "A01");
-    let (status, head, _) = post_new_key(&s, "kind=mcp&name=x&expires_at=&interaction=conversational&agents=auto");
+    let (status, head, _) = post_new_key(
+        &s,
+        "kind=mcp&name=x&expires_at=&interaction=conversational&agents=auto",
+    );
     assert_eq!(status, 303, "A01");
     assert!(head.contains("s=bad_agents"), "A01: {head}");
 
@@ -801,29 +804,58 @@ fn the_agent_cases_a01_to_a09() {
     let list = legacy(&s, &discover, "tools/list", json!({})).json();
     for tool in list["result"]["tools"].as_array().unwrap() {
         let name = tool["name"].as_str().unwrap();
-        assert_eq!(tool["inputSchema"]["properties"]["agent_token"]["type"], "string", "A02 {name}");
-        assert!(tool["description"].as_str().unwrap().contains(SENTENCE), "A02 {name}");
         assert_eq!(
-            tool["inputSchema"]["properties"].get("agent_label").is_some(),
+            tool["inputSchema"]["properties"]["agent_token"]["type"], "string",
+            "A02 {name}"
+        );
+        assert!(
+            tool["description"].as_str().unwrap().contains(SENTENCE),
+            "A02 {name}"
+        );
+        assert_eq!(
+            tool["inputSchema"]["properties"]
+                .get("agent_label")
+                .is_some(),
             name == "approval_intent",
             "A02 {name}"
         );
     }
-    let init = legacy(&s, &discover, "initialize", json!({"protocolVersion": "2025-11-25"})).json();
-    assert!(init["result"]["instructions"].as_str().unwrap().contains(SENTENCE), "A02");
+    let init = legacy(
+        &s,
+        &discover,
+        "initialize",
+        json!({"protocolVersion": "2025-11-25"}),
+    )
+    .json();
+    assert!(
+        init["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains(SENTENCE),
+        "A02"
+    );
 
     // A03: a call with no token makes an agent, and the result gives the token one time. The status is `new`.
     let (is_error, first) = intent(&s, &discover, &[], json!({"lease_s": 900}));
     assert!(!is_error, "{first}");
     assert_eq!(first["agent_status"], "new", "A03");
     let token = first["agent_token"].as_str().unwrap().to_string();
-    assert!(token.starts_with("agt_") && token.len() == 47, "A03 {token}");
+    assert!(
+        token.starts_with("agt_") && token.len() == 47,
+        "A03 {token}"
+    );
     // A04: the token in the header, or in the argument: the same agent, and no new token. A different token in each
     // place is a conflict. A token that nobody has is unknown, and it makes no agent.
     for (headers, args) in [
-        (vec![("Agent-Token", token.clone())], json!({"lease_s": 900})),
+        (
+            vec![("Agent-Token", token.clone())],
+            json!({"lease_s": 900}),
+        ),
         (vec![], json!({"lease_s": 900, "agent_token": token})),
-        (vec![("Agent-Token", token.clone())], json!({"lease_s": 900, "agent_token": token})),
+        (
+            vec![("Agent-Token", token.clone())],
+            json!({"lease_s": 900, "agent_token": token}),
+        ),
     ] {
         let (is_error, again) = intent(&s, &discover, &headers, args);
         assert!(!is_error, "A04 {again}");
@@ -831,25 +863,57 @@ fn the_agent_cases_a01_to_a09() {
         assert_eq!(again["agent_status"], "new", "A04");
     }
     let other = format!("agt_{}", "B".repeat(43));
-    let (is_error, e) = intent(&s, &discover, &[("Agent-Token", token.clone())], json!({"lease_s": 900, "agent_token": other}));
+    let (is_error, e) = intent(
+        &s,
+        &discover,
+        &[("Agent-Token", token.clone())],
+        json!({"lease_s": 900, "agent_token": other}),
+    );
     assert!(is_error, "A04");
     assert_eq!(
         e["error"],
         json!({"code": "agent_token_conflict", "message": e["error"]["message"], "retryable": false}),
         "A04"
     );
-    let (is_error, e) = intent(&s, &discover, &[], json!({"lease_s": 900, "agent_token": other}));
+    let (is_error, e) = intent(
+        &s,
+        &discover,
+        &[],
+        json!({"lease_s": 900, "agent_token": other}),
+    );
     assert!(is_error && e["error"]["code"] == "agent_unknown", "A04 {e}");
-    assert!(e["error"]["message"].as_str().unwrap().contains("approval_intent"), "A04");
+    assert!(
+        e["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("approval_intent"),
+        "A04"
+    );
 
     // A05: a label that has a hidden character or a bad length is refused, and it makes no agent. A good one is kept.
     for label in ["", "a\nb", "a\u{202E}b", "a\u{200B}", &"x".repeat(65)] {
-        let (is_error, e) = intent(&s, &discover, &[], json!({"lease_s": 900, "agent_label": label}));
-        assert!(is_error && e["error"]["code"] == "invalid_agent_label", "A05 {label:?} {e}");
+        let (is_error, e) = intent(
+            &s,
+            &discover,
+            &[],
+            json!({"lease_s": 900, "agent_label": label}),
+        );
+        assert!(
+            is_error && e["error"]["code"] == "invalid_agent_label",
+            "A05 {label:?} {e}"
+        );
     }
     // A06: the cap of the key is two agents: the next call is not an error. It goes to the bucket with no token.
-    let (is_error, second) = intent(&s, &discover, &[], json!({"lease_s": 900, "agent_label": "billing-bot"}));
-    assert!(!is_error && second["agent_status"] == "new" && second.get("agent_token").is_some(), "A06 {second}");
+    let (is_error, second) = intent(
+        &s,
+        &discover,
+        &[],
+        json!({"lease_s": 900, "agent_label": "billing-bot"}),
+    );
+    assert!(
+        !is_error && second["agent_status"] == "new" && second.get("agent_token").is_some(),
+        "A06 {second}"
+    );
     let (is_error, flood) = intent(&s, &discover, &[], json!({"lease_s": 900}));
     assert!(!is_error, "A06 {flood}");
     assert_eq!(flood["agent_status"], "unattributed", "A06");
@@ -880,16 +944,32 @@ fn the_agent_cases_a01_to_a09() {
     assert!(!is_error, "{one}");
     assert_eq!(one["agent_status"], "key", "A08");
     assert!(one.get("agent_token").is_none(), "A08");
-    let (is_error, still) = intent(&s, &ignore, &[("Agent-Token", token.clone())], json!({"lease_s": 900}));
+    let (is_error, still) = intent(
+        &s,
+        &ignore,
+        &[("Agent-Token", token.clone())],
+        json!({"lease_s": 900}),
+    );
     assert!(!is_error && still["agent_status"] == "key", "A08 {still}");
     let (_, made) = intent(&s, &default, &[], json!({"lease_s": 900}));
     assert_eq!(made["agent_status"], "new", "A08");
 
     // A09: a key of the mode `enrolled` refuses a call that makes an item and has no token.
     let (is_error, e) = intent(&s, &enrolled, &[], json!({"lease_s": 900}));
-    assert!(is_error && e["error"]["code"] == "agent_token_required", "A09 {e}");
-    let (is_error, e) = intent(&s, &enrolled, &[("Agent-Token", token.clone())], json!({"lease_s": 900}));
-    assert!(is_error && e["error"]["code"] == "agent_unknown", "A09 {e}: the token of another key is unknown");
+    assert!(
+        is_error && e["error"]["code"] == "agent_token_required",
+        "A09 {e}"
+    );
+    let (is_error, e) = intent(
+        &s,
+        &enrolled,
+        &[("Agent-Token", token.clone())],
+        json!({"lease_s": 900}),
+    );
+    assert!(
+        is_error && e["error"]["code"] == "agent_unknown",
+        "A09 {e}: the token of another key is unknown"
+    );
 }
 
 #[test]
@@ -897,7 +977,10 @@ fn a_file_without_the_block_agents_has_no_field_and_refuses_it() {
     let s = start_server(r#"max_unauthenticated_per_minute = 100"#);
     // The form has no field, and a form that sends it is a bad request.
     assert!(!new_key_page(&s, "mcp").1.contains("name=\"agents\""));
-    let (status, _, _) = post_new_key(&s, "kind=mcp&name=x&expires_at=&interaction=conversational&agents=key");
+    let (status, _, _) = post_new_key(
+        &s,
+        "kind=mcp&name=x&expires_at=&interaction=conversational&agents=key",
+    );
     assert_eq!(status, 400);
     // Every key is one agent: the status is `key`, whatever the key and the token.
     let key = make_key(&s, "mcp", "agent", "conversational");

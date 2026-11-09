@@ -747,7 +747,10 @@ mod tests {
     #[test]
     fn the_client_is_read_from_the_meta_of_the_new_line_then_from_initialize() {
         let modern = json!({"_meta": {META_CLIENT: {"name": "claude-code", "version": "2.1.0"}}});
-        assert_eq!(client_info(Some(&modern)).as_deref(), Some("claude-code/2.1.0"));
+        assert_eq!(
+            client_info(Some(&modern)).as_deref(),
+            Some("claude-code/2.1.0")
+        );
         let legacy = json!({"protocolVersion": "2025-11-25", "clientInfo": {"name": "inspector"}});
         assert_eq!(client_info(Some(&legacy)).as_deref(), Some("inspector"));
         // The `_meta` wins when a request has both.
@@ -766,21 +769,38 @@ mod tests {
     }
 
     #[test]
-    fn each_tool_takes_the_token_and_carries_the_fixed_sentence_and_only_the_intent_takes_a_label() {
+    fn each_tool_takes_the_token_and_carries_the_fixed_sentence_and_only_the_intent_takes_a_label()
+    {
         for name in TOOLS {
             let d = descriptor(name);
             let properties = &d["inputSchema"]["properties"];
             assert_eq!(properties["agent_token"]["type"], "string", "{name}");
-            assert_eq!(properties.get("agent_label").is_some(), name == "approval_intent", "{name}");
-            assert!(d["description"].as_str().unwrap().contains(tools::AGENT_SENTENCE), "{name}");
+            assert_eq!(
+                properties.get("agent_label").is_some(),
+                name == "approval_intent",
+                "{name}"
+            );
+            assert!(
+                d["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains(tools::AGENT_SENTENCE),
+                "{name}"
+            );
             // The token is never required: a read with no token is allowed.
             let required = d["inputSchema"].get("required").and_then(Value::as_array);
-            assert!(required.is_none_or(|r| !r.iter().any(|v| v == "agent_token")), "{name}");
+            assert!(
+                required.is_none_or(|r| !r.iter().any(|v| v == "agent_token")),
+                "{name}"
+            );
             assert_eq!(d["inputSchema"]["additionalProperties"], false, "{name}");
         }
         assert!(INSTRUCTIONS.contains(tools::AGENT_SENTENCE));
         let label = &descriptor("approval_intent")["inputSchema"]["properties"]["agent_label"];
-        assert_eq!((&label["minLength"], &label["maxLength"]), (&json!(1), &json!(64)));
+        assert_eq!(
+            (&label["minLength"], &label["maxLength"]),
+            (&json!(1), &json!(64))
+        );
     }
 
     #[test]
