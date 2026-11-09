@@ -119,7 +119,7 @@ object PrefsApply {
     /** The label of the button: "Apply to 2 portals". */
     fun buttonText(count: Int): String = if (count == 1) "Apply to 1 portal" else "Apply to $count portals"
 
-    /** The line after the apply: "Sent to 1 portal. 1 portal gets it when it is back." Null when nothing ran. */
+    /** The line after the apply: "Sent to 1 portal. 1 portal gets it when back online." Null when nothing ran. */
     fun resultText(o: Outcome): String? {
         fun portals(n: Int) = if (n == 1) "1 portal" else "$n portals"
         val parts = listOfNotNull(

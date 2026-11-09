@@ -53,7 +53,7 @@ object DigestPlan {
 
     /**
      * The merged digest: one [Waiting] for each portal that has a current frame with something left. [known] gives what the phone
-     * knows about the ids of a frame. The order is the order of [frames]. A frame older than [LIFETIME_MS] is left out.
+     * knows about the ids of a frame. The order is the order of [frames]. A frame older than [LIFETIME_MS] does not count.
      */
     fun merge(frames: Collection<Frame>, known: (Frame) -> Map<String, Known>, phoneNowMs: Long): List<Waiting> =
         frames.filter { phoneNowMs - it.receivedAtMs < LIFETIME_MS }.mapNotNull { waiting(it, known(it)) }

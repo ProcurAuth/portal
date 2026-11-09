@@ -15,6 +15,8 @@ import app.portalinbox.data.Store
 import app.portalinbox.portal.PortalIdentity
 import app.portalinbox.portal.PrefsApply
 import app.portalinbox.proto.DigestMode
+import app.portalinbox.proto.DigestPrefs
+import app.portalinbox.proto.QuietPrefs
 import app.portalinbox.service.Items
 import app.portalinbox.service.PendingPrefsStore
 import app.portalinbox.service.Registry
@@ -130,10 +132,11 @@ class PortalPrefsActivity : BaseActivity() {
         if (!itemsEnabled()) {
             body.addView(label(getString(R.string.prefs_not_enabled), SP_M, color(R.color.text_muted)).apply { setPadding(dp(4), dp(18), dp(4), dp(8)) })
         } else {
+            val effective = PrefsSync.effective(stored()?.prefs, pending())
             val d = draft()
             renderStatus()
-            renderQuiet(d)
-            renderSummary(d)
+            renderQuiet(d, effective.quiet)
+            renderSummary(effective.digest)
         }
 
         // This phone.
@@ -184,11 +187,10 @@ class PortalPrefsActivity : BaseActivity() {
         )
     }
 
-    private fun renderQuiet(d: PrefsForm.Draft) {
+    private fun renderQuiet(d: PrefsForm.Draft, q: QuietPrefs?) {
         body.addView(sectionTitle(getString(R.string.prefs_quiet), getString(R.string.portal_prefs_sent)))
         val p = panel()
-        val q = PrefsForm.toPrefs(d).let { (it as? PrefsForm.Result.Ok)?.prefs?.quiet }
-        if (d.quietOn && q != null) {
+        if (q != null) {
             p.addView(
                 switchRow(PrefsForm.quietTitle(q), PrefsForm.quietDetail(q), true, { on -> commitFromScreen(d.copy(quietOn = on)) },
                     onOpen = { quietSheet() }, switchLabel = getString(R.string.prefs_quiet)),
@@ -203,9 +205,8 @@ class PortalPrefsActivity : BaseActivity() {
         body.addView(p)
     }
 
-    private fun renderSummary(d: PrefsForm.Draft) {
+    private fun renderSummary(digest: DigestPrefs?) {
         body.addView(sectionTitle(getString(R.string.portal_prefs_summary), getString(R.string.portal_prefs_sent)))
-        val digest = (PrefsForm.toPrefs(d) as? PrefsForm.Result.Ok)?.prefs?.digest
         val p = panel()
         p.addView(
             row(
