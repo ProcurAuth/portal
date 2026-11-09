@@ -1076,7 +1076,11 @@ async fn half_open_from(port: u16, dev: &Phone, from: &str) -> Result<Conn, Opti
         other => panic!("unexpected handshake reply: {other:?}"),
     };
     let (session, _accept) = init.finish(&m2).unwrap();
-    Ok(Conn { ws, session })
+    Ok(Conn {
+        ws,
+        session,
+        seen: Default::default(),
+    })
 }
 
 /// Sends `ready` on a half-open handshake. The result is the welcome, or the close code.
