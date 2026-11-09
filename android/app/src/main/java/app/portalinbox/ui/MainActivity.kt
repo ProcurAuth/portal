@@ -482,7 +482,8 @@ class MainActivity : BaseActivity() {
             minimumHeight = dp(54)
             background = rowRipple()
             isClickable = true
-            contentDescription = listOfNotNull(chipText, r.title, r.subtitle, r.detail).joinToString(". ")
+            // The words of a screen reader: full words, the age and the state as text (TalkBackLabels).
+            contentDescription = TalkBackLabels.itemRow(item, ServerClock.now(this@MainActivity, item.serverId))
             setOnClickListener { openItem(item, r) }
         }
         row.addView(View(this).apply { setBackgroundColor(fg) }, lp(dp(3), MATCH))

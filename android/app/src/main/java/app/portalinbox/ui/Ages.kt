@@ -44,6 +44,26 @@ object Ages {
         }
     }
 
+    /** The age for a screen reader: "just now", "5 minutes ago", "3 hours ago", "yesterday", "6 days ago". No short forms. */
+    fun spoken(thenMs: Long, nowMs: Long): String {
+        val s = ((nowMs - thenMs) / 1000).coerceAtLeast(0)
+        return when {
+            s < 45 -> "just now"
+            s < 86_400 -> long(s * 1000) + " ago"
+            s < 172_800 -> "yesterday"
+            else -> long(s * 1000) + " ago"
+        }
+    }
+
+    private val CLOCK: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm", Locale.US)
+
+    /** "14:02" for a time of the same day as [nowMs], else "11-04 14:02". */
+    fun stamp(ms: Long, nowMs: Long, zone: ZoneId): String {
+        val then = Instant.ofEpochMilli(ms).atZone(zone)
+        val now = Instant.ofEpochMilli(nowMs).atZone(zone)
+        return if (then.toLocalDate() == now.toLocalDate()) CLOCK.format(then) else DAY_TIME.format(then)
+    }
+
     private val DAY_TIME: DateTimeFormatter = DateTimeFormatter.ofPattern("MM-dd HH:mm", Locale.US)
     private val FULL: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.US)
 

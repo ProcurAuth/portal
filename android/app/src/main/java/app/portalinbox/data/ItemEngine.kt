@@ -241,11 +241,13 @@ class ItemEngine(
         }
     }
 
-    /** Asks the agent a question. The item stays open. */
+    /** Asks the agent a question. The item stays open. One message waits in the outbox at a time. */
     fun reply(serverId: Long, requestId: String, text: String): Submit {
         val item = repo.item(serverId, requestId) ?: return refused(Refusal.NOT_FOUND)
         if (!item.isOpen) return refused(Refusal.NOT_OPEN)
         if (!item.request.allowAskBack) return refused(Refusal.ASK_BACK_NOT_ALLOWED)
+        // The owner has one message at a time (DIAL 3): the next one waits for the result of this one.
+        if (repo.pendingOutbox(serverId).any { it.requestId == requestId && it.type == OutboxType.REPLY }) return refused(Refusal.ALREADY_QUEUED)
         return queue(serverId, requestId, OutboxType.REPLY) { ReplyFrame(requestId, it, text) }
     }
 

@@ -220,6 +220,8 @@
     <string name="ch_digest_desc">The number of requests that wait for you. No sound.</string>
     <string name="ch_replies_name">Replies from agents</string>
     <string name="ch_replies_desc">An agent answered you in a discussion.</string>
+    <string name="ch_replies_quiet_name">Replies from agents, quiet</string>
+    <string name="ch_replies_quiet_desc">The same replies in quiet hours, with no sound.</string>
 
     <!-- Items: home list -->
     <string name="section_alerts">Alerts</string>
@@ -248,6 +250,7 @@
     <string name="approval_approve">Approve</string>
     <string name="approval_decline_comment">Decline with a comment</string>
     <string name="approval_ask">Ask the agent a question</string>
+    <string name="approval_discussion">Open the discussion</string>
     <string name="approval_show_all">Show all</string>
     <string name="approval_show_plain">Show plain text</string>
     <string name="approval_show_markdown">Show formatted text</string>
@@ -268,6 +271,45 @@
     <!-- Items: settings -->
     <string name="settings_local_copy">Finished requests on this phone</string>
     <string name="settings_local_copy_help">The phone erases its copy of a finished request after this time.</string>
+
+    <!-- Items: discussion screen -->
+    <string name="thread_you">You</string>
+    <string name="thread_not_checked">Not checked</string>
+    <string name="thread_markdown">Markdown</string>
+    <string name="thread_writing">is writing</string>
+    <string name="thread_open_request">Open the request</string>
+    <string name="thread_open_new">Open the new request</string>
+    <string name="thread_choices">Choices: %1$s</string>
+    <string name="thread_choices_later">Answer a question on its own screen.</string>
+    <string name="thread_send">Send</string>
+    <string name="thread_gone">This discussion is not on this phone any more.</string>
+    <string name="thread_code_copied">Copied</string>
+
+    <!-- Items: preferences screen -->
+    <string name="prefs_title">Inbox preferences</string>
+    <string name="prefs_row_help">Quiet hours and the daily summary of waiting requests.</string>
+    <string name="prefs_quiet">Quiet hours</string>
+    <string name="prefs_quiet_help">In this time a new request arrives with no sound. It stays in the list.</string>
+    <string name="prefs_quiet_on">Use quiet hours</string>
+    <string name="prefs_from">From</string>
+    <string name="prefs_to">To</string>
+    <string name="prefs_zone">Time zone</string>
+    <string name="prefs_zone_phone">Use the zone of this phone</string>
+    <string name="prefs_high_rings">An urgent request can still ring</string>
+    <string name="prefs_digest">Summary of waiting requests</string>
+    <string name="prefs_digest_help">A quiet notification with the number of requests and the age of the oldest. It has no text of a request.</string>
+    <string name="prefs_digest_daily">Daily</string>
+    <string name="prefs_digest_every">Every few hours</string>
+    <string name="prefs_digest_off">None</string>
+    <string name="prefs_digest_default">The server default applies until you choose.</string>
+    <string name="prefs_at">At</string>
+    <string name="prefs_every">Every (hours)</string>
+    <string name="prefs_every_less">Fewer hours</string>
+    <string name="prefs_every_more">More hours</string>
+    <string name="prefs_pending">Saved on this phone. The server did not confirm it yet.</string>
+    <string name="prefs_confirmed">The server has these values.</string>
+    <string name="prefs_offline_note">The phone sends the change when it is online.</string>
+    <string name="prefs_not_enabled">This server has no requests and no preferences.</string>
 
     <!-- Items: notifications -->
     <string name="notification_decline">Decline</string>
