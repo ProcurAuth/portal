@@ -80,7 +80,8 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     companion object {
         private const val TAG = "Inbox.Connection"
         private const val HANDSHAKE_TIMEOUT_MS = 15_000L
-        private const val MAX_BACKOFF_MS = 30_000L
+        /** Wait after close 4426 (the app is too old for the portal): long, as a retry cannot help before an update. */
+        private const val INCOMPATIBLE_RETRY_MS = 300_000L
         private const val SUBSCRIBE_SETTLE_MS = 3_000L
 
         const val CLOSE_UNKNOWN_DEVICE = 4401
@@ -98,7 +99,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     @Volatile private var connected = false
     private var socket: WebSocket? = null
     private var session = 0L
-    private var failures = 0
+    private val backoff = Backoff()
     private var nonce = 0L
     private val pingSentAt = sortedMapOf<Long, Long>()
 
@@ -161,13 +162,15 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         while (running) {
             val server = store.server(serverId) ?: break
             if (server.reenrollReason != null) {
-                Registry.setStatus(serverId, LinkState.REENROLL, server.reenrollReason)
+                Registry.setStatus(
+                    serverId, KeyChange.stateOf(server.reenrollReason) ?: LinkState.REENROLL, KeyChange.detail(server.reenrollReason),
+                )
                 waitFor(Long.MAX_VALUE)
                 continue
             }
             // While offline, retries keep the red "Offline" until one succeeds (no flicker).
             val st = Registry.status(serverId)
-            if (failures == 0 || st.state != LinkState.DISCONNECTED) {
+            if (backoff.failures == 0 || st.state != LinkState.DISCONNECTED) {
                 Registry.setStatus(serverId, LinkState.CONNECTING, st.detail.takeIf { st.state == LinkState.CONNECTING })
             }
             val delay = try {
@@ -182,6 +185,8 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                 connected = false
                 socket?.cancel()
                 socket = null
+                // The last frame time, so "last sync" is exact after a loss. It never moves the value back.
+                Registry.liveness(serverId).lastFrameMs?.let { store.touchSync(serverId, it, force = true) }
                 if (session != 0L) {
                     Native.sessionFree(session)
                     session = 0L
@@ -192,11 +197,8 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         connected = false
     }
 
-    private fun backoff(): Long {
-        failures = minOf(failures + 1, 16)
-        val base = minOf(MAX_BACKOFF_MS, 1000L shl minOf(failures - 1, 5))
-        return base / 2 + Random.nextLong(base / 2 + 1)
-    }
+    /** Counts a failure and gives the delay before the next try: see [Backoff]. */
+    private fun backoff(): Long = backoff.next()
 
     /** Sleeps until the delay elapses, the network comes back, or we are stopped. */
     private fun waitFor(ms: Long) {
@@ -240,6 +242,9 @@ class ServerConnection(private val context: Context, val serverId: Long) {
 
     private class SessionEnd(val retryAfterMs: Long, message: String) : Exception(message)
 
+    /** The handshake did not end with the pinned key. */
+    private class KeyMismatch : Exception("The portal does not prove the pinned key")
+
     /** Runs one session. Returns how long to wait before reconnecting. */
     private fun runSession(server: app.portalinbox.data.Server): Long {
         events.clear()
@@ -272,7 +277,14 @@ class ServerConnection(private val context: Context, val serverId: Long) {
             session = ByteBuffer.wrap(started, 0, 8).long
             ws.send(started.copyOfRange(8, started.size).toByteString())
             val msg2 = expectBinary()
-            val accept = org.json.JSONObject(String(Native.sessionFinish(session, msg2)))
+            val accept = try {
+                org.json.JSONObject(String(Native.sessionFinish(session, msg2)))
+            } catch (e: IllegalStateException) {
+                // Message 2 does not authenticate with the pinned key: this is not the portal that was enrolled (or its key changed).
+                // The connection stops here. Any other native failure goes up as an ordinary failure.
+                if (KeyChange.isHandshakeKeyFailure(e.message)) throw KeyMismatch()
+                throw e
+            }
             Log.i(TAG, "session established with ${accept.optString("server_name")}")
             send(ReadyFrame)
 
@@ -294,15 +306,17 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                     is Event.Binary -> {
                         lastFrame = System.currentTimeMillis()
                         Registry.frame(serverId, lastFrame)
+                        store.touchSync(serverId, lastFrame)
                         val frame = decode(Native.sessionDecrypt(session, e.bytes))
                         when (frame) {
                             null -> {}
                             is WelcomeFrame -> {
                                 heartbeat = frame.heartbeatIntervalMs.coerceAtLeast(5_000L)
                                 val reconcile = onWelcome(frame)
+                                store.touchSync(serverId, lastFrame, force = true)
                                 welcomed = true
                                 connected = true
-                                failures = 0
+                                backoff.reset()
                                 Registry.setStatus(serverId, LinkState.CONNECTED, frame.serverName)
                                 for (g in reconcile.subscribe) send(SubscribeFrame(g))
                                 for (g in reconcile.unsubscribe) send(UnsubscribeFrame(g))
@@ -339,6 +353,9 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                     is Event.Text -> throw SessionEnd(backoff(), "Unexpected answer from the server")
                 }
             }
+            return 0
+        } catch (e: KeyMismatch) {
+            keyChanged(context.getString(R.string.key_changed_handshake))
             return 0
         } catch (e: SessionEnd) {
             if (welcomed) Registry.setStatus(serverId, LinkState.CONNECTING, context.getString(R.string.status_reconnecting))
@@ -394,15 +411,19 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     private fun onClosed(code: Int, reason: String, wasConnected: Boolean = false): Long {
         connected = false
         return when (code) {
-            CLOSE_UNKNOWN_DEVICE, CLOSE_REVOKED -> {
-                val why = if (code == CLOSE_REVOKED) "Device revoked by the administrator" else "Device unknown to the server"
+            CLOSE_UNKNOWN_DEVICE -> {
+                keyChanged(context.getString(R.string.key_changed_closed))
+                0
+            }
+            CLOSE_REVOKED -> {
+                val why = "Device revoked by the administrator"
                 store.setReenroll(serverId, "$why: delete this server and add it again")
                 Registry.setStatus(serverId, LinkState.REENROLL, why)
                 0
             }
             CLOSE_PROTOCOL -> {
                 Registry.setStatus(serverId, LinkState.DISCONNECTED, "Incompatible version: update the app")
-                MAX_BACKOFF_MS * 10
+                INCOMPATIBLE_RETRY_MS
             }
             CLOSE_RATE_LIMITED -> {
                 Registry.setStatus(serverId, LinkState.DISCONNECTED, "Too many attempts, retrying in a minute")
@@ -423,6 +444,12 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                 backoff()
             }
         }
+    }
+
+    /** Stops the connection: the key of this portal is not the pinned one. The user fixes it from the screen of the portal. */
+    private fun keyChanged(detail: String) {
+        store.setReenroll(serverId, KeyChange.reason(detail))
+        Registry.setStatus(serverId, LinkState.KEY_CHANGED, detail)
     }
 
     private fun send(frame: ClientFrame) {

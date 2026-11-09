@@ -3,22 +3,18 @@ package app.portalinbox.data
 import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteConstraintException
 import android.database.sqlite.SQLiteOpenHelper
-
-data class Server(
-    val id: Long,
-    val address: String,
-    val serverName: String,
-    val deviceId: String,
-    val deviceName: String,
-    val deviceKeySealed: ByteArray,
-    val serverPublicKey: ByteArray,
-    val reenrollReason: String?,
-    val heartbeatMs: Long,
-    val offlineWarningMs: Long,
-    /** Login of the account on that server. The server assigns it: it is read-only here. */
-    val userName: String,
-)
+import app.portalinbox.net.ServerAddress
+import app.portalinbox.portal.Fingerprint
+import app.portalinbox.portal.KnownPortal
+import app.portalinbox.portal.LastSync
+import app.portalinbox.portal.PortalAdmission
+import app.portalinbox.portal.PortalIdentity
+import app.portalinbox.portal.PortalNaming
+import app.portalinbox.portal.PortalOrder
+import app.portalinbox.portal.PortalPalette
+import java.util.concurrent.ConcurrentHashMap
 
 data class Group(val id: String, val name: String, val description: String)
 
@@ -59,7 +55,7 @@ data class Alert(
  * level.
  */
 class Store private constructor(private val appContext: Context) :
-    SQLiteOpenHelper(appContext, "inbox.db", null, 8) {
+    SQLiteOpenHelper(appContext, "inbox.db", null, 9) {
 
     companion object {
         @Volatile private var instance: Store? = null
@@ -101,12 +97,17 @@ class Store private constructor(private val appContext: Context) :
         ItemSchema.create(db)
     }
 
+    /**
+     * The identity columns are local (the user chose them, the pinned key gives the fingerprint). `nickname_key`, `color` and
+     * `key_fp` are `UNIQUE`: the database refuses a second portal with the same key, name or color, if the code of
+     * [PortalAdmission] ever missed one. `reported_name` is what the portal says about itself: it is not an identity.
+     */
     private fun createServers(db: SQLiteDatabase) {
         db.execSQL(
             """CREATE TABLE servers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 address TEXT NOT NULL,
-                server_name TEXT NOT NULL,
+                reported_name TEXT NOT NULL,
                 device_id TEXT NOT NULL,
                 device_name TEXT NOT NULL,
                 device_key BLOB NOT NULL,
@@ -114,8 +115,20 @@ class Store private constructor(private val appContext: Context) :
                 reenroll_reason TEXT,
                 heartbeat_ms INTEGER NOT NULL,
                 offline_warning_ms INTEGER NOT NULL,
-                created_at INTEGER NOT NULL,
-                user_name TEXT NOT NULL)"""
+                user_name TEXT NOT NULL,
+                nickname TEXT NOT NULL,
+                nickname_key TEXT NOT NULL UNIQUE,
+                color INTEGER NOT NULL UNIQUE CHECK (color BETWEEN 0 AND 9),
+                sort_index INTEGER NOT NULL,
+                key_fp TEXT NOT NULL UNIQUE,
+                muted_until_ms INTEGER,
+                hide_name_on_lock INTEGER NOT NULL DEFAULT 0,
+                retention_days INTEGER,
+                last_sync_ms INTEGER,
+                prev_key_fp TEXT,
+                key_changed_ms INTEGER,
+                pending_prefs TEXT,
+                added_at_ms INTEGER NOT NULL)"""
         )
     }
 
@@ -141,15 +154,17 @@ class Store private constructor(private val appContext: Context) :
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // v6: protocol 4. Every stored server was enrolled with protocol 3 (a shared password,
-        // a pseudonym of the person) and cannot connect any more. Its groups, levels and
-        // alerts go with it. The person gets a one-time notice and enrolls again with a code.
-        // v7: the column `kind` of the table `alerts`. No phone holds data yet, so the upgrade
-        // uses the same removal and creates the tables again.
-        if (oldVersion < 7) {
-            val removed = db.rawQuery("SELECT COUNT(*) FROM servers", null)
-                .use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
-            for (table in listOf("alerts", "outbox", "subscriptions", "groups", "servers")) {
+        // v9: the identity of a portal is local (nickname, color, pinned key fingerprint). Every earlier row has none, and no
+        // phone holds data worth a migration: all tables are dropped and made again, and the person is told to enroll again.
+        // Older versions (v6 protocol 4, v7 the column `kind`, v8 protocol 5) used the same removal.
+        if (oldVersion < 9) {
+            val removed = try {
+                db.rawQuery("SELECT COUNT(*) FROM servers", null).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+            } catch (e: android.database.sqlite.SQLiteException) {
+                0
+            }
+            ItemSchema.drop(db)
+            for (table in listOf("alerts", "subscriptions", "groups", "servers")) {
                 db.execSQL("DROP TABLE IF EXISTS $table")
             }
             onCreate(db)
@@ -158,62 +173,238 @@ class Store private constructor(private val appContext: Context) :
                     .edit().putBoolean(PREF_ENROLL_AGAIN, true).apply()
             }
         }
-        // v8: protocol 5. The tables of the items, the outbox and the preferences of the account.
-        // They are dropped and made again, as a stored item of an earlier build has no meaning.
-        // Servers, groups and alerts stay: the keys of a server do not change with the protocol.
-        if (oldVersion < 8) {
-            ItemSchema.drop(db)
-            ItemSchema.create(db)
-        }
     }
 
     // ------------------------------------------------------------ servers
 
-    fun addServer(
-        address: String, serverName: String, deviceId: String, deviceName: String,
-        deviceKeySealed: ByteArray, serverPublicKey: ByteArray, userName: String,
-    ): Long {
-        val v = ContentValues().apply {
-            put("user_name", userName)
-            put("address", address)
-            put("server_name", serverName)
-            put("device_id", deviceId)
-            put("device_name", deviceName)
-            put("device_key", deviceKeySealed)
-            put("server_public_key", serverPublicKey)
-            put("heartbeat_ms", DEFAULT_HEARTBEAT_MS)
-            put("offline_warning_ms", DEFAULT_OFFLINE_WARNING_MS)
-            put("created_at", System.currentTimeMillis())
-        }
-        return writableDatabase.insertOrThrow("servers", null, v)
+    /** What the enrollment gives and what the user chose. The nickname is required: the phone never takes the name of the portal. */
+    class NewPortal(
+        val address: String,
+        val reportedName: String,
+        val deviceId: String,
+        val deviceName: String,
+        val deviceKeySealed: ByteArray,
+        val serverPublicKey: ByteArray,
+        val userName: String,
+        val nickname: String,
+        /** Index of the palette, or null for the first free color. */
+        val colorIndex: Int?,
+    )
+
+    sealed interface AddResult {
+        data class Added(val id: Long) : AddResult
+
+        /** [PortalAdmission] refused: same key, 10 portals, bad or taken name, bad or taken color. Nothing was written. */
+        data class Refused(val refusal: PortalAdmission.Refusal) : AddResult
+
+        /** The `UNIQUE` columns refused a row that [PortalAdmission] accepted (two adds at once). Nothing was written. */
+        object Duplicate : AddResult
     }
 
+    /**
+     * Adds a portal, or refuses. The check and the insert run in one transaction. The key to pin is the key of the
+     * enrollment: its fingerprint is derived here, once, and stored in `key_fp`.
+     */
+    fun addServer(p: NewPortal): AddResult {
+        val fp = Fingerprint.compactOf(p.serverPublicKey)
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val decision = PortalAdmission.check(knownPortals(), fp, p.nickname, p.colorIndex)
+            val admit = when (decision) {
+                is PortalAdmission.Decision.Refuse -> return AddResult.Refused(decision.refusal)
+                is PortalAdmission.Decision.Admit -> decision
+            }
+            val v = ContentValues().apply {
+                put("user_name", p.userName)
+                put("address", p.address)
+                put("reported_name", p.reportedName)
+                put("device_id", p.deviceId)
+                put("device_name", p.deviceName)
+                put("device_key", p.deviceKeySealed)
+                put("server_public_key", p.serverPublicKey)
+                put("heartbeat_ms", DEFAULT_HEARTBEAT_MS)
+                put("offline_warning_ms", DEFAULT_OFFLINE_WARNING_MS)
+                put("nickname", admit.nickname)
+                put("nickname_key", admit.nicknameKey)
+                put("color", admit.colorIndex)
+                put("sort_index", nextSortIndex(db))
+                put("key_fp", fp)
+                put("added_at_ms", System.currentTimeMillis())
+            }
+            val id = db.insertOrThrow("servers", null, v)
+            db.setTransactionSuccessful()
+            return AddResult.Added(id)
+        } catch (e: SQLiteConstraintException) {
+            return AddResult.Duplicate
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    private fun nextSortIndex(db: SQLiteDatabase): Int =
+        db.rawQuery("SELECT COALESCE(MAX(sort_index), -1) + 1 FROM servers", null).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+
+    /** Removes the portal. Its rows, its notifications' data and its color and nickname go with it: both can be used again at once. */
     fun deleteServer(id: Long) {
         writableDatabase.delete("servers", "id = ?", arrayOf(id.toString()))
+        lastSyncWritten.remove(id)
     }
 
+    private val serverColumns =
+        "id, address, reported_name, device_id, device_name, device_key, server_public_key, reenroll_reason, heartbeat_ms, " +
+            "offline_warning_ms, user_name, nickname, color, sort_index, key_fp, muted_until_ms, hide_name_on_lock, " +
+            "retention_days, last_sync_ms, prev_key_fp, key_changed_ms, pending_prefs, added_at_ms"
+
+    /** The portals in the order of the user. */
     fun servers(): List<Server> = readableDatabase.rawQuery(
-        "SELECT id, address, server_name, device_id, device_name, device_key, server_public_key, " +
-            "reenroll_reason, heartbeat_ms, offline_warning_ms, user_name FROM servers ORDER BY id", null
+        "SELECT $serverColumns FROM servers ORDER BY sort_index, id", null
     ).use { c ->
         buildList {
             while (c.moveToNext()) {
                 add(
                     Server(
-                        c.getLong(0), c.getString(1), c.getString(2), c.getString(3), c.getString(4),
-                        c.getBlob(5), c.getBlob(6), if (c.isNull(7)) null else c.getString(7),
-                        c.getLong(8), c.getLong(9), c.getString(10),
+                        id = c.getLong(0), address = c.getString(1), reportedName = c.getString(2), deviceId = c.getString(3),
+                        deviceName = c.getString(4), deviceKeySealed = c.getBlob(5), serverPublicKey = c.getBlob(6),
+                        reenrollReason = c.getStringOrNull(7), heartbeatMs = c.getLong(8), offlineWarningMs = c.getLong(9),
+                        userName = c.getString(10), nickname = c.getString(11), colorIndex = c.getInt(12), sortIndex = c.getInt(13),
+                        keyFp = c.getString(14), mutedUntilMs = c.getLongOrNull(15), hideNameOnLock = c.getInt(16) != 0,
+                        retentionDays = c.getIntOrNull(17), lastSyncMs = c.getLongOrNull(18), prevKeyFp = c.getStringOrNull(19),
+                        keyChangedMs = c.getLongOrNull(20), pendingPrefs = c.getStringOrNull(21), addedAtMs = c.getLong(22),
                     )
                 )
             }
         }
     }
 
+    private fun android.database.Cursor.getStringOrNull(i: Int): String? = if (isNull(i)) null else getString(i)
+    private fun android.database.Cursor.getLongOrNull(i: Int): Long? = if (isNull(i)) null else getLong(i)
+    private fun android.database.Cursor.getIntOrNull(i: Int): Int? = if (isNull(i)) null else getInt(i)
+
     fun server(id: Long): Server? = servers().firstOrNull { it.id == id }
+
+    /** The identity of every portal, in the order of the user. */
+    fun portals(): List<PortalIdentity> = servers().map { PortalIdentity.of(it) }
+
+    /** The portals with their address, in the order of addition (the last one is the newest): what the admission checks compare to. */
+    fun knownPortals(): List<KnownPortal> = servers().sortedBy { it.id }.map { KnownPortal.of(it) }
 
     fun setReenroll(id: Long, reason: String?) {
         val v = ContentValues().apply { if (reason == null) putNull("reenroll_reason") else put("reenroll_reason", reason) }
         writableDatabase.update("servers", v, "id = ?", arrayOf(id.toString()))
+    }
+
+    /** Renames a portal. Returns the check: only a valid and unique name is written. */
+    fun rename(id: Long, nickname: String): PortalNaming.Check {
+        val check = PortalNaming.validate(nickname, portals(), ignoreId = id)
+        if (check is PortalNaming.Check.Valid) {
+            try {
+                writableDatabase.update("servers", ContentValues().apply {
+                    put("nickname", check.nickname); put("nickname_key", check.key)
+                }, "id = ?", arrayOf(id.toString()))
+            } catch (e: SQLiteConstraintException) {
+                return PortalNaming.Check.Invalid(PortalNaming.Reason.TAKEN)
+            }
+        }
+        return check
+    }
+
+    /** Gives a portal another color. Returns false, and writes nothing, when the index is not 0 to 9 or another portal has it. */
+    fun setColor(id: Long, colorIndex: Int): Boolean {
+        if (!PortalPalette.isValid(colorIndex)) return false
+        return try {
+            writableDatabase.update("servers", ContentValues().apply { put("color", colorIndex) }, "id = ?", arrayOf(id.toString())) > 0
+        } catch (e: SQLiteConstraintException) {
+            false
+        }
+    }
+
+    /** Sets the order of the user. A portal that [ids] does not name goes last, in its old order. An unknown id is ignored. */
+    fun reorder(ids: List<Long>) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val order = PortalOrder.merge(servers().map { it.id }, ids)
+            order.forEachIndexed { index, id ->
+                db.update("servers", ContentValues().apply { put("sort_index", index) }, "id = ?", arrayOf(id.toString()))
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /**
+     * Changes the address of a portal ("Change address", proposal 3.4). The pinned key does not change: it still decides who
+     * can answer. Returns false when the text is not an address. A new address that gives another key fails the handshake
+     * and shows "Key changed".
+     */
+    fun setAddress(id: Long, address: String): Boolean {
+        val parsed = ServerAddress.parse(address) ?: return false
+        return writableDatabase.update("servers", ContentValues().apply { put("address", parsed.http) }, "id = ?", arrayOf(id.toString())) > 0
+    }
+
+    /**
+     * Re-enrolls a portal in place (proposal 3.6): the row, the nickname, the color and the history stay. The device, the key,
+     * the address and the login come from the new enrollment. If the key is not the old one, the old fingerprint goes to
+     * `prev_key_fp` and the time to `key_changed_ms`. The reason that stopped the connection is cleared. A key that another
+     * portal holds is refused (returns false, nothing is written).
+     */
+    fun reenroll(
+        id: Long, address: String, reportedName: String, deviceId: String, deviceKeySealed: ByteArray,
+        serverPublicKey: ByteArray, userName: String,
+    ): Boolean {
+        val old = server(id) ?: return false
+        val fp = Fingerprint.compactOf(serverPublicKey)
+        val v = ContentValues().apply {
+            put("address", address); put("reported_name", reportedName); put("device_id", deviceId)
+            put("device_key", deviceKeySealed); put("server_public_key", serverPublicKey); put("user_name", userName)
+            put("key_fp", fp); putNull("reenroll_reason")
+            if (fp != old.keyFp) { put("prev_key_fp", old.keyFp); put("key_changed_ms", System.currentTimeMillis()) }
+        }
+        return try {
+            writableDatabase.update("servers", v, "id = ?", arrayOf(id.toString())) > 0
+        } catch (e: SQLiteConstraintException) {
+            false
+        }
+    }
+
+    /** Mutes the portal until [untilMs] (local). Null unmutes. [Long.MAX_VALUE] mutes until the user unmutes. */
+    fun setMuted(id: Long, untilMs: Long?) {
+        val v = ContentValues().apply { if (untilMs == null) putNull("muted_until_ms") else put("muted_until_ms", untilMs) }
+        writableDatabase.update("servers", v, "id = ?", arrayOf(id.toString()))
+    }
+
+    /** True hides the name of the portal on the lock screen (local). */
+    fun setHideNameOnLock(id: Long, hide: Boolean) {
+        writableDatabase.update("servers", ContentValues().apply { put("hide_name_on_lock", if (hide) 1 else 0) }, "id = ?", arrayOf(id.toString()))
+    }
+
+    /** Sets the retention of finished items of this portal, in days. Null means "same as all". */
+    fun setRetentionDays(id: Long, days: Int?) {
+        val v = ContentValues().apply { if (days == null) putNull("retention_days") else put("retention_days", days) }
+        writableDatabase.update("servers", v, "id = ?", arrayOf(id.toString()))
+    }
+
+    /** The JSON of the preferences that wait for the next `welcome`. Null clears it. Nothing sends it in lot MP1. */
+    fun setPendingPrefs(id: Long, json: String?) {
+        val v = ContentValues().apply { if (json == null) putNull("pending_prefs") else put("pending_prefs", json) }
+        writableDatabase.update("servers", v, "id = ?", arrayOf(id.toString()))
+    }
+
+    private val lastSyncWritten = ConcurrentHashMap<Long, Long>()
+
+    /**
+     * Records the time of the last frame of a portal. It writes at most once a minute ([LastSync.shouldWrite]) unless [force], and
+     * never moves the value back. Call it for each frame: the cost of a skipped call is one map read.
+     */
+    fun touchSync(id: Long, atMs: Long, force: Boolean = false) {
+        if (!LastSync.shouldWrite(lastSyncWritten[id], atMs, force)) return
+        writableDatabase.execSQL(
+            "UPDATE servers SET last_sync_ms = ? WHERE id = ? AND (last_sync_ms IS NULL OR last_sync_ms < ?)",
+            arrayOf<Any>(atMs, id, atMs),
+        )
+        lastSyncWritten[id] = atMs
     }
 
     /**
@@ -224,14 +415,14 @@ class Store private constructor(private val appContext: Context) :
      * level and is never part of the reconciliation: see [Levels].
      */
     fun saveWelcome(
-        id: Long, serverName: String, userName: String?, groups: List<Group>, serverSubscriptions: Set<String>,
+        id: Long, reportedName: String, userName: String?, groups: List<Group>, serverSubscriptions: Set<String>,
         heartbeatMs: Long, offlineWarningMs: Long,
     ): Reconcile {
         val db = writableDatabase
         db.beginTransaction()
         try {
             db.update("servers", ContentValues().apply {
-                put("server_name", serverName)
+                put("reported_name", reportedName)
                 // The login is assigned by the server: the Welcome keeps it current.
                 if (!userName.isNullOrEmpty()) put("user_name", userName)
                 put("heartbeat_ms", heartbeatMs)

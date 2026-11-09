@@ -19,6 +19,9 @@ import app.portalinbox.net.DeepLink
 import app.portalinbox.net.EnrollField
 import app.portalinbox.net.Enroller
 import app.portalinbox.net.EnrollmentError
+import app.portalinbox.portal.Fingerprint
+import app.portalinbox.portal.PortalAdmission
+import app.portalinbox.portal.PortalNaming
 import app.portalinbox.service.InboxService
 
 /**
@@ -212,6 +215,13 @@ class AddServerActivity : BaseActivity() {
         val info = try { Enroller.parse(this, text) } catch (e: EnrollmentError) { return showError(code, e.message ?: "") }
         val deviceName = name.text.toString().trim()
         if (deviceName.isEmpty()) return showError(name, getString(R.string.add_device_name_missing))
+        // The key and the count are checked before the code is used: the code works once, a refused add must not burn it.
+        // The form has no field for the nickname yet (lot MP2 adds the confirmation screen): the phone numbers the Portal.
+        val store = Store.get(this)
+        val nickname = PortalNaming.suggest(store.portals())
+        val pre = Fingerprint.parse(info.fingerprint)
+            ?.let { PortalAdmission.check(store.knownPortals(), it, nickname, colorIndex = null) }
+        if (pre is PortalAdmission.Decision.Refuse) return fail(EnrollmentError(refusalText(pre.refusal)))
         setBusy(true)
         Thread {
             var serverId = -1L
@@ -221,7 +231,14 @@ class AddServerActivity : BaseActivity() {
                 if (!e.serverPublicKey.contentEquals(info.serverPublicKey)) throw EnrollmentError(getString(R.string.err_server_key))
                 val sealed = KeyVault.seal(e.devicePrivateKey)
                 e.devicePrivateKey.fill(0)
-                serverId = Store.get(this).addServer(e.address.http, e.serverName, e.deviceId, deviceName, sealed, e.serverPublicKey, e.userName)
+                val added = Store.get(this).addServer(
+                    Store.NewPortal(e.address.http, e.serverName, e.deviceId, deviceName, sealed, e.serverPublicKey, e.userName, nickname, colorIndex = null)
+                )
+                when (added) {
+                    is Store.AddResult.Added -> serverId = added.id
+                    is Store.AddResult.Refused -> throw EnrollmentError(refusalText(added.refusal))
+                    Store.AddResult.Duplicate -> throw EnrollmentError(getString(R.string.portal_add_conflict))
+                }
                 null
             } catch (e: EnrollmentError) {
                 e
@@ -234,6 +251,12 @@ class AddServerActivity : BaseActivity() {
                 if (error == null) done(serverId) else fail(error)
             }
         }.start()
+    }
+
+    private fun refusalText(r: PortalAdmission.Refusal): String = when (r) {
+        is PortalAdmission.Refusal.DuplicateKey -> getString(R.string.portal_duplicate, r.portal.identity.nickname)
+        PortalAdmission.Refusal.CapReached -> getString(R.string.portal_cap, PortalAdmission.MAX_PORTALS)
+        else -> getString(R.string.portal_add_conflict)
     }
 
     private fun fail(e: EnrollmentError) {
