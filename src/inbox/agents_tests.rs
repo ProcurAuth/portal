@@ -12,7 +12,7 @@ use super::agents::{
     AgentCall, AgentError, AgentKind, AgentMode, AgentRules, AgentState, AgentStatus, Hints,
     Resolved,
 };
-use super::agents_ops::{AgentOp, OpError};
+use super::agents_ops::{AgentOp, EnrollError, OpError};
 use super::items::{Caller, Wait};
 use super::items_ops::SupersedeOut;
 use super::items_store::{start_checks, Answered, Created, Items, NewIntent};
@@ -1580,4 +1580,393 @@ async fn the_items_of_one_agent_can_be_listed() {
             (0, 2)
         );
     }
+}
+
+// ---------------------------------------------------------------- the mode `enrolled` (lot G6)
+
+fn enrolled(token: Option<&str>) -> AgentCall {
+    AgentCall {
+        mode: AgentMode::Enrolled,
+        token: token.map(str::to_string),
+        hints: Hints::default(),
+    }
+}
+
+async fn enroll(
+    items: &Items<'_>,
+    key: &str,
+    name: &str,
+) -> Result<super::agents_store::Enrolled, EnrollError> {
+    items
+        .enroll_agent(OWNER, key, AgentMode::Enrolled, name, "web")
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn enroll_returns_the_token_once_and_the_database_keeps_only_the_digest() {
+    for env in envs().await {
+        let items = env.items();
+        let e = enroll(&items, KEY1, "Billing bot").await.unwrap();
+        assert!(
+            e.token.starts_with("agt_") && e.token.len() == 47,
+            "{}",
+            env.name
+        );
+        let a = &e.agent;
+        assert_eq!(
+            (a.state, a.origin, a.kind, a.rev, a.ordinal),
+            (
+                AgentState::Known,
+                super::agents::AgentOrigin::Owner,
+                AgentKind::Agent,
+                1,
+                1
+            ),
+            "{}",
+            env.name
+        );
+        assert_eq!(a.name.as_deref(), Some("Billing bot"));
+        assert_eq!(
+            a.token_digest.as_deref(),
+            Some(super::agents::token_digest(&e.token).as_str())
+        );
+        // The read of the row never gives the token. The database holds the digest and no copy of the token.
+        let stored = items.agent(&a.agent_id).await.unwrap().unwrap();
+        assert_eq!(stored, e.agent);
+        let all = super::items_tests::dump(&env).await.join("\n");
+        assert!(
+            !all.contains(&e.token[..]) && !all.contains(&e.token[4..]),
+            "{}",
+            env.name
+        );
+        // The token works for the agent, and the agent never passed through the state `new`.
+        let r = who_enrolled(&items, KEY1, &e.token).await.unwrap();
+        assert_eq!(
+            (r.agent_id.as_str(), r.state),
+            (a.agent_id.as_str(), AgentState::Known)
+        );
+        // The event holds the id of the actor and a number, no secret.
+        let events = items.agent_events(&a.agent_id, 10).await.unwrap();
+        assert_eq!(
+            events.iter().map(|e| e.event.as_str()).collect::<Vec<_>>(),
+            ["enrolled"]
+        );
+        assert_eq!(events[0].actor, OWNER);
+        assert!(!format!("{events:?}").contains(&e.token[4..]));
+        assert_eq!(
+            env.count("SELECT COUNT(*) FROM agents WHERE kind = 'bucket'")
+                .await,
+            1
+        );
+    }
+}
+
+async fn who_enrolled(items: &Items<'_>, key: &str, token: &str) -> Result<Resolved, AgentError> {
+    items
+        .resolve_agent(key, OWNER, &enrolled(Some(token)), true)
+        .await
+        .map(|r| r.expect("a token always gives an agent"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn enroll_uses_the_name_rules_of_a_rename_and_the_ordinal() {
+    for env in envs().await {
+        let items = env.items();
+        let first = enroll(&items, KEY1, "Billing bot").await.unwrap();
+        // The same name after NFKC and lower case is taken, inside the key only.
+        assert_eq!(
+            enroll(&items, KEY1, "ＢＩＬＬＩＮＧ bot")
+                .await
+                .unwrap_err(),
+            EnrollError::NameTaken,
+            "{}",
+            env.name
+        );
+        let other_key = enroll(&items, KEY2, "billing BOT").await.unwrap();
+        assert_eq!(other_key.agent.ordinal, 1, "the ordinal is per key");
+        for bad in [
+            "",
+            " x",
+            "x ",
+            "a\tb",
+            "a\u{202E}b",
+            "a\u{200B}b",
+            "a\u{2028}b",
+            &"x".repeat(33),
+        ] {
+            assert!(
+                matches!(
+                    enroll(&items, KEY1, bad).await,
+                    Err(EnrollError::InvalidName(_))
+                ),
+                "{bad:?}"
+            );
+        }
+        let second = enroll(&items, KEY1, "Reports").await.unwrap();
+        assert_eq!(second.agent.ordinal, first.agent.ordinal + 1);
+        // A refusal writes nothing: two agents of KEY1 and one of KEY2.
+        assert_eq!(
+            env.count("SELECT COUNT(*) FROM agents WHERE kind = 'agent'")
+                .await,
+            3,
+            "{}",
+            env.name
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn enroll_needs_the_mode_enrolled_and_the_cap_of_the_key_applies() {
+    for mut env in envs().await {
+        env.rules.agents.max_per_key = 2;
+        let items = env.items();
+        for mode in [AgentMode::Key, AgentMode::Discover] {
+            let e = items
+                .enroll_agent(OWNER, KEY1, mode, "x", "web")
+                .await
+                .unwrap();
+            assert_eq!(e.unwrap_err(), EnrollError::WrongMode, "{}", env.name);
+        }
+        assert_eq!(
+            env.count("SELECT COUNT(*) FROM agents").await,
+            0,
+            "a refusal writes nothing"
+        );
+        enroll(&items, KEY1, "one").await.unwrap();
+        // An agent that a call made counts too.
+        let (_, _) = make(&items, KEY1).await;
+        assert_eq!(
+            enroll(&items, KEY1, "two").await.unwrap_err(),
+            EnrollError::Cap
+        );
+        // The cap is per key.
+        enroll(&items, KEY2, "two").await.unwrap();
+    }
+    // Without the block `inbox.agents`, the mode of the key is `key`.
+    for mut env in envs().await {
+        env.rules.agents = AgentRules::off();
+        let items = env.items();
+        assert_eq!(
+            enroll(&items, KEY1, "x").await.unwrap_err(),
+            EnrollError::WrongMode
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_call_without_a_valid_token_on_an_enrolled_key_is_refused_and_makes_nothing() {
+    for env in envs().await {
+        let items = env.items();
+        let e = enroll(&items, KEY1, "bot").await.unwrap();
+        let none = items
+            .resolve_agent(KEY1, OWNER, &enrolled(None), true)
+            .await
+            .unwrap_err();
+        assert_eq!(none.code(), "agent_token_required", "{}", env.name);
+        let wrong = who_enrolled(&items, KEY1, &super::agents::new_token())
+            .await
+            .unwrap_err();
+        assert_eq!(wrong.code(), "agent_unknown");
+        // The token of an agent of another key is unknown on this key.
+        assert_eq!(
+            who_enrolled(&items, KEY2, &e.token)
+                .await
+                .unwrap_err()
+                .code(),
+            "agent_unknown"
+        );
+        assert_eq!(
+            env.count("SELECT COUNT(*) FROM agents WHERE kind = 'agent'")
+                .await,
+            1
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reset_kills_the_old_token_at_once_raises_rev_and_the_event_has_no_secret() {
+    for env in envs().await {
+        let items = env.items();
+        let e = enroll(&items, KEY1, "bot").await.unwrap();
+        let id = e.agent.agent_id.clone();
+        let item = item_of(&items, 1, KEY1, Some(&id)).await;
+        let r = items
+            .reset_agent_token(OWNER, &id, AgentMode::Enrolled, "web")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(r.token.as_str(), e.token.as_str());
+        assert_eq!(r.agent.rev, e.agent.rev + 1, "{}", env.name);
+        assert_eq!(
+            who_enrolled(&items, KEY1, &e.token)
+                .await
+                .unwrap_err()
+                .code(),
+            "agent_unknown",
+            "the old token is dead at once"
+        );
+        let now = who_enrolled(&items, KEY1, &r.token).await.unwrap();
+        assert_eq!(now.agent_id, id);
+        // The agent keeps its name, its state and its items.
+        let row = items.agent(&id).await.unwrap().unwrap();
+        assert_eq!(
+            (row.name.as_deref(), row.state),
+            (Some("bot"), AgentState::Known)
+        );
+        assert_eq!(agent_of(&items, &item).await, id);
+        let events = items.agent_events(&id, 10).await.unwrap();
+        assert_eq!(events[0].event, "token_reset");
+        assert_eq!(
+            (events[0].actor.as_str(), events[0].detail.clone()),
+            (OWNER, None)
+        );
+        let all = super::items_tests::dump(&env).await.join("\n");
+        for t in [&e.token, &r.token] {
+            assert!(!all.contains(&t[4..]), "{}", env.name);
+        }
+        // A reset of an agent of another owner, or of one that does not exist, is `NotFound`.
+        assert_eq!(
+            items
+                .reset_agent_token("mallory", &id, AgentMode::Enrolled, "web")
+                .await
+                .unwrap()
+                .unwrap_err(),
+            EnrollError::NotFound
+        );
+        assert_eq!(
+            items
+                .reset_agent_token(OWNER, "nope", AgentMode::Enrolled, "web")
+                .await
+                .unwrap()
+                .unwrap_err(),
+            EnrollError::NotFound
+        );
+        // The mode must be `enrolled`.
+        assert_eq!(
+            items
+                .reset_agent_token(OWNER, &id, AgentMode::Discover, "web")
+                .await
+                .unwrap()
+                .unwrap_err(),
+            EnrollError::WrongMode
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reset_refuses_the_bucket_a_call_agent_and_a_merged_agent() {
+    for env in envs().await {
+        let items = env.items();
+        let (called, _) = make(&items, KEY1).await;
+        let a = enroll(&items, KEY1, "a").await.unwrap();
+        let b = enroll(&items, KEY1, "b").await.unwrap();
+        let bucket = items.bucket(KEY1, OWNER).await.unwrap();
+        let reset = |id: String| {
+            let items = &items;
+            async move {
+                items
+                    .reset_agent_token(OWNER, &id, AgentMode::Enrolled, "web")
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(
+            reset(bucket.agent_id).await.unwrap_err(),
+            EnrollError::BadState
+        );
+        assert_eq!(
+            reset(called).await.unwrap_err(),
+            EnrollError::BadState,
+            "{}",
+            env.name
+        );
+        op(
+            &items,
+            &a.agent.agent_id,
+            AgentOp::Merge {
+                into: b.agent.agent_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reset(a.agent.agent_id.clone()).await.unwrap_err(),
+            EnrollError::BadState
+        );
+        // A blocked agent can get a new token. It stays blocked.
+        op(&items, &b.agent.agent_id, AgentOp::Block).await.unwrap();
+        let r = reset(b.agent.agent_id.clone()).await.unwrap();
+        assert_eq!(
+            who_enrolled(&items, KEY1, &r.token)
+                .await
+                .unwrap_err()
+                .code(),
+            "agent_blocked"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn enroll_and_reset_write_a_notice_for_the_phones_and_the_metrics_carry_no_secret() {
+    for env in envs().await {
+        let metrics = super::metrics::InboxMetrics::default();
+        let mut items = env.items();
+        items.metrics = Some(&metrics);
+        env.device("d1", OWNER).await;
+        let e = enroll(&items, KEY1, "bot").await.unwrap();
+        let id = e.agent.agent_id.clone();
+        let notices = |rev: i64| {
+            let (env, id) = (&env, id.clone());
+            async move {
+                env.count(&format!(
+                    "SELECT COUNT(*) FROM alerts WHERE idempotency_key = '{id}:agent:{rev}'"
+                ))
+                .await
+            }
+        };
+        assert_eq!(notices(1).await, 1, "{}", env.name);
+        items
+            .reset_agent_token(OWNER, &id, AgentMode::Enrolled, "web")
+            .await
+            .unwrap()
+            .unwrap();
+        // The reset raised `rev`, so the phones get one more frame `agent`.
+        assert_eq!(notices(2).await, 1, "{}", env.name);
+        let text = metrics.render(None);
+        for line in [
+            "portal_agents_created_total{origin=\"owner\"} 1",
+            "portal_agent_actions_total{op=\"reset_token\",via=\"web\"} 1",
+        ] {
+            assert!(text.contains(line), "{}: {line}\n{text}", env.name);
+        }
+        assert!(!text.contains(&e.token[4..]));
+    }
+}
+
+#[test]
+fn the_debug_text_of_an_enrolled_agent_hides_the_token() {
+    let token = super::agents::new_token();
+    let e = super::agents_store::Enrolled {
+        agent: super::agents::AgentRow {
+            agent_id: "a".into(),
+            key_id: "k".into(),
+            owner: "o".into(),
+            kind: AgentKind::Agent,
+            state: AgentState::Known,
+            origin: super::agents::AgentOrigin::Owner,
+            ordinal: 1,
+            name: None,
+            name_key: None,
+            token_digest: None,
+            merged_into: None,
+            rev: 1,
+            created_at: 0,
+            named_at: None,
+            last_seen_at: 0,
+            hints: None,
+        },
+        token: token.clone(),
+    };
+    assert!(!format!("{e:?}").contains(&token[4..]));
 }

@@ -16,15 +16,19 @@ use std::collections::{HashMap, HashSet};
 
 use super::items::{allowed, body_of, id_ok, key_text, no_store};
 use super::*;
+use crate::inbox::agents::AgentOrigin;
 use crate::inbox::agents::{
     find_similar, AgentKind, AgentMode, AgentRow, AgentState, AgentSummary, Observed,
 };
-use crate::inbox::page_items::{AgentOp, ItemError, Items, ListFilter, Loaded, OpDone, OpError};
+use crate::inbox::page_items::{
+    AgentOp, EnrollError, ItemError, Items, ListFilter, Loaded, OpDone, OpError,
+};
 use crate::ui::agents::{
-    self as ui_agents, AgentPage, AgentView, AgentsList, FirstUse, KeyCounts, ListRow, Lookalike,
-    Sender, Similar,
+    self as ui_agents, AgentPage, AgentView, AgentsList, AlsoBy, EnrollForm, FirstUse, KeyCounts,
+    ListRow, Lookalike, Sender, Similar, TokenPage,
 };
 use crate::ui::items::{Body, Line, StateFilter, Title};
+use crate::users::KeyOwner;
 use inbox_core::proto::Kind;
 
 type Fields = HashMap<String, String>;
@@ -271,11 +275,29 @@ pub(super) async fn sender(
         }
         _ => (Roster { rows: Vec::new() }.fallback(state, l), None),
     };
+    // The other agents that asked for the same effect. Their names are text of the server. Only the owner reads them.
+    let mut also = Vec::new();
+    if owner {
+        if let (Some(r), Ok(rows)) = (&roster, items.also_requested_by(&l.item.request_id).await) {
+            for other in rows {
+                if other.agent_id == l.item.agent_id
+                    || also.iter().any(|a: &AlsoBy| a.agent_id == other.agent_id)
+                {
+                    continue;
+                }
+                also.push(AlsoBy {
+                    label: r.view(state, items, &other, false).label,
+                    agent_id: other.agent_id,
+                });
+            }
+        }
+    }
     Sender {
         agent,
         lookalike,
         owner,
         lock: lock_new(ctx),
+        also,
     }
 }
 
@@ -354,6 +376,66 @@ async fn frame<'a>(state: &'a Arc<AppState>, ctx: &'a Context<'_>) -> crate::ui:
     frame
 }
 
+/// The keys of the owner that are in the mode `enrolled`: the choices of the form "Add agent". Empty without the block
+/// `inbox.agents`.
+fn enrolled_keys(state: &AppState, ctx: &Context<'_>) -> Vec<(String, String)> {
+    if !agents_on(ctx) {
+        return Vec::new();
+    }
+    let now = unix_now();
+    state
+        .users
+        .keys()
+        .into_iter()
+        .filter(|k| {
+            k.agents == crate::keys::AgentsMode::Enrolled
+                && !k.expired(now)
+                && matches!(&k.owner, KeyOwner::User(l) | KeyOwner::File(l) if *l == ctx.viewer.login)
+        })
+        .map(|k| (k.id.clone(), k.name.clone()))
+        .collect()
+}
+
+/// Draws the list of the agents. `typed` is what a refused form of "Add agent" carried: the key and the name.
+async fn draw_list(
+    state: &Arc<AppState>,
+    ctx: &Context<'_>,
+    items: &Items<'_>,
+    notice: Option<crate::ui::settings::Notice>,
+    status: StatusCode,
+    typed: (&str, &str),
+) -> HttpResponse {
+    let Some(roster) = Roster::of(items, &ctx.viewer.login, None).await else {
+        return unavailable();
+    };
+    let rows = roster
+        .rows
+        .iter()
+        .map(|s| ListRow {
+            agent: roster.view(state, items, &s.agent, false),
+            open: s.open.max(0) as usize,
+            idle: s.idle,
+        })
+        .collect();
+    let keys = enrolled_keys(state, ctx);
+    let enroll = (!keys.is_empty()).then(|| EnrollForm {
+        csrf: ctx.inbox_token.to_string(),
+        keys,
+        typed_key: typed.0.to_string(),
+        typed_name: typed.1.to_string(),
+    });
+    let page = ui_agents::agents_page(
+        &frame(state, ctx).await,
+        &AgentsList {
+            rows,
+            now_ms: unix_now() * 1000,
+            enroll,
+        },
+        notice,
+    );
+    no_store(html_response(status, page))
+}
+
 /// `GET /auth/settings/inbox/agents`: the list of the agents of the owner.
 pub(super) async fn list(state: &Arc<AppState>, ctx: &Context<'_>) -> HttpResponse {
     if !allowed(ctx) || !agents_on(ctx) {
@@ -380,27 +462,7 @@ pub(super) async fn list(state: &Arc<AppState>, ctx: &Context<'_>) -> HttpRespon
     if code.is_some() && notice.is_none() {
         return bad_request();
     }
-    let Some(roster) = Roster::of(&items, &ctx.viewer.login, None).await else {
-        return unavailable();
-    };
-    let rows = roster
-        .rows
-        .iter()
-        .map(|s| ListRow {
-            agent: roster.view(state, &items, &s.agent, false),
-            open: s.open.max(0) as usize,
-            idle: s.idle,
-        })
-        .collect();
-    let page = ui_agents::agents_page(
-        &frame(state, ctx).await,
-        &AgentsList {
-            rows,
-            now_ms: unix_now() * 1000,
-        },
-        notice,
-    );
-    no_store(html_response(StatusCode::OK, page))
+    draw_list(state, ctx, &items, notice, StatusCode::OK, ("", "")).await
 }
 
 /// Draws the page of one agent. `typed` is the name that a refused form carried.
@@ -517,6 +579,10 @@ async fn draw(
             counts,
             merged_into,
             typed,
+            can_reset: row.kind == AgentKind::Agent
+                && row.origin == AgentOrigin::Owner
+                && row.state != AgentState::Merged
+                && key_mode(state, &row.key_id) == AgentMode::Enrolled,
         },
         notice,
     );
@@ -749,4 +815,130 @@ pub(super) async fn merge(state: &Arc<AppState>, ctx: &Context<'_>, mut f: Field
         },
     )
     .await
+}
+
+// The mode `enrolled` (lot G6) ------------------------------------------------------------------------
+
+/// The page that shows the token one time. It is the answer to a POST. The token is in no URL and in no other page.
+fn token_response(
+    state: &Arc<AppState>,
+    ctx: &Context<'_>,
+    frame: crate::ui::Frame<'_>,
+    row: &AgentRow,
+    token: &str,
+    reset: bool,
+) -> HttpResponse {
+    let key_name = key_text(state, &row.key_id);
+    let label = row.label(&key_name, AgentMode::Enrolled);
+    let _ = ctx;
+    no_store(html_response(
+        StatusCode::OK,
+        ui_agents::token_page(
+            &frame,
+            &TokenPage {
+                label: &label,
+                key_name: &key_name,
+                agent_id: &row.agent_id,
+                token,
+                reset,
+            },
+        ),
+    ))
+}
+
+/// `POST /auth/settings/inbox/agents/enroll`: `key` and `name`. The key must be a key of the owner in the mode `enrolled`. An
+/// unknown key, a key of another owner and a key of another mode get the same answer.
+pub(super) async fn enroll(
+    state: &Arc<AppState>,
+    ctx: &Context<'_>,
+    mut f: Fields,
+) -> HttpResponse {
+    let (Some(key), Some(name)) = (f.remove("key"), f.remove("name")) else {
+        return bad_request();
+    };
+    if !f.is_empty() || key.len() > 64 || key.chars().any(char::is_control) {
+        return bad_request();
+    }
+    if ctx.viewer.session.impersonated || !allowed(ctx) || !agents_on(ctx) {
+        return forbidden();
+    }
+    let Some(items) = ctx.app.items() else {
+        return not_found();
+    };
+    let refuse = |notice: &str, status: StatusCode| {
+        let (state, items, key, name) = (state.clone(), &items, key.clone(), name.clone());
+        let notice = ui_agents::notice_for(notice);
+        async move { draw_list(&state, ctx, items, notice, status, (&key, &name)).await }
+    };
+    let mine = enrolled_keys(state, ctx);
+    if !mine.iter().any(|(id, _)| *id == key) {
+        return refuse("agent_no_key", StatusCode::UNPROCESSABLE_ENTITY).await;
+    }
+    match items
+        .enroll_agent(&ctx.viewer.login, &key, key_mode(state, &key), &name, "web")
+        .await
+    {
+        Ok(Ok(done)) => token_response(
+            state,
+            ctx,
+            frame(state, ctx).await,
+            &done.agent,
+            &done.token,
+            false,
+        ),
+        Ok(Err(EnrollError::InvalidName(_))) => {
+            refuse("agent_bad_name", StatusCode::UNPROCESSABLE_ENTITY).await
+        }
+        Ok(Err(EnrollError::NameTaken)) => {
+            refuse("agent_name_taken", StatusCode::UNPROCESSABLE_ENTITY).await
+        }
+        Ok(Err(EnrollError::Cap)) => refuse("agent_cap", StatusCode::CONFLICT).await,
+        Ok(Err(_)) => refuse("agent_no_key", StatusCode::UNPROCESSABLE_ENTITY).await,
+        Err(ItemError::Degraded | ItemError::Replica) => unavailable(),
+        Err(_) => to_inbox("failed"),
+    }
+}
+
+/// `POST /auth/settings/inbox/agents/reset`: `agent_id`. The agent must be an agent of the owner that the owner made, on a
+/// key in the mode `enrolled`. The old token stops at once.
+pub(super) async fn reset(state: &Arc<AppState>, ctx: &Context<'_>, mut f: Fields) -> HttpResponse {
+    let Some(id) = take_id(&mut f) else {
+        return bad_request();
+    };
+    if !f.is_empty() {
+        return bad_request();
+    }
+    if ctx.viewer.session.impersonated || !allowed(ctx) || !agents_on(ctx) {
+        return forbidden();
+    }
+    let Some(items) = ctx.app.items() else {
+        return not_found();
+    };
+    // An agent of another owner is an agent that does not exist.
+    let row = match items.agent(&id).await {
+        Ok(Some(row)) if row.owner == ctx.viewer.login => row,
+        Ok(_) => return to_inbox("agent_gone"),
+        Err(_) => return unavailable(),
+    };
+    let mode = key_mode(state, &row.key_id);
+    match items
+        .reset_agent_token(&ctx.viewer.login, &id, mode, "web")
+        .await
+    {
+        Ok(Ok(done)) => token_response(
+            state,
+            ctx,
+            frame(state, ctx).await,
+            &done.agent,
+            &done.token,
+            true,
+        ),
+        Ok(Err(EnrollError::NotFound)) => to_inbox("agent_gone"),
+        Ok(Err(_)) => {
+            let notice = ui_agents::notice_for("agent_bad_state");
+            draw(state, ctx, &items, &row, notice, StatusCode::CONFLICT, None).await
+        }
+        Err(ItemError::Degraded | ItemError::Replica) => unavailable(),
+        Err(_) => to_inbox("failed"),
+    }
 }

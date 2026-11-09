@@ -445,7 +445,10 @@ async fn get(state: &Arc<AppState>, ctx: &Context<'_>, rest: &str) -> HttpRespon
         return agents::list(state, ctx).await;
     }
     if let Some(id) = rest.strip_prefix("/agents/") {
-        if matches!(id, "rename" | "allow" | "block" | "unblock" | "merge") {
+        if matches!(
+            id,
+            "rename" | "allow" | "block" | "unblock" | "merge" | "enroll" | "reset"
+        ) {
             return text_response(StatusCode::METHOD_NOT_ALLOWED, "Method Not Allowed\n");
         }
         return agents::page(state, ctx, id).await;
@@ -777,6 +780,8 @@ async fn post(
             | "/agents/block"
             | "/agents/unblock"
             | "/agents/merge"
+            | "/agents/enroll"
+            | "/agents/reset"
     ) {
         return not_found();
     }
@@ -798,6 +803,8 @@ async fn post(
         "/agents/block" => agents::block(state, &ctx, fields).await,
         "/agents/unblock" => agents::unblock(state, &ctx, fields).await,
         "/agents/merge" => agents::merge(state, &ctx, fields).await,
+        "/agents/enroll" => agents::enroll(state, &ctx, fields).await,
+        "/agents/reset" => agents::reset(state, &ctx, fields).await,
         _ => code(state, &ctx, fields).await,
     }
 }

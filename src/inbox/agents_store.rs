@@ -12,7 +12,9 @@ use super::agents::{
     check_binding, merge_hints, new_token, token_digest, token_has_form, AgentCall, AgentError,
     AgentEventRow, AgentKind, AgentMode, AgentRow, AgentSummary, Hints, Observed, Resolved,
 };
-use super::agents_ops::{self as ops, AgentOp, NewAgent, OpDone, OpError, ResolveReq};
+use super::agents_ops::{
+    self as ops, AgentOp, EnrollError, EnrollReq, NewAgent, OpDone, OpError, ResolveReq,
+};
 use super::content_box::{aad, FIELD_HINTS};
 use super::items::Loaded;
 use super::items_ops::Sealed;
@@ -379,5 +381,96 @@ impl Items<'_> {
             }
         }
         Ok(done.value)
+    }
+
+    // ------------------------------------------------------------ the mode `enrolled`
+
+    /// Makes an agent for the owner of a key in the mode `enrolled` (lot G6). The agent is `known`, with the given name.
+    /// The result holds the token: the engine keeps only its digest, so this value is the only copy and the caller shows it
+    /// once. The caller checks that the key belongs to `owner` and gives the mode of the key. A refusal writes nothing.
+    pub async fn enroll_agent(
+        &self,
+        owner: &str,
+        key_id: &str,
+        mode: AgentMode,
+        name: &str,
+        via: &'static str,
+    ) -> Result<Result<Enrolled, EnrollError>, ItemError> {
+        self.writable()?;
+        let token = new_token();
+        let req = EnrollReq {
+            key_id: key_id.to_string(),
+            owner: owner.to_string(),
+            mode,
+            name: name.to_string(),
+            agent_id: random_id(),
+            digest: token_digest(&token),
+            token,
+        };
+        let cx = self.cx();
+        let done = in_tx!(self, [cx, req], tx, ops::enroll(tx, &cx, &req))?;
+        self.after(&done.fx);
+        let agent = match done.value {
+            Ok(agent) => agent,
+            Err(e) => return Ok(Err(e)),
+        };
+        if let Some(m) = self.metrics {
+            m.agent_created("owner");
+        }
+        log::info!(event = "agent_enrolled", agent.id = %agent.agent_id, actor = %owner, via = via);
+        self.replicate().await?;
+        Ok(Ok(Enrolled {
+            agent,
+            token: req.token,
+        }))
+    }
+
+    /// Replaces the token of an agent that the owner made (lot G6). The old token is dead at once. The result holds the new
+    /// token, which the caller shows once. The caller gives the mode of the key of the agent.
+    pub async fn reset_agent_token(
+        &self,
+        owner: &str,
+        agent_id: &str,
+        mode: AgentMode,
+        via: &'static str,
+    ) -> Result<Result<Enrolled, EnrollError>, ItemError> {
+        self.writable()?;
+        let token = new_token();
+        let digest = token_digest(&token);
+        let cx = self.cx();
+        let (login, id) = (owner.to_string(), agent_id.to_string());
+        let done = in_tx!(
+            self,
+            [cx, login, id, digest],
+            tx,
+            ops::reset_token(tx, &cx, &login, &id, mode, &digest)
+        )?;
+        self.after(&done.fx);
+        let agent = match done.value {
+            Ok(agent) => agent,
+            Err(e) => return Ok(Err(e)),
+        };
+        if let Some(m) = self.metrics {
+            m.agent_action("reset_token", via);
+        }
+        log::info!(event = "agent_action", op = "reset_token", agent.id = %agent_id, actor = %owner, via = via);
+        self.replicate().await?;
+        Ok(Ok(Enrolled { agent, token }))
+    }
+}
+
+/// An agent that the owner made, or whose token the owner reset, with the new token. The token is the only copy.
+pub struct Enrolled {
+    pub agent: AgentRow,
+    pub token: zeroize::Zeroizing<String>,
+}
+
+impl std::fmt::Debug for Enrolled {
+    /// The token never goes to a log.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Enrolled")
+            .field("agent", &self.agent.agent_id)
+            .field("token", &"<hidden>")
+            .finish()
     }
 }
