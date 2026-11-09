@@ -15,7 +15,8 @@ import app.portalinbox.service.LinkState
  * The phone shows at most ONE notification for everything that waits: approvals, questions, replies of agents, alerts and the
  * warnings of portals that are down. It covers all portals. It has one fixed id and one fixed tag, and it is updated in place.
  * [compute] reads the state of the repositories and gives the [Aggregate]: counts for each portal, the oldest age, the most
- * urgent thing, the alarm and the single approval. [decide] says if the notification must alert again. [plan] says what to post.
+ * urgent thing, the alarm and the single approval. The digest of a portal is one more entry and one more part of its line
+ * ([DigestPlan], lot MP5): it never makes a second notification and it never makes a sound. [decide] says if the notification must alert again. [plan] says what to post.
  * The texts are in [AttentionText]. [AttentionCenter] runs the three steps. The Android object [AttentionNotifier] only draws.
  */
 object Attention {
@@ -35,7 +36,7 @@ object Attention {
     /** The sound of a new thing. [PHONE]: the sound mode of the phone decides. [RING]: one sound on the alarm stream. [ALARM]: the looping alarm. */
     enum class Sound { NONE, PHONE, RING, ALARM }
 
-    enum class What { APPROVAL, QUESTION, REPLY, ALERT, DOWN }
+    enum class What { APPROVAL, QUESTION, REPLY, ALERT, DOWN, DIGEST }
 
     enum class DownKind { OFFLINE, REENROLL, KEY_CHANGED }
 
@@ -59,7 +60,8 @@ object Attention {
     /**
      * [items]: the items that still wait for the owner (open, with no answer on its way). [alerts]: the unread alerts.
      * [phoneNowMs]: the time of the phone, for the quiet hours and the age of a warning. [network]: false when the phone has no
-     * network. Then no portal warning is made: the status notification says "No network" once.
+     * network. Then no portal warning is made: the status notification says "No network" once. [digests]: what still waits
+     * at each portal that sent a current digest ([DigestPlan.merge]).
      */
     data class Input(
         val portals: List<Portal>,
@@ -68,6 +70,7 @@ object Attention {
         val replies: List<Reply> = emptyList(),
         val phoneNowMs: Long = 0L,
         val network: Boolean = true,
+        val digests: List<DigestPlan.Waiting> = emptyList(),
     )
 
     /** One thing in the notification. [key] tells which one. [seen]: the phone already showed it before the process started. */
@@ -85,9 +88,13 @@ object Attention {
         val oldestAgeMs: Long?,
         /** The time of the phone for the age of [down]. */
         val phoneNowMs: Long,
+        /** What the digest of this portal says still waits. 0: no digest part. */
+        val waiting: Long = 0,
+        /** The age of the oldest waiting item of the digest, on the clock of the portal. */
+        val waitingAgeMs: Long? = null,
     ) {
         val toAnswer: Int get() = approvals + questions
-        val isEmpty: Boolean get() = toAnswer == 0 && replies == 0 && alerts == 0 && down == null
+        val isEmpty: Boolean get() = toAnswer == 0 && replies == 0 && alerts == 0 && down == null && waiting == 0L
     }
 
     data class Aggregate(
@@ -99,7 +106,9 @@ object Attention {
         val replies: Int,
         val alerts: Int,
         val down: Int,
-        /** The age of the oldest item or alert, on the clock of its portal. Null when there is none. */
+        /** What the digests say still waits, all portals together. */
+        val waiting: Long,
+        /** The age of the oldest item, alert or waiting digest item, on the clock of its portal. Null when there is none. */
         val oldestAgeMs: Long?,
         val maxRank: Rank?,
         /** The alarms that ring now (unread, not stopped). */
@@ -145,6 +154,7 @@ object Attention {
         var replies = 0
         var alerts = 0
         var down = 0
+        var waiting = 0L
         var oldest: Long? = null
         for (p in input.portals) {
             val id = p.identity.id
@@ -196,17 +206,29 @@ object Attention {
                 entries.putIfAbsent(key, Entry(key, id, What.DOWN, Rank.NORMAL, if (p.muted) Sound.NONE else Sound.PHONE, false))
                 down++
             }
+            // The digest of the portal: a silent entry (a new digest brings the notification back without a sound) and a part of its line.
+            val digest = input.digests.firstOrNull { it.serverId == id }
+            var waitingAge: Long? = null
+            if (digest != null) {
+                val key = "g:$id:${digest.deliveryId}"
+                entries.putIfAbsent(key, Entry(key, id, What.DIGEST, Rank.LOW, Sound.NONE, false))
+                older(digest.oldestCreatedAtMs)
+                waitingAge = (p.nowMs - digest.oldestCreatedAtMs).coerceAtLeast(0)
+                waiting += digest.count
+            }
             val line = Line(
-                p.identity, p.hideNameOnLock, open.count { it.kind == RequestKind.APPROVAL }, open.count { it.kind != RequestKind.APPROVAL },
-                pReplies.size, unread.size, dn, age, input.phoneNowMs,
+                identity = p.identity, hideNameOnLock = p.hideNameOnLock, approvals = open.count { it.kind == RequestKind.APPROVAL },
+                questions = open.count { it.kind != RequestKind.APPROVAL }, replies = pReplies.size, alerts = unread.size, down = dn,
+                oldestAgeMs = age, phoneNowMs = input.phoneNowMs, waiting = digest?.count ?: 0, waitingAgeMs = waitingAge,
             )
             if (!line.isEmpty) lines.add(line)
             if (age != null && (oldest == null || age!! > oldest!!)) oldest = age
         }
-        val single = if (approvals == 1 && questions == 0 && replies == 0 && alerts == 0 && down == 0) singleCandidate else null
+        // A digest that says more than this one approval waits is more than one approval: no action then.
+        val single = if (approvals == 1 && questions == 0 && replies == 0 && alerts == 0 && down == 0 && waiting <= 1) singleCandidate else null
         return Aggregate(
             lines = lines, entries = entries.values.toList(), approvals = approvals, questions = questions, replies = replies,
-            alerts = alerts, down = down, oldestAgeMs = oldest, maxRank = entries.values.maxOfOrNull { it.rank },
+            alerts = alerts, down = down, waiting = waiting, oldestAgeMs = oldest, maxRank = entries.values.maxOfOrNull { it.rank },
             ringing = ringing, singleApproval = single,
         )
     }

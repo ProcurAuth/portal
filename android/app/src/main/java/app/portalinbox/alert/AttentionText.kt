@@ -10,6 +10,10 @@ import app.portalinbox.ui.VisibleText
  * the oldest thing. The public version shows on a locked screen: the same counts, and the nickname of a portal only when the user
  * did not hide it for that portal. Neither version holds a command, a body, a title of a request, an agent text or an
  * explanation. A nickname goes through [VisibleText.escapeLine] anyway.
+ *
+ * The digest of a portal (lot MP5) adds "3 waiting, oldest 6 days" to the line of that portal. When the phone holds no item of a
+ * portal yet, the digest also gives the title: "5 waiting". The digest adds only numbers and an age, so it is the same on the
+ * lock screen.
  */
 object AttentionText {
     /**
@@ -43,9 +47,16 @@ object AttentionText {
         }
     }
 
-    /** "Production: 2 to answer, 1 alert" or "Homelab: not connected for 3 hours" or "Homelab: 1 to answer · not connected for 3 hours". */
+    /** The digest part of a line: "3 waiting, oldest 6 days". Null when the portal has no current digest. */
+    fun waitingText(p: Attention.Line): String? =
+        if (p.waiting > 0) DigestPlan.text(p.waiting, p.waitingAgeMs ?: 0) else null
+
+    /**
+     * "Production: 2 to answer, 1 alert" or "Homelab: not connected for 3 hours" or "Homelab: 1 to answer · not connected for 3 hours"
+     * or "Production: 5 to answer · 3 waiting, oldest 6 days".
+     */
     fun lineOf(p: Attention.Line): String {
-        val parts = listOfNotNull(countsOf(p).ifEmpty { null }, downText(p))
+        val parts = listOfNotNull(countsOf(p).ifEmpty { null }, waitingText(p), downText(p))
         return name(p) + ": " + parts.joinToString(" · ")
     }
 
@@ -58,23 +69,27 @@ object AttentionText {
         if (counts.isNotEmpty()) {
             title = counts
             publicTitle = counts
+        } else if (a.waiting > 0) {
+            // The digest knows items that the phone does not hold yet: only numbers.
+            title = "${a.waiting} waiting"
+            publicTitle = title
         } else {
             // Only warnings of portals that are down.
             val down = a.lines.filter { it.down != null }
             title = if (down.size == 1) name(down[0]) + " is not connected" else "${down.size} portals are not connected"
             publicTitle = if (down.size == 1 && !down[0].hideNameOnLock) title else if (down.size == 1) "A portal is not connected" else title
         }
-        val downNames = if (counts.isEmpty()) "" else a.lines.filter { it.down != null }.let { d ->
+        val downNames = if (counts.isEmpty() && a.waiting == 0L) "" else a.lines.filter { it.down != null }.let { d ->
             if (d.isEmpty()) "" else d.joinToString(", ") { name(it) } + (if (d.size == 1) " is" else " are") + " not connected"
         }
-        val text = if (counts.isEmpty()) {
+        val text = if (counts.isEmpty() && a.waiting == 0L) {
             val d = a.lines.first { it.down != null }
             if (a.lines.size == 1) downText(d)!!.replaceFirstChar { it.uppercase() } + ". Its requests wait." else "The phone cannot reach them. Their requests wait."
         } else {
             listOfNotNull(names, oldest?.replaceFirstChar { it.uppercase() }, downNames.ifEmpty { null }).joinToString(" · ")
         }
-        // One portal that is up: the two lines say it all. Else one line for each portal.
-        val lines = if (a.lines.size == 1 && a.lines[0].down == null) emptyList() else a.lines.map { lineOf(it) }
+        // One portal that is up, with no digest: the two lines say it all. Else one line for each portal.
+        val lines = if (a.lines.size == 1 && a.lines[0].down == null && a.lines[0].waiting == 0L) emptyList() else a.lines.map { lineOf(it) }
         val shown = a.lines.filter { !it.hideNameOnLock }.joinToString(", ") { name(it) }
         val publicText = if (shown.isEmpty()) PUBLIC_HINT else "$shown · $PUBLIC_HINT"
         return Content(title, text, lines, publicTitle, publicText)

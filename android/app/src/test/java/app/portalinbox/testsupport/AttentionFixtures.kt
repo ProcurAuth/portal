@@ -2,6 +2,7 @@ package app.portalinbox.testsupport
 
 import app.portalinbox.alert.Attention
 import app.portalinbox.alert.AttentionCenter
+import app.portalinbox.alert.DigestPlan
 import app.portalinbox.data.Alert
 import app.portalinbox.data.Item
 import app.portalinbox.data.ItemEngine
@@ -94,5 +95,9 @@ class AttentionWorld(val now: Long = 1_788_000_100_000L) {
         alerts: List<Alert> = emptyList(),
         replies: List<Attention.Reply> = emptyList(),
         network: Boolean = true,
-    ) = Attention.Input(portals, items, alerts, replies, now, network)
+        digests: List<DigestPlan.Waiting> = emptyList(),
+    ) = Attention.Input(portals, items, alerts, replies, now, network, digests)
+
+    /** What a digest of [server] says still waits: [count] items, the oldest [ageMs] old on the clock of the portal. */
+    fun waiting(server: Long, count: Long, ageMs: Long, id: String = "dg$server") = DigestPlan.Waiting(server, id, count, now - ageMs)
 }
