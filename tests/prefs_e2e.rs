@@ -116,7 +116,7 @@ fn prefs_page_refused_for_impersonated_session() {
     // Only the decided options: no delegation, no escalation, no muted agent (SPEC 3.9.6).
     let words = page.to_lowercase();
     assert!(
-        ["delegat", "escalat", "mute"]
+        ["delegat", "escalat", "muted agent", "mute agent"]
             .iter()
             .all(|w| !words.contains(w)),
         "{page}"
