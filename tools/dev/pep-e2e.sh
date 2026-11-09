@@ -4,7 +4,9 @@
 # link between them, a fake Docker socket for the discovery, and optionally PostgreSQL. It then runs two checks:
 #   1. tests/pep_e2e.rs (a Rust agent and a Rust phone with Noise): the scenarios of CONF 3 (approve and execute one time, a
 #      second call asks again, decline with a comment, abandon, renewal by get_action_status) and the PEP observation
-#      (the service saw the verdict, the request id and the code only).
+#      (the service saw the verdict, the request id and the code only), and the agent canary of SPEC 3.10.4: two agents of one
+#      key, a second agent for the same effect, and no token, label, client or id of an agent in any request, answer or log of
+#      the service.
 #   2. the series U of the ProcurAuth runner against the same reference service binary, for the cases U30 and U100-U110.
 #      The runner is the PDP of its own cases. It cannot call the portal: see docs/inbox/CONTRIBUTING.md.
 # Usage: tools/dev/pep-e2e.sh
@@ -213,6 +215,8 @@ $pool
     max_requests_per_key_per_hour = 500
   }
   mcp {}
+  # The agents (lot G5): the key makes agents by its calls, and the canary test checks that the service never sees them.
+  agents {}
   group "infra" {
     name        = "Infra"
     description = "Test group of the throwaway stack"
@@ -292,6 +296,21 @@ if [ "${PEP_E2E_SKIP_UNIT:-0}" != 1 ]; then
         fi
       done
     done < "$work/out/canaries.txt"
+    # The values that only the service must not see. The portal keeps the id of an agent in its own log (the field `agent`).
+    if [ -s "$work/out/canaries-service.txt" ]; then
+      while read -r canary; do
+        [ -n "$canary" ] || continue
+        for c in service tap sock; do
+          if grep -q -- "$canary" "$work/out/log-$c.txt"; then
+            echo "FAIL: an agent value is in the log of the container $c" >&2
+            hits=1
+          fi
+        done
+      done < "$work/out/canaries-service.txt"
+    else
+      echo "FAIL: the test wrote no agent values" >&2
+      hits=1
+    fi
     if [ "$hits" = 0 ]; then echo "ok: no canary string in the logs of the containers"; else status=1; fi
   else
     echo "FAIL: the test wrote no canary strings" >&2

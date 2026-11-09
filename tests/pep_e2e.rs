@@ -11,7 +11,7 @@
 mod common;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::approvals::{next_request, next_result, next_settled};
@@ -20,7 +20,8 @@ use common::{
     Server, ACCOUNT_PASSWORD,
 };
 use inbox_core::proto::{
-    Action, AnswerMsg, AnswerStatus, ClientMsg, Intent, ItemState, RequestMsg,
+    Action, AgentState, AnswerMsg, AnswerStatus, ClientMsg, Intent, ItemState, OpenRef, RequestMsg,
+    ServerMsg,
 };
 use serde_json::{json, Value};
 
@@ -30,6 +31,11 @@ const EXPLANATION: &str = "CANARY-EXPLANATION-7b1f4d2a";
 const HINT: &str = "CANARY-HINT-7b1f4d2a";
 const COMMENT: &str = "CANARY-COMMENT-7b1f4d2a use the staging table";
 const THREAD: &str = "CANARY-THREAD-7b1f4d2a";
+/// What the first agent and the second agent say about themselves, and the client that they show (lot G5). The agents give
+/// them to the portal only. The service must never see them, nor the token, nor the id of an agent.
+const LABEL: &str = "CANARY-LABEL-7b1f4d2a";
+const LABEL2: &str = "CANARY-LABEL2-7b1f4d2a";
+const UA: &str = "CANARY-UA-7b1f4d2a/1.0";
 const WAIT: Duration = Duration::from_secs(10);
 const TABLE: &str = "orders";
 
@@ -199,11 +205,19 @@ fn make_owner_and_key(s: &Server) -> (String, String, Arc<AdminSession>) {
 
 // ------------------------------------------------------------------------------------------------ the agent
 
+/// One agent: the key, and the token that the portal gave it (lot G5). The first call of the agent to the portal has no
+/// token. The portal makes the agent and gives its token in the result of `approval_intent`. The agent keeps it and sends
+/// it in the header `Agent-Token` to the portal, never to the service. A clone shares the token: it is the same agent.
 #[derive(Clone)]
 struct Agent {
     key: String,
     portal: u16,
     service: u16,
+    /// What the agent says about itself in its first `approval_intent`.
+    label: &'static str,
+    token: Arc<Mutex<Option<String>>>,
+    /// Everything that the service answered to this agent: the text of each reply.
+    from_service: Arc<Mutex<Vec<String>>>,
 }
 
 /// A tool result of the portal or of the service.
@@ -213,32 +227,64 @@ struct Tool {
 }
 
 impl Agent {
+    fn new(key: &str, stack: &Stack, label: &'static str) -> Agent {
+        Agent {
+            key: key.to_string(),
+            portal: stack.portal,
+            service: stack.service,
+            label,
+            token: Arc::new(Mutex::new(None)),
+            from_service: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// The token of the agent, when the portal gave it.
+    fn token(&self) -> Option<String> {
+        self.token.lock().unwrap().clone()
+    }
+
     /// The edge: Traefik calls `/auth/verify-key` with the key, and it copies the identity token to the request.
     fn identity_token(&self) -> String {
         let host = format!("127.0.0.1:{}", self.portal);
-        let (st, head, body) = http_full(
-            self.portal,
-            &host,
-            "GET",
-            "/auth/verify-key",
-            &[
-                ("Authorization", format!("Bearer {}", self.key)),
-                ("X-Forwarded-Method", "POST".into()),
-                ("X-Forwarded-Proto", "http".into()),
-                ("X-Forwarded-Host", "localhost".into()),
-                ("X-Forwarded-For", "203.0.113.9".into()),
-                ("X-Forwarded-Uri", "/datastore/mcp".into()),
-            ],
-            "",
-        );
+        let mut headers = vec![
+            ("Authorization", format!("Bearer {}", self.key)),
+            ("X-Forwarded-Method", "POST".into()),
+            ("X-Forwarded-Proto", "http".into()),
+            ("X-Forwarded-Host", "localhost".into()),
+            ("X-Forwarded-For", "203.0.113.9".into()),
+            ("X-Forwarded-Uri", "/datastore/mcp".into()),
+            ("User-Agent", UA.into()),
+        ];
+        // A client with a fixed header `Agent-Token` can send it to the edge too. The edge must not use it.
+        if let Some(token) = self.token() {
+            headers.push(("Agent-Token", token));
+        }
+        let (st, head, body) =
+            http_full(self.portal, &host, "GET", "/auth/verify-key", &headers, "");
         assert_eq!(st, 204, "the edge refused the key: {head} {body}");
-        head.lines()
+        let jwt = head
+            .lines()
             .find_map(|l| {
                 let (n, v) = l.split_once(':')?;
                 n.eq_ignore_ascii_case("x-identity-token")
                     .then(|| v.trim().to_string())
             })
-            .expect("the edge gives an identity token")
+            .expect("the edge gives an identity token");
+        // The identity token goes to the service: it holds nothing of an agent.
+        use base64ct::{Base64UrlUnpadded, Encoding};
+        let payload = jwt.split('.').nth(1).expect("a JWT has a payload");
+        let payload = String::from_utf8(Base64UrlUnpadded::decode_vec(payload).expect("base64url"))
+            .expect("JSON text");
+        let mut needles = vec![LABEL, LABEL2, UA, "agt_"];
+        let token = self.token();
+        needles.extend(token.as_deref().map(|t| &t[4..]));
+        for needle in needles {
+            assert!(
+                !payload.contains(needle),
+                "the identity token holds {needle:?}: {payload}"
+            );
+        }
+        jwt
     }
 
     fn rpc(&self, port: u16, headers: &[(&str, String)], body: &Value) -> Value {
@@ -257,15 +303,19 @@ impl Agent {
         }
     }
 
-    /// A tool of the portal, with the key (the agent channel).
+    /// A tool of the portal, with the key (the agent channel). The agent sends its token in the header `Agent-Token` when
+    /// it has one, and the client that it shows in `User-Agent`.
     fn portal(&self, name: &str, args: Value) -> Tool {
         let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                           "params": {"name": name, "arguments": args}});
-        let reply = self.rpc(
-            self.portal,
-            &[("Authorization", format!("Bearer {}", self.key))],
-            &body,
-        );
+        let mut headers = vec![
+            ("Authorization", format!("Bearer {}", self.key)),
+            ("User-Agent", UA.to_string()),
+        ];
+        if let Some(token) = self.token() {
+            headers.push(("Agent-Token", token));
+        }
+        let reply = self.rpc(self.portal, &headers, &body);
         Self::tool_result(&reply)
     }
 
@@ -275,7 +325,7 @@ impl Agent {
         let body = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
             "params": {"name": name, "arguments": args,
                        "_meta": {"io.modelcontextprotocol/protocolVersion": version}}});
-        self.rpc(
+        let reply = self.rpc(
             self.service,
             &[
                 ("X-Identity-Token", self.identity_token()),
@@ -283,7 +333,9 @@ impl Agent {
                 ("MCP-Protocol-Version", version.into()),
             ],
             &body,
-        )
+        );
+        self.from_service.lock().unwrap().push(reply.to_string());
+        reply
     }
 
     fn service(&self, name: &str, args: Value) -> Tool {
@@ -299,9 +351,22 @@ impl Agent {
         self.service("append_rows", args)
     }
 
-    fn intent(&self, args: Value) -> String {
+    fn intent(&self, mut args: Value) -> String {
+        // The first call has no token: it says who it is, and the portal makes the agent.
+        if self.token().is_none() {
+            args["agent_label"] = json!(self.label);
+        }
         let tool = self.portal("approval_intent", args);
         assert!(!tool.is_error, "{}", tool.value);
+        match (self.token(), tool.value["agent_token"].as_str()) {
+            (None, Some(token)) => {
+                assert!(token.starts_with("agt_") && token.len() == 47, "{token}");
+                assert_eq!(tool.value["agent_status"], "new", "{}", tool.value);
+                *self.token.lock().unwrap() = Some(token.to_string());
+            }
+            (None, None) => panic!("the first call gives the token: {}", tool.value),
+            (Some(_), given) => assert!(given.is_none(), "the token shows once"),
+        }
         tool.value["approval_ref"].as_str().unwrap().to_string()
     }
 
@@ -455,11 +520,7 @@ async fn pep_end_to_end() {
     step("setup: the owner, its key with `confirm`, the phone");
     let (key, key_id, session) = make_owner_and_key(&stack.s);
     let subject = format!("key:{key_id}");
-    let agent = Agent {
-        key,
-        portal: stack.portal,
-        service: stack.service,
-    };
+    let agent = Agent::new(&key, &stack, LABEL);
     let code = {
         let (st, v) = common::make_code(&stack.s, OWNER);
         assert_eq!(st, 200, "{v}");
@@ -555,6 +616,114 @@ async fn pep_end_to_end() {
     let seen = agent.portal("get_answer", json!({"request_id": id1}));
     assert_eq!(seen.value["status"], "pending", "{}", seen.value);
     pass("S1 U101 a call while pending gives the same request; the verdict is pending");
+
+    // SA (lot G5): a second agent of the same key asks for the same effect while the request is open. The portal made it a
+    // second agent (its own token). The PEP gives it the request of the first agent (same effect, same id, same code). The
+    // portal records `also_requested`, the item keeps its first agent, and the service learns nothing of the two agents.
+    step("SA: a second agent asks for the same effect: the same request, and the service sees no agent");
+    let agent2 = Agent::new(&agent.key, &stack, LABEL2);
+    let r_dup = agent2.intent(json!({"lease_s": 120, "explanation": EXPLANATION}));
+    assert_ne!(agent2.token(), agent.token(), "two agents, two tokens");
+    let dup = agent2.append(101, json!({"approval_ref": r_dup}));
+    assert_eq!(
+        awaiting(&dup),
+        (id1.clone(), code1.clone()),
+        "the same effect while the request is open gives the request of the first agent"
+    );
+    assert_eq!(agent2.status(&id1), "pending");
+    // The first agent still reads its request: the reads go by the key. Its own token is the one of the item.
+    let seen = agent.portal("get_answer", json!({"request_id": id1}));
+    assert_eq!(seen.value["status"], "pending", "{}", seen.value);
+    // A wrong token on a read is refused; the token of the other agent is the wrong one for this item.
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "get_answer", "arguments": {"request_id": id1, "agent_token": agent2.token().unwrap()}}});
+    let wrong = Agent::tool_result(&agent.rpc(
+        agent.portal,
+        &[("Authorization", format!("Bearer {}", agent.key))],
+        &body,
+    ));
+    assert!(wrong.is_error, "{}", wrong.value);
+    assert_eq!(
+        wrong.value["error"]["code"], "agent_mismatch",
+        "{}",
+        wrong.value
+    );
+    // The phone: the request of the first agent has the agent of the first agent, in portal text. The two frames `agent`
+    // carry what each agent said, and no second request frame came for the same effect.
+    let a1 = req.from.agent_id.clone();
+    assert_eq!(
+        (req.from.agent_state, req.from.label.as_str()),
+        (AgentState::New, "agent-laptop #1")
+    );
+    conn.send(&ClientMsg::Sync {
+        open: vec![OpenRef {
+            request_id: id1.clone(),
+            seq: req.seq,
+        }],
+        agents: Some(vec![]),
+    })
+    .await;
+    let mut frames = std::collections::BTreeMap::new();
+    let mut again = Vec::new();
+    loop {
+        match conn.recv(Duration::from_millis(1500)).await {
+            common::Recv::Msg(ServerMsg::Agent(f)) => {
+                conn.receipt(&f.id).await;
+                frames.insert(f.agent_id.clone(), *f);
+            }
+            common::Recv::Msg(ServerMsg::Request(r)) => {
+                conn.receipt(&r.id).await;
+                again.push(r.request_id.clone());
+            }
+            common::Recv::Msg(_) => {}
+            common::Recv::Closed(code) => panic!("closed: {code:?}"),
+            common::Recv::Timeout => break,
+        }
+    }
+    assert_eq!(frames.len(), 2, "two agents, no more: {frames:?}");
+    let says = |f: &inbox_core::proto::AgentMsg| f.observed.as_ref().and_then(|o| o.says.clone());
+    let a2 = frames
+        .values()
+        .find(|f| says(f).as_deref() == Some(LABEL2))
+        .expect("the frame of the second agent")
+        .agent_id
+        .clone();
+    assert_ne!(a1, a2);
+    assert_eq!(says(&frames[&a1]).as_deref(), Some(LABEL));
+    assert_eq!(
+        frames[&a1]
+            .observed
+            .as_ref()
+            .and_then(|o| o.client.as_deref()),
+        Some(UA),
+        "the portal shows the client that the agent sent"
+    );
+    assert!(
+        again.iter().all(|id| id == &id1),
+        "no request frame for the second agent: {again:?}"
+    );
+    // The ids and the tokens are known now: the script scans the logs of the stack for them.
+    let mut all = vec![
+        EXPLANATION.to_string(),
+        HINT.into(),
+        COMMENT.into(),
+        THREAD.into(),
+        LABEL.into(),
+        LABEL2.into(),
+        UA.into(),
+        "agt_".into(),
+    ];
+    for t in [agent.token().unwrap(), agent2.token().unwrap()] {
+        all.push(t[4..].to_string());
+    }
+    std::fs::write(out.join("canaries.txt"), all.join("\n") + "\n").unwrap();
+    // The portal logs the id of the agent in its own log (the field `agent`): the service never sees it.
+    std::fs::write(
+        out.join("canaries-service.txt"),
+        [a1.clone(), a2.clone()].join("\n") + "\n",
+    )
+    .unwrap();
+    pass("SA the same effect gives the same request; the phone has two agents, no second request frame");
 
     decide(&mut conn, &req, "m-1", Action::Accept, None).await;
     assert_eq!(agent.status(&id1), "approved");
@@ -824,6 +993,7 @@ async fn pep_end_to_end() {
         .map(|l| l.to_string())
         .collect::<Vec<_>>()
         .join("\n");
+    let (t1, t2) = (agent.token().unwrap(), agent2.token().unwrap());
     for needle in [
         EXPLANATION,
         HINT,
@@ -834,11 +1004,49 @@ async fn pep_end_to_end() {
         &phone.device_id,
         "pixel",
         "agent-laptop",
+        // The agents (lot G5): the tokens, what they said, their client, their ids, and the words of the channel.
+        &t1[4..],
+        &t2[4..],
+        "agt_",
+        LABEL,
+        LABEL2,
+        UA,
+        a1.as_str(),
+        a2.as_str(),
+        "agent_token",
+        "agent_label",
+        "agent_id",
+        "agent_status",
+        "observed",
+        "similar",
+        "also_requested",
     ] {
         assert!(
             !whole.contains(needle),
             "the link of the service holds {needle:?}"
         );
+    }
+    // What the service answered to the agents (the replies of the tools) holds none of these values either.
+    for agent in [&agent, &agent2] {
+        let replies = agent.from_service.lock().unwrap().join("\n");
+        assert!(replies.len() > 100, "the service answered: {replies}");
+        for needle in [
+            &t1[4..],
+            &t2[4..],
+            "agt_",
+            LABEL,
+            LABEL2,
+            UA,
+            a1.as_str(),
+            a2.as_str(),
+            "agent_token",
+            "agent_label",
+        ] {
+            assert!(
+                !replies.contains(needle),
+                "a reply of the service holds {needle:?}"
+            );
+        }
     }
     let verdicts = ["pending", "approved", "denied", "void"];
     let mut counts = std::collections::BTreeMap::<String, usize>::new();
@@ -967,11 +1175,30 @@ async fn pep_end_to_end() {
         metrics.contains("portal_pdp_approval_total"),
         "the portal counts the approval reasons"
     );
-    for needle in [EXPLANATION, HINT, COMMENT, THREAD] {
+    for needle in [
+        EXPLANATION,
+        HINT,
+        COMMENT,
+        THREAD,
+        LABEL,
+        LABEL2,
+        UA,
+        &t1[4..],
+        &t2[4..],
+        "agt_",
+        a1.as_str(),
+        a2.as_str(),
+    ] {
         assert!(
             !metrics.contains(needle),
-            "the metrics of the portal hold a canary"
+            "the metrics of the portal hold a canary: {needle}"
         );
     }
+    // The portal counts the two agents and the refusals, and it holds no text of an agent.
+    assert!(
+        metrics.contains("portal_agents_created_total{origin=\"call\"} 2"),
+        "{}",
+        line("portal_agent")
+    );
     pass("S6 the metrics of the portal count the reasons and hold no canary");
 }
