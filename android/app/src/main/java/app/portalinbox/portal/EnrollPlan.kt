@@ -171,6 +171,12 @@ object EnrollPlan {
         )
     }
 
+    /**
+     * The state of the tick after the reason for it changed. A tick that the user gave for one reason does not count for another one:
+     * a link that becomes a look-alike (the user typed a name that looks like another portal) asks again.
+     */
+    fun tickAfter(previous: TickReason?, current: TickReason?, ticked: Boolean): Boolean = ticked && previous == current
+
     /** The address without the scheme, with the host as a person reads it (Punycode decoded). */
     fun shownAddress(http: String): String {
         val parts = LookAlike.parts(http) ?: return http.removePrefix("https://").removePrefix("http://")

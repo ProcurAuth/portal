@@ -292,7 +292,7 @@ class PortalActivity : BaseActivity() {
             setTextColor(color(R.color.text))
             buttonTintList = android.content.res.ColorStateList.valueOf(color(R.color.primary))
             setPadding(dp(10), 0, dp(14), 0)
-            setOnCheckedChangeListener { _, on -> if (on != server.hideNameOnLock) { Store.get(this@PortalActivity).setHideNameOnLock(server.id, on) } }
+            setOnCheckedChangeListener { _, on -> Store.get(this@PortalActivity).setHideNameOnLock(server.id, on) }
         }
         q.addView(box)
         q.addView(label(getString(R.string.portal_hide_name_help), SP_S, color(R.color.text_muted)).apply { setPadding(dp(14), 0, dp(14), dp(10)) })

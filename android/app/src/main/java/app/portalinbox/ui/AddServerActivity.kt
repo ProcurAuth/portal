@@ -52,6 +52,8 @@ open class AddServerActivity : BaseActivity() {
     private var nickname = ""
     private var colorChoice: Int? = null
     private var ticked = false
+    private var tickReason: EnrollPlan.TickReason? = null
+    private var tickBuilt = false
     private var deviceName: String = Build.MODEL ?: ""
     private var codeError: String? = null
     private var busy = false
@@ -149,6 +151,7 @@ open class AddServerActivity : BaseActivity() {
         nickname = ""
         colorChoice = null
         ticked = false
+        tickReason = null
         codeError = null
         plan = null
     }
@@ -273,6 +276,7 @@ open class AddServerActivity : BaseActivity() {
         }
 
         tickBox = lin().also { body.addView(it, lp().margins(this, t = 14)) }
+        tickBuilt = false
 
         // The device name: small, after the rest. The portal shows it in its web interface.
         body.addView(label(getString(R.string.add_device_name), SP_S, color(R.color.text), MEDIUM).apply { setPadding(dp(4), 0, 0, 0) }, lp().margins(this, t = 18))
@@ -317,7 +321,6 @@ open class AddServerActivity : BaseActivity() {
     /** Draws the parts of the screen that depend on what the user typed. The fields themselves are not touched, so the keyboard stays. */
     private fun update() {
         val p = computePlan() ?: return
-        val first = plan == null
         plan = p
         val reenroll = target != null
 
@@ -334,13 +337,17 @@ open class AddServerActivity : BaseActivity() {
         }
         nameError?.text = if (check is PortalNaming.Check.Invalid && typed.isNotEmpty()) nameProblem(check) else ""
 
-        // The tick.
+        // The tick. A tick given for one reason does not count for another one.
+        val want = p.tickReason
+        if (want != tickReason) {
+            ticked = EnrollPlan.tickAfter(tickReason, want, ticked)
+            tickReason = want
+            tickBuilt = false
+        }
         tickBox?.let { box ->
-            val shown = box.tag
-            val want = p.tickReason
-            if (shown != want || first) {
+            if (!tickBuilt) {
+                tickBuilt = true
                 box.removeAllViews()
-                box.tag = want
                 if (want != null) {
                     val tick = CheckBox(this).apply {
                         text = getString(if (reenroll) R.string.enroll_tick_reenroll else R.string.enroll_tick)

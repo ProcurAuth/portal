@@ -94,7 +94,7 @@ object PortalListView {
                 onChanged()
             })
             // The same move without a drag, for a screen reader.
-            r.view.accessibilityDelegate = object : View.AccessibilityDelegate() {
+            r.tap.accessibilityDelegate = object : View.AccessibilityDelegate() {
                 override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
                     super.onInitializeAccessibilityNodeInfo(host, info)
                     info.addAction(AccessibilityNodeInfo.AccessibilityAction(ACTION_UP, getString(R.string.portal_move_up)))
@@ -118,7 +118,7 @@ object PortalListView {
         return panel
     }
 
-    private class RowViews(val view: LinearLayout, val handle: View)
+    private class RowViews(val view: LinearLayout, val tap: View, val handle: View)
 
     private fun Context.portalRow(m: PortalRow, now: Long, onOpen: (Long) -> Unit): RowViews {
         val id = m.identity.id
@@ -167,7 +167,7 @@ object PortalListView {
         wrap.contentDescription = spoken
         outer.contentDescription = spoken
         wrap.tag = id
-        return RowViews(wrap, handle)
+        return RowViews(wrap, outer, handle)
     }
 
     private fun Context.stateOf(m: PortalRow, now: Long): Pair<String, Int> = when (m.state) {

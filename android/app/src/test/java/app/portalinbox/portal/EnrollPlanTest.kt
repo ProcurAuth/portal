@@ -269,6 +269,16 @@ class EnrollPlanTest {
     }
 
     @Test
+    fun aTickGivenForOneReasonDoesNotCountForAnother() {
+        assertTrue(EnrollPlan.tickAfter(TickReason.LINK, TickReason.LINK, true))
+        assertFalse(EnrollPlan.tickAfter(TickReason.LINK, TickReason.LOOK_ALIKE, true))
+        assertFalse(EnrollPlan.tickAfter(TickReason.LOOK_ALIKE, TickReason.LINK, true))
+        assertFalse(EnrollPlan.tickAfter(TickReason.LINK, null, true))
+        assertFalse(EnrollPlan.tickAfter(null, TickReason.LINK, true))
+        assertFalse(EnrollPlan.tickAfter(TickReason.LINK, TickReason.LINK, false))
+    }
+
+    @Test
     fun planIsPureAndDoesNotChangeItsInput() {
         val before = existing.toList()
         val a = plan(fresh)
