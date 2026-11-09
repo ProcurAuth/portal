@@ -316,6 +316,20 @@ impl ItemTx for PgTx<'_> {
         Ok(())
     }
 
+    async fn event_details(
+        &mut self,
+        request_id: &str,
+        event: &str,
+    ) -> Result<Vec<String>, DbError> {
+        let rows = self
+            .rows(
+                "SELECT detail FROM item_events WHERE request_id = $1 AND event = $2 AND detail IS NOT NULL ORDER BY at, id",
+                &[Box::new(request_id.to_string()), Box::new(event.to_string())],
+            )
+            .await?;
+        Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
+    }
+
     async fn event_exists(
         &mut self,
         request_id: &str,

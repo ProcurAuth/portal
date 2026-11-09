@@ -151,6 +151,12 @@ pub trait ItemTx: super::agents_ops::AgentTx {
     ) -> impl Future<Output = Result<bool, DbError>>;
     fn owner_devices(&mut self, owner: &str) -> impl Future<Output = Result<Vec<String>, DbError>>;
     fn insert_event(&mut self, e: &NewEvent) -> impl Future<Output = Result<(), DbError>>;
+    /// The details of the events of one name of an item, the oldest first.
+    fn event_details(
+        &mut self,
+        request_id: &str,
+        event: &str,
+    ) -> impl Future<Output = Result<Vec<String>, DbError>>;
     /// Whether an event with this name and this detail exists for the item.
     fn event_exists(
         &mut self,

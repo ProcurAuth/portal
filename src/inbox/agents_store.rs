@@ -251,6 +251,29 @@ impl Items<'_> {
 
     // ------------------------------------------------------------ the reads
 
+    /// The other agents that asked for the effect of an open request and got that request (the event `also_requested`),
+    /// in the order of the events. The item keeps its first agent: these are the ones that asked after it. The page of the
+    /// request reads this for the line "Also asked by". An agent that the sweeper erased is left out.
+    pub async fn also_requested_by(&self, request_id: &str) -> Result<Vec<AgentRow>, ItemError> {
+        let id = request_id.to_string();
+        let details = in_tx!(
+            self,
+            [id],
+            tx,
+            super::items_ops::ItemTx::event_details(tx, &id, "also_requested")
+        )?;
+        let mut out = Vec::new();
+        for detail in details {
+            let Some(agent_id) = detail.strip_prefix("agent=") else {
+                continue;
+            };
+            if let Some(row) = self.agent(agent_id).await? {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
+
     /// The bucket of a key: the pseudo agent "Unattributed". It is made when it does not exist.
     pub async fn bucket(&self, key_id: &str, owner: &str) -> Result<AgentRow, ItemError> {
         self.writable()?;
