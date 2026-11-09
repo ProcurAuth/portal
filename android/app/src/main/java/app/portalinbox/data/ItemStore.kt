@@ -340,6 +340,13 @@ class SqlItemRepository(private val store: Store) : ItemRepository {
         }
     }
 
+    override fun deleteClosedAgentActionsBefore(serverId: Long, beforeMs: Long) {
+        db.delete(
+            "outbox", "server_id = ? AND type = ? AND closed_at_ms IS NOT NULL AND closed_at_ms < ?",
+            arrayOf(serverId.toString(), OutboxType.AGENT_DO.wire, beforeMs.toString()),
+        )
+    }
+
     override fun deleteDeliveriesBefore(serverId: Long, beforeMs: Long) {
         db.delete("deliveries", "server_id = ? AND received_at_ms < ?", arrayOf(serverId.toString(), beforeMs.toString()))
     }

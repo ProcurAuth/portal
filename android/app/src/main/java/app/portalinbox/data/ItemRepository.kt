@@ -58,6 +58,9 @@ interface ItemRepository {
     /** Erases an item and what belongs to it: its turns, its outbox rows and an early settlement. Lot A2, local retention. */
     fun deleteItem(serverId: Long, requestId: String)
 
+    /** Erases the closed outbox entries of the actions on agents that closed before [beforeMs]. An action has no item that a retention could erase. */
+    fun deleteClosedAgentActionsBefore(serverId: Long, beforeMs: Long)
+
     /** Forgets the deliveries that arrived before [beforeMs]. The server stopped sending these rows long ago. */
     fun deleteDeliveriesBefore(serverId: Long, beforeMs: Long)
 

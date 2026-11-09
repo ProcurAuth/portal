@@ -256,6 +256,8 @@ class ItemEngine(
      */
     fun onWelcome(serverId: Long, w: WelcomeFrame): SessionStart = repo.transaction {
         repo.putPrefs(serverId, StoredPrefs(w.prefs, w.bodyPurgeAfterMs), clock())
+        // The result of an action on an agent has no item to carry it away: the entry leaves after a week.
+        repo.deleteClosedAgentActionsBefore(serverId, clock() - AGENT_ACTION_KEEP_MS)
         if (!w.itemsEnabled) return@transaction SessionStart(null, emptyList())
         SessionStart(syncFrame(serverId), repo.pendingOutbox(serverId))
     }
@@ -344,5 +346,8 @@ class ItemEngine(
     companion object {
         /** The `result` of an outbox entry that a `settled` frame closed. */
         const val RESULT_SETTLED = "settled"
+
+        /** How long a closed action on an agent stays in the outbox. */
+        const val AGENT_ACTION_KEEP_MS = 7L * 24 * 3_600_000
     }
 }

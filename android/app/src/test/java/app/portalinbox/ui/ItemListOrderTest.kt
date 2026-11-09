@@ -41,6 +41,18 @@ class ItemListOrderTest {
     }
 
     @Test
+    fun theCardsOfTheNewAgentsSitBetweenTheAlertsAndTheItems() {
+        assertEquals(
+            listOf(ItemListOrder.Section.ALERTS, ItemListOrder.Section.NEW_AGENTS, ItemListOrder.Section.TO_ANSWER),
+            ItemListOrder.sections(hasAlerts = true, hasItems = true, hasNewAgents = true),
+        )
+        // A new agent with no request yet still has its card, so the list is not "all clear".
+        assertEquals(listOf(ItemListOrder.Section.NEW_AGENTS), ItemListOrder.sections(false, false, true))
+        assertEquals(listOf(ItemListOrder.Section.ALERTS, ItemListOrder.Section.NEW_AGENTS), ItemListOrder.sections(true, false, true))
+        assertTrue(ItemListOrder.sections(false, false, false).isEmpty())
+    }
+
+    @Test
     fun aSectionWithNoRowDoesNotShow() {
         assertEquals(listOf(ItemListOrder.Section.ALERTS), ItemListOrder.sections(true, false))
         assertEquals(listOf(ItemListOrder.Section.TO_ANSWER), ItemListOrder.sections(false, true))

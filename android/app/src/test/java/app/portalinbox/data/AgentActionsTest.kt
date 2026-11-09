@@ -257,4 +257,19 @@ class AgentActionsTest {
         assertEquals("This agent is new and locked. Allow the agent first, then approve.", OutboxAnswer.resultLine(done))
         assertTrue(OutboxAnswer.canTryAgain(done))
     }
+
+    @Test
+    fun aClosedActionLeavesTheOutboxAfterAWeekAndAnOpenOneNever() {
+        hold(1, a1)
+        val done = engine.agentDo(1, a1, AgentOp.BLOCK) as Submit.Queued
+        engine.onAgentResult(1, Make.agentResult(done.entry.clientMsgId, a1))
+        val waiting = engine.agentDo(1, a1, AgentOp.RENAME, name = "x") as Submit.Queued
+        now += ItemEngine.AGENT_ACTION_KEEP_MS - 1
+        engine.onWelcome(1, Make.welcome())
+        assertNotNull(repo.outbox(1, done.entry.clientMsgId))
+        now += 2
+        engine.onWelcome(1, Make.welcome())
+        assertNull(repo.outbox(1, done.entry.clientMsgId))
+        assertTrue(repo.outbox(1, waiting.entry.clientMsgId)!!.isPending)
+    }
 }

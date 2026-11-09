@@ -349,6 +349,33 @@ Tick the portals. Press the button **Apply to** and the number of portals. The p
 
 The phone shows at most one notification for all items and alerts of all portals. The phone updates it in place. The summary of a portal does not make a second notification and does not make a sound. It adds one line to the same notification, for example "Production: 5 to answer · 3 waiting, oldest 6 days". The count leaves out the requests that you already closed. The line stays for 24 hours, or until the next summary of that portal. When you removed the notification, a new summary puts it on the screen again, with no sound.
 
+### Agents on the phone
+
+The list **To answer** has one group for each agent. A group shows the name of the agent, the key, the last call and the count of its open requests. The name is your name for the agent, else the key name and a number. The portal gives it. The oldest request of a group is its first row.
+
+The groups follow their oldest request. A new agent comes first. The group **Unattributed** comes last. The list **Alerts** stays above.
+
+Tap the header of a group to fold it or to open it again. The phone keeps this choice. The portal does not know it. Tap **More** to open the screen of the agent.
+
+The line **Observed** under a header shows what the agent or its client said about itself. Anyone who holds the key can send the same text. The phone marks each hidden or look-alike character with its code. Do not use this line as proof.
+
+When a new agent calls, the phone shows a card **New agent** above **To answer**.
+
+1. Read the box **Observed, not verified**. Read the amber lines. They say when the text equals the name of an agent that you know.
+2. Type a name and press **Name and allow**. Or press **Allow as** to keep the name of the portal.
+3. Press **Block** to refuse the agent. The phone asks you to confirm. The portal cancels the open requests of the agent.
+4. If the agent is one that you know, press the merge button. Choose the known agent of the same key. A merge cannot be undone.
+
+With `inbox.agents.lock_new = true`, the card shows the line "Approve is locked until you allow this agent". The approval screen then turns **Approve** off. **Decline** still works. By default the portal does not lock a new agent, and the card has no lock line.
+
+The screen of an agent shows its name, key, state, last call, counts, the box of hints and its open requests. It also has **Rename**, **Merge**, **Block** and **Unblock**, as the state allows. The screen of a portal has the row **Agents**. Use it to find a blocked agent.
+
+The phone sends each action to the portal and waits for the answer. The action stays on the phone until the portal answers, also when the phone is offline. A line at the bottom tells the result. These actions do not ask for your fingerprint. An approval still asks for it.
+
+The approval screen has the box **From agent** under the title. It shows the name, the state and the key. The dashed line "Not verified: Says it is" shows the text of the agent. The agent can change this text at each call.
+
+A new agent adds "1 new agent" to the one notification, and a line "new agent on" with the key name. The lock screen shows only the count. The phone alerts once for each new agent. The notification does not repeat when the portal changes the agent again.
+
 ### Test with the emulator
 
 No physical phone is needed for the tests of the app. `tools/android/emulator.sh` runs an Android 14 emulator in Docker. It needs `/dev/kvm`.

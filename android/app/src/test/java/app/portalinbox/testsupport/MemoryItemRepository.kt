@@ -120,6 +120,10 @@ class MemoryItemRepository : ItemRepository {
         outbox.entries.removeAll { it.value.serverId == serverId && it.value.requestId == requestId }
     }
 
+    override fun deleteClosedAgentActionsBefore(serverId: Long, beforeMs: Long) {
+        outbox.entries.removeAll { it.value.serverId == serverId && it.value.type == app.portalinbox.data.OutboxType.AGENT_DO && (it.value.closedAtMs ?: Long.MAX_VALUE) < beforeMs }
+    }
+
     override fun deleteDeliveriesBefore(serverId: Long, beforeMs: Long) {
         deliveries.entries.removeAll { it.key.serverId == serverId && it.value < beforeMs }
     }
