@@ -898,6 +898,153 @@ mod tests {
         assert!(with_notice(plain).get("data_notice").is_none());
     }
 
+    fn who() -> Requester {
+        Requester {
+            key_id: "k".into(),
+            owner: "alice".into(),
+            interaction: Interaction::Conversational,
+            agent: AgentCall {
+                mode: super::super::agents::AgentMode::Discover,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.append(
+                hyper::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                hyper::header::HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        map
+    }
+
+    const TOKEN_A: &str = "agt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TOKEN_B: &str = "agt_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn bind_agrees_the_header_and_the_argument_and_checks_the_label() {
+        let ip = "203.0.113.9".parse().unwrap();
+        let base = |pairs: &[(&str, &str)]| with_transport(&who(), &headers(pairs), ip, None).unwrap();
+        // No token at all, the header, the argument, and the same value in both.
+        assert_eq!(bind(&base(&[]), None, None).unwrap().agent.token, None);
+        let header = base(&[("Agent-Token", TOKEN_A)]);
+        assert_eq!(bind(&header, None, None).unwrap().agent.token.as_deref(), Some(TOKEN_A));
+        assert_eq!(
+            bind(&base(&[]), Some(TOKEN_A), None).unwrap().agent.token.as_deref(),
+            Some(TOKEN_A)
+        );
+        assert_eq!(
+            bind(&header, Some(TOKEN_A), None).unwrap().agent.token.as_deref(),
+            Some(TOKEN_A)
+        );
+        // Two values that differ are a conflict, with the code of the table.
+        let e = bind(&header, Some(TOKEN_B), None).unwrap_err();
+        assert_eq!((e.status, e.code, e.retryable()), (422, "agent_token_conflict", false));
+        // An empty argument and an empty header are no token.
+        assert_eq!(bind(&header, Some(""), None).unwrap().agent.token.as_deref(), Some(TOKEN_A));
+        assert_eq!(bind(&base(&[]), Some(""), None).unwrap().agent.token, None);
+        assert_eq!(base(&[("Agent-Token", "")]).agent.token, None);
+        // The mode of the key and the hints stay.
+        let bound = bind(&header, None, Some("billing-bot")).unwrap();
+        assert_eq!(bound.agent.mode, super::super::agents::AgentMode::Discover);
+        assert_eq!(bound.agent.hints.says.as_deref(), Some("billing-bot"));
+        assert_eq!(bound.agent.hints.net.as_deref(), Some("203.0.113.0/24"));
+        // A label is a line of 1 to 64 characters with no control and no format character. It is never cleaned.
+        for label in ["", "a\nb", "a\u{202E}b", "a\u{200B}", " a", "a ", &"x".repeat(65)] {
+            let e = bind(&header, None, Some(label)).unwrap_err();
+            assert_eq!((e.status, e.code), (422, "invalid_agent_label"), "{label:?}");
+        }
+        assert!(bind(&header, None, Some(&"é".repeat(64))).is_ok());
+    }
+
+    #[test]
+    fn the_transport_gives_the_token_of_the_header_and_bounded_hints() {
+        let v4 = "203.0.113.9".parse().unwrap();
+        let v6 = "2001:db8:abcd:1234::7".parse().unwrap();
+        // The token comes from the header. The same value two times is one value, two values are a conflict.
+        let one = with_transport(&who(), &headers(&[("agent-token", TOKEN_A)]), v4, None).unwrap();
+        assert_eq!(one.agent.token.as_deref(), Some(TOKEN_A));
+        let same = with_transport(
+            &who(),
+            &headers(&[("Agent-Token", TOKEN_A), ("agent-token", TOKEN_A)]),
+            v4,
+            None,
+        )
+        .unwrap();
+        assert_eq!(same.agent.token.as_deref(), Some(TOKEN_A));
+        let e = with_transport(
+            &who(),
+            &headers(&[("Agent-Token", TOKEN_A), ("Agent-Token", TOKEN_B)]),
+            v4,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, "agent_token_conflict");
+        // The hints: the address range, the `User-Agent`, and `clientInfo` before the `User-Agent` for the client.
+        let ua = headers(&[("User-Agent", "node/22 (undici)")]);
+        let seen = with_transport(&who(), &ua, v6, None).unwrap().agent.hints;
+        assert_eq!(seen.net.as_deref(), Some("2001:db8:abcd::/48"));
+        assert_eq!(seen.user_agent.as_deref(), Some("node/22 (undici)"));
+        assert_eq!(seen.client.as_deref(), Some("node/22 (undici)"));
+        let seen = with_transport(&who(), &ua, v4, Some("claude-code/2.1")).unwrap().agent.hints;
+        assert_eq!(seen.client.as_deref(), Some("claude-code/2.1"));
+        assert_eq!(seen.user_agent.as_deref(), Some("node/22 (undici)"));
+        // A call with no `User-Agent` and no `clientInfo` has no client hint.
+        let seen = with_transport(&who(), &headers(&[]), v4, None).unwrap().agent.hints;
+        assert_eq!((seen.client, seen.user_agent), (None, None));
+        // The values are bounded, and a control or a format character never reaches the engine.
+        let long = "u".repeat(500);
+        let seen = with_transport(&who(), &headers(&[("User-Agent", long.as_str())]), v4, Some(&long))
+            .unwrap()
+            .agent
+            .hints;
+        assert_eq!(seen.user_agent.as_deref().map(|t| t.chars().count()), Some(128));
+        assert_eq!(seen.client.as_deref().map(|t| t.chars().count()), Some(64));
+        let seen = with_transport(&who(), &headers(&[]), v4, Some("evil\u{202E}name\u{7}x"))
+            .unwrap()
+            .agent
+            .hints;
+        assert_eq!(seen.client.as_deref(), Some("evil\u{FFFD}name\u{FFFD}x"));
+        assert_eq!(hint_text("   ", 10), None);
+        assert_eq!(hint_text("", 10), None);
+    }
+
+    #[test]
+    fn the_codes_of_the_agents_have_the_status_of_the_table_and_a_fixed_message() {
+        use super::super::agents::AgentError as Fault;
+        for (fault, code, status) in [
+            (Fault::Unknown, "agent_unknown", 422),
+            (Fault::Blocked, "agent_blocked", 403),
+            (Fault::TokenRequired, "agent_token_required", 422),
+            (Fault::Mismatch, "agent_mismatch", 403),
+        ] {
+            let e = AgentError::from(fault);
+            assert_eq!((e.code, e.status, e.retryable()), (code, status, false));
+            assert!(!e.message.is_empty());
+        }
+        assert_eq!(AgentError::token_conflict().status, 422);
+        assert_eq!(AgentError::invalid_label().code, "invalid_agent_label");
+        // The same message comes from the intent core.
+        let from_intent = AgentError::from(ApprovalError::new(403, "agent_mismatch"));
+        assert_eq!(from_intent.message, AgentError::from(super::super::agents::AgentError::Mismatch).message);
+    }
+
+    #[test]
+    fn the_debug_text_of_the_arguments_never_holds_the_token() {
+        let args = IntentArgs {
+            agent_token: Some(TOKEN_A.into()),
+            agent_label: Some("billing-bot".into()),
+            ..Default::default()
+        };
+        let text = format!("{args:?}");
+        assert!(!text.contains(&TOKEN_A[4..]) && !text.contains("billing"), "{text}");
+        let call = with_transport(&who(), &headers(&[("Agent-Token", TOKEN_A)]), "10.0.0.1".parse().unwrap(), None).unwrap();
+        assert!(!format!("{call:?}").contains(&TOKEN_A[4..]));
+    }
+
     #[test]
     fn an_error_is_retryable_for_a_limit_or_a_storage_that_is_away() {
         assert!(AgentError::new(429, "rate_limited", "x").retryable());

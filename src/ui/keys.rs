@@ -1311,6 +1311,54 @@ mod tests {
     }
 
     #[test]
+    fn the_form_of_a_key_has_the_choice_of_the_agents_only_when_the_file_has_the_block() {
+        let checked = |html: &str| -> Vec<String> {
+            html.match_indices(r#"name="agents" value=""#)
+                .filter_map(|(at, _)| {
+                    let rest = &html[at + r#"name="agents" value=""#.len()..];
+                    let value = &rest[..rest.find('"').unwrap()];
+                    let tag = &rest[..rest.find('>').unwrap()];
+                    tag.contains("checked").then(|| value.to_string())
+                })
+                .collect()
+        };
+        // Without the block the page has no field: the view has no mode.
+        let mut v = view(Pane::New, &BOTH);
+        v.kind = Some(KeyKind::Mcp);
+        assert!(!page(&v).contains(r#"name="agents""#));
+        // With the block: three radio buttons of one group, with the value of the view checked.
+        for (mode, expected) in [
+            (crate::keys::AgentsMode::Key, "key"),
+            (crate::keys::AgentsMode::Discover, "discover"),
+            (crate::keys::AgentsMode::Enrolled, "enrolled"),
+        ] {
+            v.agents = Some(mode);
+            let html = page(&v);
+            assert_eq!(checked(&html), [expected]);
+            assert_eq!(html.matches(r#"type="radio" name="agents""#).count(), 3);
+            assert!(html.contains(r#"role="radiogroup" aria-labelledby="key-agents-label""#));
+            assert!(html.contains(">One agent</label>") && html.contains(">Discover</label>"));
+            assert!(html.contains(">Enrolled</label>"));
+            // The field posts with the other fields, and it says that the grouping is not a sandbox.
+            let form = &html[html.find(r#"id="key-form""#).unwrap()..];
+            let form = &form[..form.find("</form>").unwrap()];
+            assert!(form.contains(r#"name="agents""#));
+            assert!(form.contains("The grouping is not a sandbox."));
+            // The interaction field stays as it was.
+            assert!(html.contains(r#"name="interaction""#));
+        }
+        // A page without a kind has no field, whatever the view says.
+        let mut none = view(Pane::New, &[]);
+        none.kind = None;
+        none.agents = Some(crate::keys::AgentsMode::Discover);
+        assert!(!page(&none).contains(r#"name="agents""#));
+        // The refusal of a form has its text, under the title of the page and not under a field.
+        let notice = notice_for("bad_agents").unwrap();
+        assert!(!notice.ok && notice.text.contains("discover"));
+        assert_eq!(field_of("bad_agents"), None);
+    }
+
+    #[test]
     fn a_page_without_a_kind_has_no_interaction_field() {
         let mut v = view(Pane::New, &[]);
         v.kind = None;
