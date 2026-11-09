@@ -94,6 +94,28 @@ object PrefsApply {
         return Outcome(sent, queued)
     }
 
+    enum class Stage { SENT, QUEUED, REFUSED }
+
+    /** One line of the sheet after the apply. */
+    data class ResultLine(val identity: PortalIdentity, val stage: Stage, val text: String)
+
+    /**
+     * What the sheet shows after the apply, for the portals that [run] handled. [refusal] gives the line of a portal that answered
+     * `invalid_prefs` (already safe to show), or null. The answer comes a moment after the frame, so the sheet asks again when
+     * something changes. A portal that waits can refuse later too, when it is back.
+     */
+    fun results(steps: List<Step>, out: Outcome, refusal: (Long) -> String?): List<ResultLine> = steps.mapNotNull { step ->
+        val id = step.target.identity.id
+        val queued = id in out.queued
+        if (id !in out.sent && !queued) return@mapNotNull null
+        val refused = refusal(id)
+        when {
+            refused != null -> ResultLine(step.target.identity, Stage.REFUSED, "Refused: $refused")
+            queued -> ResultLine(step.target.identity, Stage.QUEUED, "Waiting. Sent when it is back.")
+            else -> ResultLine(step.target.identity, Stage.SENT, "Sent.")
+        }
+    }
+
     /** The label of the button: "Apply to 2 portals". */
     fun buttonText(count: Int): String = if (count == 1) "Apply to 1 portal" else "Apply to $count portals"
 

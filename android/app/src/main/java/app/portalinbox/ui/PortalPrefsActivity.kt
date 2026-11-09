@@ -210,7 +210,7 @@ class PortalPrefsActivity : BaseActivity() {
         p.addView(
             row(
                 PrefsForm.digestTitle(digest),
-                PrefsForm.digestDetail(digest) ?: if (digest == null) getString(R.string.portal_prefs_default_help) else null,
+                PrefsForm.digestDetail(digest) ?: if (digest == null) getString(R.string.prefs_digest_default) else null,
                 label(getString(R.string.portal_prefs_change), SP_S, color(R.color.text_muted)),
             ) { summarySheet() }.apply { minimumHeight = dp(56) },
         )
@@ -361,39 +361,78 @@ class PortalPrefsActivity : BaseActivity() {
         }
         val steps = PrefsApply.plan(me.userName, targets, values)
         val chosen = steps.filter { it.ticked }.map { it.target.identity.id }.toMutableSet()
-        bottomSheet { sheet, dialog ->
-            sheet.addView(label(getString(R.string.portal_prefs_apply_title), SP_L, color(R.color.text_strong), BOLD))
-            sheet.addView(label(PrefsApply.describe(values), SP_S, color(R.color.text_muted)), lp().margins(this, t = 4, b = 10))
-            val apply = button(PrefsApply.buttonText(chosen.size)) {}
-            fun refreshButton() {
-                apply.text = PrefsApply.buttonText(chosen.size)
-                apply.isEnabled = chosen.isNotEmpty()
-                apply.alpha = if (chosen.isEmpty()) 0.4f else 1f
-            }
-            val list = panel()
-            steps.forEachIndexed { i, step ->
-                if (i > 0) list.addView(divider())
-                val id = step.target.identity.id
-                list.addView(applyLine(step.target.identity, step, id in chosen) { on ->
-                    if (on) chosen.add(id) else chosen.remove(id)
-                    refreshButton()
-                })
-            }
-            sheet.addView(list)
-            val actions = lin(vertical = false)
-            actions.addView(button(getString(R.string.cancel), ButtonKind.SECONDARY) { dialog.dismiss() }, lp(0, WRAP, 1f))
-            apply.setOnClickListener {
-                val out = PrefsApply.run(steps, chosen, values, pendingStore) { id, frame ->
-                    Registry.setRefusal(id, null)
-                    Registry.connections[id]?.sendPrefs(frame)
+        var listener: (() -> Unit)? = null
+        bottomSheet(onDismiss = { listener?.let { Registry.removeListener(it) } }) { sheet, dialog ->
+            val content = lin()
+            sheet.addView(content)
+
+            /** After the apply: one line for each portal that was handled. A refusal of a portal shows here as soon as it comes. */
+            fun showResults(out: PrefsApply.Outcome) {
+                fun draw() {
+                    content.removeAllViews()
+                    content.addView(label(getString(R.string.portal_prefs_applied_title), SP_L, color(R.color.text_strong), BOLD))
+                    val list = panel()
+                    PrefsApply.results(steps, out) { id -> Registry.refusal(id)?.let { PrefsForm.refusalLine(it) } }.forEachIndexed { i, line ->
+                        if (i > 0) list.addView(divider())
+                        val row = lin(vertical = false, padH = 12, padV = 8).apply {
+                            minimumHeight = dp(56)
+                            gravity = Gravity.CENTER_VERTICAL
+                            addView(monogramSquare(line.identity, 32), lp(dp(32), dp(32)).margins(this@PortalPrefsActivity, r = 10))
+                            val texts = lin()
+                            texts.addView(label(line.identity.nickname, SP_M, color(R.color.text_strong), MEDIUM, lines = 1))
+                            val c = when (line.stage) {
+                                PrefsApply.Stage.SENT -> R.color.text_muted
+                                PrefsApply.Stage.QUEUED -> R.color.warning
+                                PrefsApply.Stage.REFUSED -> R.color.danger
+                            }
+                            texts.addView(label(line.text, SP_S, color(c)), lp().margins(this@PortalPrefsActivity, t = 2))
+                            addView(texts, lp(0, WRAP, 1f))
+                            accessibilityLiveRegion = android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE
+                        }
+                        list.addView(row)
+                    }
+                    content.addView(list, lp().margins(this, t = 10))
+                    content.addView(button(getString(R.string.portal_prefs_done)) { dialog.dismiss() }, lp().margins(this, t = 14, b = 10))
                 }
-                dialog.dismiss()
-                PrefsApply.resultText(out)?.let { snackbar(it) }
-                render()
+                draw()
+                listener = { draw() }.also { Registry.addListener(it) }
             }
-            actions.addView(apply, lp(0, WRAP, 1f).margins(this, l = 10))
-            sheet.addView(actions, lp().margins(this, t = 14, b = 10))
-            refreshButton()
+
+            fun showChoices() {
+                content.removeAllViews()
+                content.addView(label(getString(R.string.portal_prefs_apply_title), SP_L, color(R.color.text_strong), BOLD))
+                content.addView(label(PrefsApply.describe(values), SP_S, color(R.color.text_muted)), lp().margins(this, t = 4, b = 10))
+                val apply = button(PrefsApply.buttonText(chosen.size)) {}
+                fun refreshButton() {
+                    apply.text = PrefsApply.buttonText(chosen.size)
+                    apply.isEnabled = chosen.isNotEmpty()
+                    apply.alpha = if (chosen.isEmpty()) 0.4f else 1f
+                }
+                val list = panel()
+                steps.forEachIndexed { i, step ->
+                    if (i > 0) list.addView(divider())
+                    val id = step.target.identity.id
+                    list.addView(applyLine(step.target.identity, step, id in chosen) { on ->
+                        if (on) chosen.add(id) else chosen.remove(id)
+                        refreshButton()
+                    })
+                }
+                content.addView(list)
+                val actions = lin(vertical = false)
+                actions.addView(button(getString(R.string.cancel), ButtonKind.SECONDARY) { dialog.dismiss() }, lp(0, WRAP, 1f))
+                apply.setOnClickListener {
+                    val out = PrefsApply.run(steps, chosen, values, pendingStore) { id, frame ->
+                        Registry.setRefusal(id, null)
+                        Registry.connections[id]?.sendPrefs(frame)
+                    }
+                    render()
+                    showResults(out)
+                }
+                actions.addView(apply, lp(0, WRAP, 1f).margins(this, l = 10))
+                content.addView(actions, lp().margins(this, t = 14, b = 10))
+                refreshButton()
+            }
+            showChoices()
         }
     }
 

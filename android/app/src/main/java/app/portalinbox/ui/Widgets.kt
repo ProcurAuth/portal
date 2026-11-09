@@ -235,8 +235,8 @@ private fun View.bottomInset(): Int {
     }
 }
 
-/** Bottom sheet on a plain Dialog: frosted glass, blurred backdrop on Android 12+. */
-fun Activity.bottomSheet(build: (LinearLayout, Dialog) -> Unit): Dialog {
+/** Bottom sheet on a plain Dialog: frosted glass, blurred backdrop on Android 12+. [onDismiss] runs when the sheet closes, for any reason. */
+fun Activity.bottomSheet(onDismiss: (() -> Unit)? = null, build: (LinearLayout, Dialog) -> Unit): Dialog {
     val d = Dialog(this, R.style.Theme_Inbox_Sheet)
     val sheet = lin(padH = 16, padV = 10).apply {
         background = GradientDrawable().apply {
@@ -267,7 +267,10 @@ fun Activity.bottomSheet(build: (LinearLayout, Dialog) -> Unit): Dialog {
     }
     // Same-window frost as a fallback (and on top of cross-window blur).
     content.frost(true)
-    d.setOnDismissListener { content.frost(false) }
+    d.setOnDismissListener {
+        content.frost(false)
+        onDismiss?.invoke()
+    }
     d.setCanceledOnTouchOutside(true)
     d.show()
     return d

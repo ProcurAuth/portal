@@ -113,12 +113,10 @@
     <string name="portal_prefs_lock_name_help">Off: the lock screen does not show the name of this portal.</string>
     <string name="portal_prefs_sent">sent to the portal</string>
     <string name="portal_prefs_urgent_rings">Urgent items still ring</string>
-    <string name="portal_prefs_urgent_rings_help">In quiet hours, an urgent request makes a sound.</string>
     <string name="portal_prefs_quiet_off">No quiet hours</string>
     <string name="portal_prefs_quiet_off_help">Switch on to set a time with no sound.</string>
     <string name="portal_prefs_summary">Summary</string>
     <string name="portal_prefs_change">Change</string>
-    <string name="portal_prefs_default_help">The default of the portal applies until you choose.</string>
     <string name="portal_prefs_on_phone">On this phone</string>
     <string name="portal_prefs_keep">Keep finished items</string>
     <string name="portal_prefs_keep_help">Local copy of what you saw</string>
@@ -134,6 +132,8 @@
     <string name="portal_prefs_refused">The portal refused these values: %1$s</string>
     <string name="portal_prefs_apply_all">Apply quiet hours and summary to all portals…</string>
     <string name="portal_prefs_apply_title">Apply to all portals?</string>
+    <string name="portal_prefs_applied_title">Applied</string>
+    <string name="portal_prefs_done">Done</string>
     <string name="portal_prefs_apply_none">There is no other portal to apply them to.</string>
     <string name="portal_remove_nothing">This portal has nothing on this phone.</string>
     <plurals name="portal_remove_open">

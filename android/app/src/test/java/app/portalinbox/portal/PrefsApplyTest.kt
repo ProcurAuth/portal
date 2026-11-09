@@ -154,6 +154,38 @@ class PrefsApplyTest {
         assertNull(PrefsApply.resultText(out))
     }
 
+    // ------------------------------------------------------------ the sheet after the apply
+
+    @Test
+    fun theResultNamesEachPortalThatWasHandled() {
+        val steps = plan(staging, homelab, clientA, target(5, "Plain", LinkState.CONNECTED))
+        val out = PrefsApply.run(steps, setOf(2L, 3L, 4L), values, Memory(), { _, _ -> })
+        val lines = PrefsApply.results(steps, out) { null }
+        assertEquals(listOf("Staging", "Homelab"), lines.map { it.identity.nickname })
+        assertEquals(listOf(PrefsApply.Stage.SENT, PrefsApply.Stage.QUEUED), lines.map { it.stage })
+        assertEquals(listOf("Sent.", "Waiting. Sent when it is back."), lines.map { it.text })
+    }
+
+    @Test
+    fun aPortalThatRefusedShowsRefusedAtOnceOrWhenItIsBack() {
+        val steps = plan(staging, homelab)
+        val out = PrefsApply.run(steps, setOf(2L, 3L), values, Memory(), { _, _ -> })
+        val lines = PrefsApply.results(steps, out) { id -> if (id == 2L) "prefs.quiet.tz: unknown zone" else null }
+        assertEquals(PrefsApply.Stage.REFUSED, lines[0].stage)
+        assertEquals("Refused: prefs.quiet.tz: unknown zone", lines[0].text)
+        assertEquals(PrefsApply.Stage.QUEUED, lines[1].stage)
+        // The waiting portal comes back and refuses: the line changes.
+        val later = PrefsApply.results(steps, out) { "no" }
+        assertEquals(listOf(PrefsApply.Stage.REFUSED, PrefsApply.Stage.REFUSED), later.map { it.stage })
+    }
+
+    @Test
+    fun noPortalHandledMeansNoLine() {
+        val steps = plan(staging)
+        val out = PrefsApply.run(steps, emptySet(), values, Memory(), { _, _ -> })
+        assertTrue(PrefsApply.results(steps, out) { null }.isEmpty())
+    }
+
     // ------------------------------------------------------------ texts
 
     @Test

@@ -119,12 +119,14 @@ object AttentionNotifier {
             if (serverId !in ids) return@mapNotNull null
             repo.item(serverId, requestId)?.let { Attention.Reply(serverId, requestId, it.request.urgency) }
         }
-        // The digest: an id that the phone knows as closed (or answered) leaves the count of its portal.
+        // The digest: an id that the phone knows as closed (or answered) leaves the count of its portal. The open items are at hand.
+        val openById = items.associateBy { it.serverId to it.requestId }
         val waiting = DigestPlan.merge(
             digests.frames().filter { it.serverId in ids },
             { f ->
                 f.ids.mapNotNull { id ->
-                    repo.item(f.serverId, id)?.let { id to DigestPlan.Known(it.isOpen && id !in answered.getValue(f.serverId), it.request.createdAtMs) }
+                    val item = openById[f.serverId to id] ?: repo.item(f.serverId, id) ?: return@mapNotNull null
+                    id to DigestPlan.Known(item.isOpen && id !in answered.getValue(f.serverId), item.request.createdAtMs)
                 }.toMap()
             },
             phoneNow,
