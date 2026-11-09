@@ -33,10 +33,10 @@ object ItemTexts {
     }
 
     /** The sender line: "ops-agent · key of alice · ClickHouse Dash". Hidden characters show as marks. */
-    fun senderLine(item: Item): String {
+    fun senderLine(item: Item, label: String = item.request.from.label): String {
         val f = item.request.from
         val service = item.request.approval?.service
-        return listOfNotNull(f.label, "key of " + f.owner, service).joinToString(" · ") { VisibleText.escapeLine(it) }
+        return listOfNotNull(label, "key of " + f.owner, service).joinToString(" · ") { VisibleText.escapeLine(it) }
     }
 
     /** The title of an item: the title of the view, or of the question. "Invalid request" when the phone does not trust it. */

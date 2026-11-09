@@ -18,14 +18,14 @@ object TalkBackLabels {
      * The label of a row of the home list: the portal, kind, sender, ages, state, number of choices. [portal] is the nickname
      * of the portal (lot MP3). [reason] says that the portal is down ("Offline 3 h. answer waits").
      */
-    fun itemRow(item: Item, nowMs: Long, portal: String? = null, reason: String? = null): String {
+    fun itemRow(item: Item, nowMs: Long, portal: String? = null, reason: String? = null, label: String? = null): String {
         val prefix = portal?.let { "Portal ${VisibleText.escapeLine(it)}. " } ?: ""
-        return prefix + itemRowText(item, nowMs) + (reason?.let { ". $it" } ?: "")
+        return prefix + itemRowText(item, nowMs, label ?: item.request.from.label) + (reason?.let { ". $it" } ?: "")
     }
 
-    private fun itemRowText(item: Item, nowMs: Long): String {
+    private fun itemRowText(item: Item, nowMs: Long, label: String): String {
         val r = item.request
-        val from = VisibleText.escapeLine(r.from.label)
+        val from = VisibleText.escapeLine(label)
         val asked = "asked " + Ages.spoken(r.createdAtMs, nowMs)
         val active = "agent active " + Ages.spoken(r.agentSeenAtMs, nowMs)
         val state = when {

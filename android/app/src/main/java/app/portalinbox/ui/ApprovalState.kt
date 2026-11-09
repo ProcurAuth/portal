@@ -44,7 +44,7 @@ object ApprovalState {
     }
 
     /** Why Approve is locked. The first reason of this order wins. */
-    enum class Lock { READ_COMMAND, CONFIRM_STALE, NO_SCREEN_LOCK, SENDING, PORTAL_BLOCKED }
+    enum class Lock { READ_COMMAND, CONFIRM_STALE, NO_SCREEN_LOCK, SENDING, PORTAL_BLOCKED, AGENT_LOCKED }
 
     /**
      * What the phone can do with an answer for this portal now (proposal 3.11). [ONLINE]: it goes at once. [OFFLINE]: the outbox
@@ -81,6 +81,8 @@ object ApprovalState {
         val link: Link = Link.ONLINE,
         /** The nickname of the portal, for the offline line. */
         val portal: String = "this portal",
+        /** The agent of the item is new and the portal locks the new agents (lot G4): Approve stays off until the owner allows the agent. */
+        val agentLocked: Boolean = false,
     )
 
     data class Screen(
@@ -126,6 +128,7 @@ object ApprovalState {
         val lock = when {
             mode == Mode.SENDING -> Lock.SENDING
             blocked -> Lock.PORTAL_BLOCKED
+            i.agentLocked -> Lock.AGENT_LOCKED
             !i.gate.readToEnd -> Lock.READ_COMMAND
             stale && !i.staleConfirmed -> Lock.CONFIRM_STALE
             !i.canAuthenticate -> Lock.NO_SCREEN_LOCK
@@ -160,6 +163,7 @@ object ApprovalState {
             Lock.CONFIRM_STALE -> "Tick the box to unlock Approve."
             Lock.NO_SCREEN_LOCK -> "Set a screen lock or a fingerprint on this phone to approve."
             Lock.PORTAL_BLOCKED -> "Nothing can be sent to this portal now."
+            Lock.AGENT_LOCKED -> AgentTexts.LOCK_HINT
             Lock.SENDING -> null
             null -> "Approve asks for your fingerprint or your device PIN."
         }

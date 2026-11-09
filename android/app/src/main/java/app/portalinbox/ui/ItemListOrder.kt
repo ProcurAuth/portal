@@ -1,5 +1,6 @@
 package app.portalinbox.ui
 
+import app.portalinbox.data.AgentDirectory
 import app.portalinbox.data.Item
 import app.portalinbox.proto.RequestKind
 
@@ -19,6 +20,15 @@ object ItemListOrder {
     }
 
     // The order of the items across portals is in [app.portalinbox.portal.ItemSort]: it limits the time that a portal claims.
+
+    /**
+     * The section "To answer" as groups, one for each agent of each portal (lot G4). [sorted] are the open items that
+     * [app.portalinbox.portal.ItemSort.toAnswer] sorted: the oldest first, across portals. The new agents come first, then the
+     * groups by their oldest open item, the bucket last. Inside a group the items keep the order that they came in. The rules and
+     * the model are in [AgentGroups].
+     */
+    fun toAnswer(sorted: List<Item>, directory: AgentDirectory, collapse: AgentCollapse): List<AgentGroups.Group> =
+        AgentGroups.build(sorted, directory, collapse)
 
     enum class Chip { APPROVAL, QUESTION, DECISION }
 
@@ -41,7 +51,11 @@ object ItemListOrder {
         val openable: Boolean,
     )
 
-    fun row(item: Item, nowMs: Long): Row {
+    /**
+     * The card of a row. [label] is the name of the agent from the table of the agents ([AgentDirectory.labelOf]); the default is the
+     * name that the frame carried. [grouped]: the row sits under the header of its agent, so the name of the agent does not repeat.
+     */
+    fun row(item: Item, nowMs: Long, label: String = item.request.from.label, grouped: Boolean = false): Row {
         val r = item.request
         val approval = r.approval
         val automatic = ItemTexts.isAutomatic(item)
@@ -51,9 +65,9 @@ object ItemListOrder {
             else -> Chip.QUESTION
         }
         val subtitle = when (chip) {
-            Chip.APPROVAL -> listOfNotNull(r.from.label, approval?.service).joinToString(" · ")
-            Chip.DECISION -> "Automatic system · " + r.from.label
-            Chip.QUESTION -> listOfNotNull(r.from.label, ItemTexts.inputLine(item)).joinToString(" · ")
+            Chip.APPROVAL -> listOfNotNull(label.takeUnless { grouped }, approval?.service).joinToString(" · ")
+            Chip.DECISION -> listOfNotNull("Automatic system", label.takeUnless { grouped }).joinToString(" · ")
+            Chip.QUESTION -> listOfNotNull(label.takeUnless { grouped }, ItemTexts.inputLine(item)).joinToString(" · ")
         }
         val detail = when {
             item.state == app.portalinbox.proto.ItemState.REPLIED -> "Waiting for the agent to answer"
