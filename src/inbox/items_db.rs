@@ -269,6 +269,20 @@ impl ItemTx for SqliteTx<'_, '_> {
         Ok(())
     }
 
+    async fn event_exists(
+        &mut self,
+        request_id: &str,
+        event: &str,
+        detail: &str,
+    ) -> Result<bool, DbError> {
+        let n: i64 = self.0.query_row(
+            "SELECT COUNT(*) FROM item_events WHERE request_id = ?1 AND event = ?2 AND detail = ?3",
+            params![request_id, event, detail],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     async fn pending_item_deliveries(
         &mut self,
         device_id: &str,

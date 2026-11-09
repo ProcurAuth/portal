@@ -4570,3 +4570,110 @@ fn a_bad_key_of_the_block_mcp_or_a_contradiction_stops_the_start_with_the_key_th
         "{message}"
     );
 }
+
+// ---------------------------------------------------------------- inbox.agents
+
+#[test]
+fn agents_block_closed_schema_and_defaults() {
+    // Without the block, the field is `None`: every key behaves as one agent.
+    let (config, _) = items_ok(ITEMS, AT_REST);
+    assert!(config.inbox.as_ref().unwrap().agents.is_none());
+    // An empty block gives the documented defaults, and each line says `default`.
+    let (config, _) = items_ok(&format!("{ITEMS} agents {{ }}"), AT_REST);
+    let a = config.inbox.as_ref().unwrap().agents.as_ref().unwrap();
+    assert_eq!(a.max_per_key, 16);
+    assert_eq!(a.new_per_hour, 6);
+    assert!(!a.lock_new, "a new agent is allowed at once by default");
+    assert_eq!(a.idle_after, Duration::from_secs(14 * 86_400));
+    assert_eq!(a.purge_after, Duration::from_secs(365 * 86_400));
+    for (key, shown) in [
+        ("max_per_key", "16"),
+        ("new_per_hour", "6"),
+        ("lock_new", "false"),
+        ("idle_after", "\"14d\""),
+        ("purge_after", "\"365d\""),
+    ] {
+        let l = line(&config, &format!("inbox.agents.{key}"));
+        assert_eq!(
+            (l.value.as_str(), l.source.as_str()),
+            (shown, "default"),
+            "{key}"
+        );
+    }
+    // The set values apply, at the ends of their ranges too.
+    let (config, _) = items_ok(
+        &format!(
+            "{ITEMS} agents {{ max_per_key = 1000 new_per_hour = 1 lock_new = true idle_after = \"1h\" purge_after = \"3650d\" }}"
+        ),
+        AT_REST,
+    );
+    let a = config.inbox.unwrap().agents.unwrap();
+    assert_eq!((a.max_per_key, a.new_per_hour, a.lock_new), (1000, 1, true));
+    assert_eq!(a.idle_after, Duration::from_secs(3600));
+    assert_eq!(a.purge_after, Duration::from_secs(3650 * 86_400));
+    // The schema is closed: an unknown key, a duplicate key, a wrong type, a value out of its range, and a value that
+    // the program would have to change to make it fit. The message names the key, and the value.
+    for (keys, expected) in [
+        ("unknown_key = 1", "unknown_key"),
+        ("max_per_key = 16 max_per_key = 17", "max_per_key"),
+        ("max_per_key = 0", "inbox.agents.max_per_key"),
+        ("max_per_key = 1001", "inbox.agents.max_per_key"),
+        (r#"max_per_key = "16""#, "inbox.agents.max_per_key"),
+        ("new_per_hour = 0", "inbox.agents.new_per_hour"),
+        ("new_per_hour = 1001", "inbox.agents.new_per_hour"),
+        (r#"lock_new = "yes""#, "inbox.agents.lock_new"),
+        (r#"lock_new = 1"#, "inbox.agents.lock_new"),
+        (r#"idle_after = "59m""#, "inbox.agents.idle_after"),
+        (r#"idle_after = "366d""#, "inbox.agents.idle_after"),
+        (r#"idle_after = 14"#, "inbox.agents.idle_after"),
+        (r#"purge_after = "6d""#, "inbox.agents.purge_after"),
+        (r#"purge_after = "3651d""#, "inbox.agents.purge_after"),
+    ] {
+        let message = items_err(&format!("{ITEMS} agents {{ {keys} }}"), AT_REST);
+        assert!(message.contains(expected), "{keys}: {message}");
+    }
+    // A block that the table does not know is refused.
+    let message = items_err(&format!("{ITEMS} agents {{ }} agent_cap {{ }}"), AT_REST);
+    assert!(message.contains("agent_cap"), "{message}");
+}
+
+#[test]
+fn idle_after_above_purge_after_stops_the_start() {
+    let message = items_err(
+        &format!(r#"{ITEMS} agents {{ idle_after = "30d" purge_after = "10d" }}"#),
+        AT_REST,
+    );
+    assert!(
+        message.contains("inbox.agents.idle_after must be at most inbox.agents.purge_after")
+            && message.contains("30d")
+            && message.contains("10d"),
+        "{message}"
+    );
+    // Equal values do not contradict.
+    let (config, _) = items_ok(
+        &format!(r#"{ITEMS} agents {{ idle_after = "30d" purge_after = "30d" }}"#),
+        AT_REST,
+    );
+    assert!(config.inbox.unwrap().agents.is_some());
+}
+
+#[test]
+fn agents_block_needs_items_and_at_rest() {
+    // With neither block, the start stops and the message names the blocks that are missing.
+    let message = items_err("agents { }", "");
+    assert!(
+        message.contains("inbox.agents needs the blocks inbox.items and inbox.at_rest"),
+        "{message}"
+    );
+    // With one of the two, the existing rule of the pair stops the start.
+    let message = items_err("agents { }", AT_REST);
+    assert!(
+        message.contains("inbox.at_rest needs the block inbox.items"),
+        "{message}"
+    );
+    let message = items_err(&format!("{ITEMS} agents {{ }}"), "");
+    assert!(
+        message.contains("inbox.items needs the block inbox.at_rest"),
+        "{message}"
+    );
+}

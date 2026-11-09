@@ -1901,6 +1901,18 @@ This block is optional and is inside the block `inbox`. Its presence starts the 
 | `max_unauthenticated_per_minute` | number, 1 to 10000 | `10` | The most requests with no valid key that one client address can send in one minute on this instance. An address over the limit gets `429` with `Retry-After` before the portal checks the key. |
 | `max_body_bytes` | size, 1KiB to 1MiB | `"64KiB"` | The largest body of a request. A larger body gets `413`. |
 
+#### Block `inbox.agents`
+
+This block is optional and is inside the block `inbox`. Its presence turns on the agents of a key: the portal gives each agent of one key a token, and it groups the items by agent. Without this block, each key is one agent. A new agent is allowed at once, and its owner gets a notice. The block needs the blocks `inbox.items` and `inbox.at_rest`. The mode of each key (`key`, `discover` or `enrolled`) is an attribute of the key, not of the file.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `max_per_key` | number, 1 to 1000 | `16` | The most agents of one key that are `new`, `known` or `blocked`. The next call that would make an agent goes to the bucket `Unattributed` of the key, and the owner gets one alert each hour. The call does not fail. |
+| `new_per_hour` | number, 1 to 1000 | `6` | The most agents that the calls of one key can make in one hour. The next call goes to the bucket `Unattributed`, as when `max_per_key` is reached. Agents that the owner makes by hand do not count. |
+| `lock_new` | `true` or `false` | `false` | `true`: a `new` agent cannot get an approval or an answer accepted until its owner allows it. A refusal and a talk stay open. `false`: a new agent is allowed at once, and its owner still gets a notice. |
+| `idle_after` | duration, 1h to 365d | `"14d"` | An agent with no open item and no call for this time leaves the active views. It still works, and a call brings it back. It must not be above `purge_after`. |
+| `purge_after` | duration, 7d to 3650d | `"365d"` | The sweeper erases an agent that has no item, no live intent and no call for this time. The token of an erased agent is unknown. It must not be below `idle_after`. |
+
 #### Block `inbox.approvals`
 
 This block is optional and is inside the block `inbox`. Its presence starts the approval of an action: the PDP answers `approval_required` for a grant with `confirm`, and it consumes an approval once. The block needs the blocks `inbox.items` and `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. A server gets approvals only with `approvals = true` in its block `pdp_client`.

@@ -840,6 +840,30 @@ impl Items<'_> {
         self.replicate().await
     }
 
+    /// Writes the event `also_requested`: a second agent of the key asked for the effect of an open request and got
+    /// that request. The item keeps its first agent. The event holds the id of the other agent, once for each agent.
+    pub async fn record_also_requested(&self, l: &Loaded, agent_id: &str) -> Result<(), ItemError> {
+        let cx = self.cx();
+        let event = NewEvent {
+            request_id: l.item.request_id.clone(),
+            kind: l.item.kind,
+            at: cx.now,
+            event: "also_requested",
+            actor: format!("key:{}", l.item.requester_key_id),
+            detail: Some(format!("agent={agent_id}")),
+        };
+        in_tx!(self, [event], tx, async {
+            let detail = event.detail.clone().unwrap_or_default();
+            if tx
+                .event_exists(&event.request_id, event.event, &detail)
+                .await?
+            {
+                return Ok(());
+            }
+            tx.insert_event(&event).await
+        })
+    }
+
     /// Writes the event `body_read`: a superadmin read a body (`inbox.at_rest.admin_body_read`). It holds the login, the
     /// time and the request id, never the body.
     pub async fn record_body_read(

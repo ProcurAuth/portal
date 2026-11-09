@@ -316,6 +316,25 @@ impl ItemTx for PgTx<'_> {
         Ok(())
     }
 
+    async fn event_exists(
+        &mut self,
+        request_id: &str,
+        event: &str,
+        detail: &str,
+    ) -> Result<bool, DbError> {
+        let rows = self
+            .rows(
+                "SELECT COUNT(*)::bigint FROM item_events WHERE request_id = $1 AND event = $2 AND detail = $3",
+                &[
+                    Box::new(request_id.to_string()),
+                    Box::new(event.to_string()),
+                    Box::new(detail.to_string()),
+                ],
+            )
+            .await?;
+        Ok(rows[0].get::<_, i64>(0) > 0)
+    }
+
     async fn pending_item_deliveries(
         &mut self,
         device_id: &str,

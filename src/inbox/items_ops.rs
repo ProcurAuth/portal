@@ -151,6 +151,13 @@ pub trait ItemTx: super::agents_ops::AgentTx {
     ) -> impl Future<Output = Result<bool, DbError>>;
     fn owner_devices(&mut self, owner: &str) -> impl Future<Output = Result<Vec<String>, DbError>>;
     fn insert_event(&mut self, e: &NewEvent) -> impl Future<Output = Result<(), DbError>>;
+    /// Whether an event with this name and this detail exists for the item.
+    fn event_exists(
+        &mut self,
+        request_id: &str,
+        event: &str,
+        detail: &str,
+    ) -> impl Future<Output = Result<bool, DbError>>;
     // The phones: the queue of the deliveries of items, the catch-up of a device, the preferences.
     /// The deliveries of items that the device has not received, oldest first. A row of an item has no age limit: the
     /// lease and `max_lifetime` decide, not `delivery_ttl`.

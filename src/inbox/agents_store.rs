@@ -223,6 +223,19 @@ impl Items<'_> {
 
     // ------------------------------------------------------------ the reads
 
+    /// The bucket of a key: the pseudo agent "Unattributed". It is made when it does not exist.
+    pub async fn bucket(&self, key_id: &str, owner: &str) -> Result<AgentRow, ItemError> {
+        self.writable()?;
+        let cx = self.cx();
+        let (key_id, owner) = (key_id.to_string(), owner.to_string());
+        in_tx!(
+            self,
+            [cx, key_id, owner],
+            tx,
+            ops::ensure_bucket(tx, &cx, &key_id, &owner)
+        )
+    }
+
     pub async fn agent(&self, agent_id: &str) -> Result<Option<AgentRow>, ItemError> {
         let id = agent_id.to_string();
         in_tx!(self, [id], tx, ops::AgentTx::agent_by_id(tx, &id))

@@ -243,8 +243,30 @@ pub async fn submit(app: &App, who: &Requester, s: Submission) -> Result<Submitt
         Control::UntilMs(at_ms) => check_control(Wait::Until { at_ms: *at_ms }, &items)?,
         Control::Reference(_) => {}
     }
-    // A second submission of an open request gives the same id. It renews nothing and replaces nothing.
+    // A second submission of an open request gives the same id. It renews nothing and replaces nothing. When the second
+    // submission comes from another agent, the item keeps its first agent and the event `also_requested` records the
+    // other one.
     if let Some(existing) = items.open_approval(&key_hash).await.map_err(storage)? {
+        let other = match &s.control {
+            Control::Reference(reference) => items
+                .read_intent(&ref_digest(reference), &who.key_id)
+                .await
+                .map_err(storage)?
+                .map(|intent| intent.agent_id),
+            _ => Some(
+                items
+                    .bucket(&who.key_id, &who.owner)
+                    .await
+                    .map_err(storage)?
+                    .agent_id,
+            ),
+        };
+        if let Some(other) = other.filter(|id| *id != existing.item.agent_id) {
+            items
+                .record_also_requested(&existing, &other)
+                .await
+                .map_err(storage)?;
+        }
         return Ok(submitted(&existing, false));
     }
     let digest = match &s.control {
