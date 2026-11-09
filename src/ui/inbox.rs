@@ -910,8 +910,9 @@ fn bar(view: &InboxView) -> String {
     if view.items_link {
         let _ = write!(
             out,
-            r#"<a class="button button--small" href="{}">History</a>"#,
-            super::items::ITEMS
+            r#"<a class="button button--small" href="{}">History</a><a class="button button--small" href="{}">Preferences</a>"#,
+            super::items::ITEMS,
+            super::prefs::PREFS
         );
     }
     if let Some(docs) = &view.docs {

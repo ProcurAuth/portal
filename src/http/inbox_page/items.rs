@@ -45,7 +45,7 @@ fn engine(ctx: &Context<'_>) -> bool {
 }
 
 /// Whether the viewer sees the pages of the items. A session that the superadmin opens as another account does not.
-fn allowed(ctx: &Context<'_>) -> bool {
+pub(super) fn allowed(ctx: &Context<'_>) -> bool {
     ctx.held.ui.items && !ctx.viewer.session.impersonated && engine(ctx)
 }
 

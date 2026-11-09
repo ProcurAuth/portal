@@ -14,6 +14,7 @@
 //! not send an alert and does not revoke a phone.
 
 mod items;
+mod prefs;
 
 use super::pdp::{decide_person_for, UseVerdict};
 use super::*;
@@ -436,6 +437,9 @@ async fn get(state: &Arc<AppState>, ctx: &Context<'_>, rest: &str) -> HttpRespon
     if rest == "/items" {
         return items::history(state, ctx).await;
     }
+    if rest == "/prefs" {
+        return prefs::page(state, ctx).await;
+    }
     if let Some(tail) = rest.strip_prefix("/items/") {
         if matches!(tail, "answer" | "reply" | "cancel") {
             return text_response(StatusCode::METHOD_NOT_ALLOWED, "Method Not Allowed\n");
@@ -757,6 +761,7 @@ async fn post(
             | "/items/answer"
             | "/items/reply"
             | "/items/cancel"
+            | "/prefs"
     ) {
         return not_found();
     }
@@ -772,6 +777,7 @@ async fn post(
         "/items/answer" => items::answer(state, &ctx, fields).await,
         "/items/reply" => items::reply(state, &ctx, fields).await,
         "/items/cancel" => items::cancel(state, &ctx, fields).await,
+        "/prefs" => prefs::save(state, &ctx, fields).await,
         _ => code(state, &ctx, fields).await,
     }
 }

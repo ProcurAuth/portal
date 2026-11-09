@@ -4566,3 +4566,14 @@ textarea.uiInput { height: auto; min-height: 64px; padding: 6px 8px; resize: ver
   user-select: none;
   -webkit-user-select: none;
 }
+
+/* Inbox preferences (lot L11) ---------------------------------------------------------------------- */
+.page--prefs { max-width: 860px; }
+.radios--col { flex-direction: column; gap: 8px; }
+.radios--col label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.uiInput--time { width: 8.5rem; display: inline-block; }
+.uiInput--zone { width: 14rem; max-width: 100%; min-width: 0; display: inline-block; }
+.uiInput--hours { width: 4.5rem; display: inline-block; }
+.inlineFields .uiInput--time { width: 8.5rem; }
+.note--row { padding-top: 4px; }
+.decide__row--form { padding: 10px; }

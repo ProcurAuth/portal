@@ -28,6 +28,7 @@ pub mod mask;
 pub mod mfa;
 pub mod minify;
 pub mod notify;
+pub mod prefs;
 pub mod settings;
 pub mod signin;
 
