@@ -478,7 +478,7 @@ The state of one agent. The device keeps one agent for each `agent_id`. It ignor
 | `open` | u32 | The number of open items of the agent when the server built the frame. A change of `open` does not raise `rev`. The device counts the items that it holds. |
 | `lock_accept` | bool | True only with `new` and with `inbox.agents.lock_new` true. The server refuses `accept` for the items of this agent: the screen disables the button. |
 | `observed` | object, optional | The hints of the agent. A bucket has none. All text in it came from a client: it is not verified. |
-| `similar` | `{agent_id, label}`, optional | With `new` only. An agent of the same key that looks like this one. `label` follows the rule of `label`. It is a hint, and never a merge. |
+| `similar` | `{agent_id, label}`, optional | With `new` only. A known agent of the same key that looks like this one. `label` follows the rule of `label`. It is a hint, and never a merge. |
 
 `observed` has these members:
 
@@ -494,7 +494,16 @@ The state of one agent. The device keeps one agent for each `agent_id`. It ignor
 The server leaves out an `observed` text that does not follow the rule: a bad hint never stops the frame.
 It leaves out `observed` when there is nothing to show.
 The first text of the agent (`says_first` in the engine) is for the page of the owner and is not in the frame.
-The server never fills `similar` today: the member is part of the wire so that a later version needs no new amendment.
+The server fills `similar` for a `new` agent when a known agent of the same key and the same owner matches it. The match has two rules:
+
+- The two agents say the same text, after NFKC, lower case and one space for each run of white space.
+- The two agents have the same client and the same address range.
+
+A match on the text wins over a match on the client. With several matches, the agent that called last wins, then the lower `agent_id`. A blocked or merged agent is never a candidate.
+
+The server builds `similar` when it builds the frame, so a rename of the known agent shows in the next frame of the new agent.
+A rename does not raise `rev` of the new agent. A device that wants the new name asks again with `sync`, or waits for the next change of the new agent.
+A device must show the sentence "Hints can be copied" with `similar`. The device must never merge by itself.
 
 A bucket has the state `known`, `named` false, no `observed`, no `similar` and no `merged_into`.
 The server sends the frame of a bucket in the answer to a `sync` only: it never changes.

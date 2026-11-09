@@ -306,6 +306,8 @@ An agent is one program, or one conversation of a model, that asks. Several agen
 
 3.8.24 **[5.1.0]** The portal MUST refuse a text of an agent that holds a live token of the same owner, with or without the prefix `agt_`. The texts are `explanation`, `agent_label` and the message of `say`. The error MUST be `422 agent_token_in_text`, MUST NOT be retryable and MUST name no value. The refusal MUST come before any write, so it makes no agent, no intent and no item. A blocked or merged agent MUST count too. The check MUST read the database only when a text has a run of 43 characters of the token alphabet.
 
+3.8.25 **[5.1.0]** The frame `agent` and the first-use notice of a `new` agent MUST name a similar known agent. The known agent MUST have the same key and the same owner. It MUST say the same text, or have the same client and the same address range. The fold of 3.8.15 MUST decide the equality of the texts, and a match on the text MUST win. The notice MUST say that hints can be copied. The portal MUST NOT merge two agents by itself, and it MUST NOT pick a blocked or merged agent.
+
 ### 3.9 Preferences
 
 Each account has two preferences: the digest and the quiet hours. They are in the database. Release: 5.1.0.
@@ -662,6 +664,7 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.8.22 | 5.1.0 | G1a | `agents_tests::the_hints_are_sealed_updated_when_they_change_and_never_in_an_event`, `rekey_and_key_purge_visit_the_hints`, `sweeper_purges_only_unreferenced_idle_agents` |
 | 3.8.23 | 5.1.0 | G1b | `agent_channel::who::hints_recorded`, `mcp_tools::tests::the_transport_gives_the_token_of_the_header_and_bounded_hints`, `mcp::tests::the_client_is_read_from_the_meta_of_the_new_line_then_from_initialize`, `mcp_contract::the_agent_cases_a01_to_a10` (A10, the log) |
 | 3.8.24 | 5.1.0 | G5 | `agents::tests::the_candidates_of_a_text_are_the_windows_of_43_characters_of_the_alphabet`, `agent_channel::who::explanation_with_a_live_token_is_refused` (the prefix, bare, glued, the label, `say`, a second agent, a blocked agent, the REST door), `mcp_tools::tests::the_codes_of_the_agents_have_the_status_of_the_table_and_a_fixed_message` |
+| 3.8.25 | 5.1.0 | G5 | `agents::tests::similar_names_a_known_agent_with_the_same_says_or_the_same_client_and_net`, `frames::tests::the_frame_of_a_new_agent_names_a_similar_known_agent_and_no_other_frame_does`, `agent_frames::a_new_agent_that_looks_like_a_known_one_carries_similar_and_nothing_merges`, `ui::agents::tests::the_notice_names_a_similar_agent_with_the_sentence_that_hints_can_be_copied` |
 | 3.9.1 | 5.1.0 | L11 | `items_tests::prefs_override_file_defaults_never_a_cap`, `prefs_e2e::prefs_page_refused_for_impersonated_session`, `prefs_e2e::set_prefs_from_phone_synced_to_page` |
 | 3.9.2 | 5.1.0 | L11 | `prefs_e2e::bad_timezone_name_refused_422_no_coercion`, `ui::prefs::tests::a_bad_value_is_the_error_with_its_field_and_nothing_is_changed`, `config::tests::the_digest_mode_decides_which_keys_apply` (a zone that the database does not hold) |
 | 3.9.3 | 5.1.0 | L11 | `items_tests::digest_two_instances_one_frame`, `items_tests::digest_empty_not_sent`, `approval_api_tests::prefs::digest_row_becomes_a_frame_with_numbers_only` |

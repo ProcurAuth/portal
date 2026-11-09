@@ -165,6 +165,15 @@ The portal records hints about each agent: the label, the name of the client, th
 
 The log line `mcp_call` has the field `agent` with the id of the agent, or `-` when the call has no agent. The portal never writes a token in a log, a metric or a trace.
 
+### A new agent that looks like a known agent
+
+A new agent can look like an agent that the owner knows. This happens when an agent loses its token and makes a new agent. It also happens when an agent copies the text of a known agent. The portal names the known agent next to the new agent. It uses two rules:
+
+- The two agents say the same text. The portal folds both texts first: NFKC, lower case, one space.
+- The two agents have the same client and the same address range.
+
+The first-use notice of the web page and the frame `agent` of the phone carry this hint. The owner reads "Looks like your agent Night ETL", and the sentence "Hints can be copied". The portal never merges by itself. Only an action of the owner merges two agents. A client can send any text, so a similar agent is not the same agent.
+
 ### The mode of a key
 
 The mode is an attribute of the key. The owner sets it in the form of the key, when the file has the block `inbox.agents`. Without the block, each key acts as `key`.
