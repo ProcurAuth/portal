@@ -314,17 +314,17 @@ impl Pg {
         };
         let (mut items, grants) = self.run(|c| {
             let rows = c.query(
-                "SELECT id, login, name, hint, created_at, expires_at, last_check_at, check_count, revoked_at, kind, interaction
+                "SELECT id, login, name, hint, created_at, expires_at, last_check_at, check_count, revoked_at, kind, interaction, agents
                    FROM (
                      SELECT k.id AS id, u.login AS login, k.name AS name, k.hint AS hint,
                             k.created_at AS created_at, k.expires_at AS expires_at,
                             k.last_check_at AS last_check_at, k.check_count AS check_count,
                             NULL::bigint AS revoked_at, k.owner_id AS owner_id,
-                            k.kind AS kind, k.interaction AS interaction
+                            k.kind AS kind, k.interaction AS interaction, k.agents AS agents
                        FROM keys k LEFT JOIN users u ON u.id = k.owner_id
                      UNION ALL
                      SELECT h.id, u.login, h.name, ''::text, h.created_at, NULL::bigint,
-                            h.last_check_at, h.check_count, h.revoked_at, h.owner_id, NULL::text, NULL::text
+                            h.last_check_at, h.check_count, h.revoked_at, h.owner_id, NULL::text, NULL::text, NULL::text
                        FROM key_history h LEFT JOIN users u ON u.id = h.owner_id
                    ) AS lines
                   WHERE ($1::boolean OR ($2::text IS NOT NULL AND login = $2::text)
@@ -352,6 +352,9 @@ impl Pg {
                     interaction: row
                         .get::<_, Option<String>>(10)
                         .and_then(|name| crate::keys::Interaction::from_name(&name)),
+                    agents: row
+                        .get::<_, Option<String>>(11)
+                        .and_then(|name| crate::keys::AgentsMode::from_name(&name)),
                     grants: Vec::new(),
                 })
                 .collect();
@@ -423,7 +426,7 @@ impl Pg {
             let keys = tx
                 .query(
                     "SELECT k.id, u.login, k.name, k.digest, k.hint, k.created_at, k.expires_at,
-                            k.last_check_at, k.check_count, k.kind, k.interaction
+                            k.last_check_at, k.check_count, k.kind, k.interaction, k.agents
                        FROM keys k LEFT JOIN users u ON u.id = k.owner_id
                       ORDER BY k.created_at, k.id",
                     &[],
@@ -442,6 +445,7 @@ impl Pg {
                         row.get::<_, i64>(8),
                         row.get::<_, String>(9),
                         row.get::<_, String>(10),
+                        row.get::<_, String>(11),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -491,6 +495,7 @@ impl Pg {
             check_count,
             kind,
             interaction,
+            agents,
         ) in key_rows
         {
             let kind = crate::keys::KeyKind::from_name(&kind)
@@ -499,6 +504,9 @@ impl Pg {
                 crate::keys::Interaction::from_name(&interaction).ok_or_else(|| {
                     format!("keys: the interaction {interaction:?} of the key {id} is not known")
                 })?;
+            let agents = crate::keys::AgentsMode::from_name(&agents).ok_or_else(|| {
+                format!("keys: the mode of the agents {agents:?} of the key {id} is not known")
+            })?;
             let mut grants = grants_from(by_key.remove(&id).unwrap_or_default())
                 .map_err(|e| e.replacen("user_grants", "key_grants", 1))?;
             grants.sort();
@@ -514,6 +522,7 @@ impl Pg {
                 check_count,
                 kind,
                 interaction,
+                agents,
                 grants,
             });
         }
@@ -552,8 +561,8 @@ impl Pg {
             }
             tx.execute(
                 "INSERT INTO keys (id, owner_id, name, digest, hint, created_at, expires_at,
-                                   last_check_at, check_count, kind, interaction)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                                   last_check_at, check_count, kind, interaction, agents)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
                 &[
                     &key.id,
                     &owner_id,
@@ -566,6 +575,7 @@ impl Pg {
                     &key.check_count,
                     &key.kind.name(),
                     &key.interaction.name(),
+                    &key.agents.name(),
                 ],
             )?;
             insert_key_grants(&mut tx, &key.id, &key.grants)?;
@@ -584,7 +594,7 @@ impl Pg {
         id: &str,
         owner: Option<&str>,
         name: &str,
-        interaction: crate::keys::Interaction,
+        modes: crate::store::KeyModes,
         grants: &[Grant],
         caps: &KeyCaps,
     ) -> Result<(), KeyWriteError> {
@@ -600,8 +610,8 @@ impl Pg {
                 return Ok(Err(KeyWriteError::UnknownKey));
             }
             tx.execute(
-                "UPDATE keys SET name = $2, interaction = $3 WHERE id = $1",
-                &[&id, &name, &interaction.name()],
+                "UPDATE keys SET name = $2, interaction = $3, agents = $4 WHERE id = $1",
+                &[&id, &name, &modes.interaction.name(), &modes.agents.name()],
             )?;
             tx.execute("DELETE FROM key_grants WHERE key_id = $1", &[&id])?;
             insert_key_grants(&mut tx, id, grants)?;

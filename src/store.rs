@@ -101,6 +101,14 @@ impl std::fmt::Debug for UserRow {
     }
 }
 
+/// The two modes of a key that the form of the key changes: what the key can do when the portal asks a person, and what
+/// the portal does with the agents that share the key (lot G1b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyModes {
+    pub interaction: crate::keys::Interaction,
+    pub agents: crate::keys::AgentsMode,
+}
+
 /// A key of the database, with its grants (portal 4, 5). The database keeps the SHA-256 digest of
 /// the text of the key, never the text.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,6 +129,8 @@ pub struct KeyRow {
     pub kind: crate::keys::KeyKind,
     /// What the key can do when the portal asks a person (design of the dialogue, 1.6).
     pub interaction: crate::keys::Interaction,
+    /// What the portal does with the agents of the key (lot G1b).
+    pub agents: crate::keys::AgentsMode,
     /// Sorted.
     pub grants: Vec<Grant>,
 }
@@ -185,6 +195,8 @@ pub struct KeyListItem {
     pub kind: Option<crate::keys::KeyKind>,
     /// The interaction of a key that exists. `None` for a revoked key.
     pub interaction: Option<crate::keys::Interaction>,
+    /// The mode of the agents of a key that exists. `None` for a revoked key.
+    pub agents: Option<crate::keys::AgentsMode>,
     /// The grants of a key that exists. Empty for a revoked key.
     pub grants: Vec<Grant>,
 }
@@ -709,18 +721,18 @@ impl Store {
         backend!(self.insert_key(key, caps))
     }
 
-    /// Changes the name, the interaction and the grants of a key (portal 5.8d). `owner` is the login
+    /// Changes the name, the modes and the grants of a key (portal 5.8d). `owner` is the login
     /// of the owner: the key must be his. `None` is the key of the superadmin.
     pub fn update_key(
         &self,
         id: &str,
         owner: Option<&str>,
         name: &str,
-        interaction: crate::keys::Interaction,
+        modes: KeyModes,
         grants: &[Grant],
         caps: &KeyCaps,
     ) -> Result<(), KeyWriteError> {
-        backend!(self.update_key(id, owner, name, interaction, grants, caps))
+        backend!(self.update_key(id, owner, name, modes, grants, caps))
     }
 
     /// Revokes a key: deletes it with its grants and its counters, and keeps one summary row.
@@ -1167,6 +1179,13 @@ mod tests {
         })
     }
 
+    fn modes() -> KeyModes {
+        KeyModes {
+            interaction: crate::keys::Interaction::Conversational,
+            agents: crate::keys::AgentsMode::Discover,
+        }
+    }
+
     fn caps() -> KeyCaps {
         KeyCaps {
             max_per_user: 3,
@@ -1192,6 +1211,7 @@ mod tests {
         KeyRow {
             kind: crate::keys::KeyKind::Mcp,
             interaction: crate::keys::Interaction::Conversational,
+            agents: crate::keys::AgentsMode::Discover,
             id: id.into(),
             owner: owner.map(Into::into),
             name: format!("key {id}"),
@@ -1437,21 +1457,28 @@ mod tests {
             let mut one = key("k1", Some("alice"), 1);
             one.grants = grants.clone();
             one.interaction = Interaction::OneShot;
+            one.agents = crate::keys::AgentsMode::Enrolled;
             store.insert_key(&one, &caps()).unwrap();
             let mut two = key("k2", Some("alice"), 2);
             two.kind = crate::keys::KeyKind::Api;
             two.interaction = Interaction::Conversational;
+            two.agents = crate::keys::AgentsMode::Key;
             store.insert_key(&two, &caps()).unwrap();
             let directory = store.load_directory().unwrap();
             let k1 = directory.keys.iter().find(|k| k.id == "k1").unwrap();
-            assert_eq!(*k1, one, "grants with confirm and the interaction");
+            assert_eq!(
+                *k1, one,
+                "grants with confirm, the interaction and the mode of the agents"
+            );
             let k2 = directory.keys.iter().find(|k| k.id == "k2").unwrap();
             assert_eq!(k2.interaction, Interaction::Conversational);
+            assert_eq!(k2.agents, crate::keys::AgentsMode::Key);
             assert!(k2.grants.iter().all(|g| !g.confirm));
             // The list of the keys has the interaction and the grants with confirm.
             let items = store.list_keys(KeyScope::All, None, 10).unwrap();
             let item = items.iter().find(|i| i.id == "k1").unwrap();
             assert_eq!(item.interaction, Some(Interaction::OneShot));
+            assert_eq!(item.agents, Some(crate::keys::AgentsMode::Enrolled));
             assert_eq!(item.grants, grants);
             // The change of a key writes the interaction and the grants.
             store
@@ -1459,7 +1486,10 @@ mod tests {
                     "k1",
                     Some("alice"),
                     "k1",
-                    Interaction::Conversational,
+                    KeyModes {
+                        interaction: Interaction::Conversational,
+                        agents: crate::keys::AgentsMode::Enrolled,
+                    },
                     std::slice::from_ref(&plain),
                     &caps(),
                 )
@@ -1467,14 +1497,17 @@ mod tests {
             let after = store.load_directory().unwrap();
             let k1 = after.keys.iter().find(|k| k.id == "k1").unwrap();
             assert_eq!(k1.interaction, Interaction::Conversational);
+            assert_eq!(
+                k1.agents,
+                crate::keys::AgentsMode::Enrolled,
+                "the change writes the mode of the agents"
+            );
             assert_eq!(k1.grants, [plain]);
             // A revoked key has no interaction in the list.
             assert!(store.revoke_key("k2", None, NOW).unwrap());
             let items = store.list_keys(KeyScope::All, None, 10).unwrap();
-            assert_eq!(
-                items.iter().find(|i| i.id == "k2").unwrap().interaction,
-                None
-            );
+            let gone = items.iter().find(|i| i.id == "k2").unwrap();
+            assert_eq!((gone.interaction, gone.agents), (None, None));
         });
     }
 
@@ -1572,7 +1605,7 @@ mod tests {
                         id,
                         owner,
                         "renamed",
-                        crate::keys::Interaction::Conversational,
+                        modes(),
                         &one,
                         &caps()
                     ),
@@ -1585,7 +1618,7 @@ mod tests {
                     "k1",
                     Some("alice"),
                     "renamed",
-                    crate::keys::Interaction::Conversational,
+                    modes(),
                     &one,
                     &caps(),
                 )
@@ -1595,7 +1628,7 @@ mod tests {
                     "s1",
                     None,
                     "root",
-                    crate::keys::Interaction::Conversational,
+                    modes(),
                     &one,
                     &caps(),
                 )

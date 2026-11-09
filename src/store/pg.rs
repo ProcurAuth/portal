@@ -302,6 +302,12 @@ ALTER TABLE key_grants ADD COLUMN confirm BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE keys ADD COLUMN interaction TEXT NOT NULL DEFAULT 'conversational'
   CHECK (interaction IN ('conversational', 'one_shot'));
 UPDATE keys SET interaction = 'one_shot' WHERE kind = 'api';
+-- The agents (5.1.0) are part of this version too. keys.agents holds key, discover or enrolled: a key of kind api that
+-- exists before gets key, the others get discover. A database that the version 8 made before the agents lacks the
+-- column: the check at the end of the migration refuses it.
+ALTER TABLE keys ADD COLUMN agents TEXT NOT NULL DEFAULT 'discover'
+  CHECK (agents IN ('key', 'discover', 'enrolled'));
+UPDATE keys SET agents = 'key' WHERE kind = 'api';
 ",
 ];
 
@@ -695,6 +701,20 @@ impl Pg {
             if !with_approvals {
                 return Ok(Err(format!(
                     "the database was made by schema version {} before the approvals, and this portal has no migration for it: make a new database, or add the columns user_grants.confirm, key_grants.confirm and keys.interaction by hand (see README, Upgrades, version 5.1.0)",
+                    SCHEMA.len()
+                )));
+            }
+            let with_agents: bool = tx
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                              WHERE table_schema = current_schema()
+                                AND table_name = 'keys' AND column_name = 'agents')",
+                    &[],
+                )?
+                .get(0);
+            if !with_agents {
+                return Ok(Err(format!(
+                    "the database was made by schema version {} before the agents, and this portal has no migration for it: make a new database, or add the column keys.agents by hand (see README, Upgrades, version 5.1.0)",
                     SCHEMA.len()
                 )));
             }
@@ -1425,8 +1445,8 @@ impl Pg {
                 };
                 tx.execute(
                     "INSERT INTO keys (id, owner_id, name, digest, hint, created_at, expires_at,
-                                       last_check_at, check_count, kind, interaction)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                                       last_check_at, check_count, kind, interaction, agents)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
                     &[
                         &key.id,
                         &owner_id,
@@ -1439,6 +1459,7 @@ impl Pg {
                         &key.check_count,
                         &key.kind.name(),
                         &key.interaction.name(),
+                        &key.agents.name(),
                     ],
                 )?;
                 keys::insert_key_grants(&mut tx, &key.id, &key.grants)?;
@@ -1977,7 +1998,7 @@ mod tests {
         for drop_column in [
             "ALTER TABLE user_grants DROP COLUMN confirm;",
             "ALTER TABLE key_grants DROP COLUMN confirm;",
-            "ALTER TABLE keys DROP COLUMN interaction;",
+            "ALTER TABLE keys DROP COLUMN interaction; ALTER TABLE keys DROP COLUMN agents;",
         ] {
             let Store::Pg(fresh) = Backend::Postgres(url.clone()).fresh() else {
                 unreachable!()
@@ -1997,6 +2018,33 @@ mod tests {
                 "{drop_column}: {error}"
             );
         }
+    }
+
+    /// The agents changed the base schema in place: a database of version 8 without `keys.agents` is refused.
+    #[test]
+    fn a_database_made_before_the_agents_is_refused_with_a_message_that_says_why() {
+        use crate::store::testing::{postgres, Backend};
+        let Some(Backend::Postgres(url)) = postgres() else {
+            return;
+        };
+        let Store::Pg(fresh) = Backend::Postgres(url).fresh() else {
+            unreachable!()
+        };
+        let config = fresh.pool.config.clone();
+        let mut admin = config.connect(NoTls).unwrap();
+        admin
+            .batch_execute("ALTER TABLE keys DROP COLUMN agents;")
+            .unwrap();
+        drop(fresh);
+        let error = Pg::start(config, 2, Duration::from_secs(5))
+            .err()
+            .expect("the database is refused");
+        assert!(
+            error.contains("before the agents")
+                && error.contains("keys.agents")
+                && error.contains("5.1.0"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2020,7 +2068,7 @@ mod tests {
                           ('api1', 1, 'hook', decode(repeat('01', 32), 'hex'), 'cd34', 1, 'api');
                  INSERT INTO key_grants (key_id, action, resource_type, resource_id)
                    VALUES ('mcp1', 'access', 'service', 'db');
-                 ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction;
+                 ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction; ALTER TABLE keys DROP COLUMN agents;
                  ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
                  DELETE FROM schema_migrations WHERE version > 7;",
             )
@@ -2034,9 +2082,14 @@ mod tests {
             crate::keys::Interaction::Conversational
         );
         assert_eq!(interaction("api1"), crate::keys::Interaction::OneShot);
+        let agents = |id: &str| keys.iter().find(|k| k.id == id).unwrap().agents;
+        assert_eq!(agents("mcp1"), crate::keys::AgentsMode::Discover);
+        assert_eq!(agents("api1"), crate::keys::AgentsMode::Key);
         assert!(keys.iter().flat_map(|k| &k.grants).all(|g| !g.confirm));
         let bad = admin.batch_execute("UPDATE keys SET interaction = 'chat'");
         assert!(bad.is_err(), "the closed list of values");
+        let bad = admin.batch_execute("UPDATE keys SET agents = 'auto'");
+        assert!(bad.is_err(), "the mode of the agents has three values");
     }
 
     /// The column `credential` of `sessions` changed the base schema in place: a database without it is refused.
@@ -2078,7 +2131,7 @@ mod tests {
             .batch_execute(&format!(
                 "ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa;
                  ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa;
-                 ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction;
+                 ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction; ALTER TABLE keys DROP COLUMN agents;
                  DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
                  DELETE FROM schema_migrations WHERE version > 7;
                  INSERT INTO sessions (digest, binding, sid, login, impersonated, created_at, expires_at, last_seen_at, credential)
@@ -2126,7 +2179,7 @@ mod tests {
                  INSERT INTO keys (id, owner_id, name, digest, hint, created_at)
                    VALUES ('key1', 1, 'agent', decode(repeat('00', 32), 'hex'), 'ab12', 1);
                  ALTER TABLE keys DROP COLUMN kind;
-                 ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction;
+                 ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction; ALTER TABLE keys DROP COLUMN agents;
                  ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
                  DELETE FROM schema_migrations WHERE version > 6;",
             )

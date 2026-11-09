@@ -65,6 +65,8 @@ pub struct KeyRecord {
     pub kind: crate::keys::KeyKind,
     /// What the key can do when the portal asks a person (design of the dialogue, 1.6).
     pub interaction: crate::keys::Interaction,
+    /// What the portal does with the agents that share the key (lot G1b).
+    pub agents: crate::keys::AgentsMode,
     pub grants: Vec<Grant>,
 }
 
@@ -117,6 +119,7 @@ fn key_record(row: KeyRow) -> KeyRecord {
         expires_at: row.expires_at,
         kind: row.kind,
         interaction: row.interaction,
+        agents: row.agents,
         grants: row.grants,
     }
 }
@@ -812,6 +815,7 @@ mod tests {
         KeyRow {
             kind: crate::keys::KeyKind::Mcp,
             interaction: crate::keys::Interaction::Conversational,
+            agents: crate::keys::AgentsMode::Discover,
             id: id.into(),
             owner: owner.map(Into::into),
             name: format!("key {id}"),
@@ -862,6 +866,7 @@ mod tests {
         let file = KeyRecord {
             kind: crate::keys::KeyKind::Mcp,
             interaction: crate::keys::Interaction::Conversational,
+            agents: crate::keys::AgentsMode::Discover,
             id: "34b1100f45b235ba".into(),
             owner: KeyOwner::File("carol".into()),
             name: "nightly report".into(),
@@ -890,6 +895,7 @@ mod tests {
         let mut key = KeyRecord {
             kind: crate::keys::KeyKind::Mcp,
             interaction: crate::keys::Interaction::Conversational,
+            agents: crate::keys::AgentsMode::Discover,
             id: "k".into(),
             owner: KeyOwner::User("alice".into()),
             name: "k".into(),

@@ -173,6 +173,9 @@ pub struct KeysView<'a> {
     pub copy_name: String,
     /// The interaction that the form of a key shows.
     pub interaction: Option<crate::keys::Interaction>,
+    /// The mode of the agents that the form of a key shows. `None`: the file has no block `inbox.agents`, and the form
+    /// has no such field.
+    pub agents: Option<crate::keys::AgentsMode>,
     /// The id of the service that has a right and no `access`, when the server refused the form
     /// for this reason. The form shows again with the values that the person typed.
     pub needs_access: Option<String>,
@@ -209,6 +212,10 @@ pub fn notice_for(code: &str) -> Option<Notice> {
         ),
         "bad_interaction" => (
             "The interaction of a key is conversational or one shot.",
+            false,
+        ),
+        "bad_agents" => (
+            "The agents of a key are one agent, discover or enrolled.",
             false,
         ),
         "needs_access" => (
@@ -774,6 +781,34 @@ fn interaction_field(view: &KeysView<'_>) -> String {
     )
 }
 
+/// The choice of the mode of the agents of a key. Three radio buttons in the same control as the interaction. The field
+/// exists only when the file has the block `inbox.agents`. A new key gets the default of its kind.
+fn agents_field(view: &KeysView<'_>) -> String {
+    let Some(current) = view.agents.filter(|_| view.kind.is_some()) else {
+        return String::new();
+    };
+    let mut options = String::new();
+    for each in crate::keys::AgentsMode::ALL {
+        let _ = write!(
+            options,
+            r#"<label class="choiceGroup__option" title="{}"><input class="visually-hidden" type="radio" name="agents" value="{}"{}>{}</label>"#,
+            match each {
+                crate::keys::AgentsMode::Key => "All items of the key are one agent. No token",
+                crate::keys::AgentsMode::Discover =>
+                    "A call that makes an item and has no token makes an agent, and gets its token",
+                crate::keys::AgentsMode::Enrolled =>
+                    "You make the agents. A call that makes an item and has no valid token is refused",
+            },
+            each.name(),
+            if each == current { " checked" } else { "" },
+            each.label()
+        );
+    }
+    format!(
+        r#"<div class="field field--agents"><span class="field__label" id="key-agents-label">Agents</span><div class="choiceGroup" role="radiogroup" aria-labelledby="key-agents-label">{options}</div><p class="uiField__hint">The agents of one key share the key. The grouping is not a sandbox.</p></div>"#
+    )
+}
+
 /// The message under a field that a refused form names, and the attributes that tie it to it.
 fn field_error(id: &str, view: &KeysView<'_>, field: Field) -> (&'static str, String) {
     match view.notice.filter(|n| !n.ok && view.field == Some(field)) {
@@ -905,6 +940,7 @@ fn form_page(view: &KeysView<'_>) -> String {
             html_escape(&hint)
         );
     }
+    out.push_str(&agents_field(view));
     out.push_str("</div></form>");
     if let Some(editor) = &view.editor {
         let mut grants = String::new();
@@ -1014,6 +1050,7 @@ mod tests {
             max_lifetime: None,
             copy_name: String::new(),
             interaction: None,
+            agents: None,
             needs_access: None,
         }
     }

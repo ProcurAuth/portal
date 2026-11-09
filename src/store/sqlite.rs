@@ -222,6 +222,10 @@ ALTER TABLE keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'mcp' CHECK (kind IN ('mc
 /// `confirm` of a grant. `keys.interaction` holds `conversational` or `one_shot`: a key of kind `api` that exists before
 /// gets `one_shot`, the others get `conversational`. A file that the version 8 made before the approvals lacks the three
 /// columns: [`Sqlite::init`] refuses it.
+///
+/// The agents (5.1.0) are part of this version too. `keys.agents` holds `key`, `discover` or `enrolled`: a key of kind `api`
+/// that exists before gets `key`, the others get `discover`. A file that the version 8 made before the agents lacks the
+/// column: [`Sqlite::init`] refuses it.
 const SESSION_REMEMBERED_SCHEMA: &str = "
 ALTER TABLE sessions_log ADD COLUMN remembered INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE sessions_log ADD COLUMN mfa INTEGER NOT NULL DEFAULT 0;
@@ -254,6 +258,9 @@ ALTER TABLE key_grants ADD COLUMN confirm INTEGER NOT NULL DEFAULT 0 CHECK (conf
 ALTER TABLE keys ADD COLUMN interaction TEXT NOT NULL DEFAULT 'conversational'
   CHECK (interaction IN ('conversational', 'one_shot'));
 UPDATE keys SET interaction = 'one_shot' WHERE kind = 'api';
+ALTER TABLE keys ADD COLUMN agents TEXT NOT NULL DEFAULT 'discover'
+  CHECK (agents IN ('key', 'discover', 'enrolled'));
+UPDATE keys SET agents = 'key' WHERE kind = 'api';
 ";
 
 /// The columns of `user_grants` in a file of a given schema version.
@@ -505,6 +512,11 @@ impl Sqlite {
                 {
                     return Err(format!(
                         "the database was made by schema version {SCHEMA_VERSION} before the approvals, and this portal has no migration for it: make a new database, or add the columns user_grants.confirm, key_grants.confirm and keys.interaction by hand (see README, Upgrades, version 5.1.0)"
+                    ));
+                }
+                if !has_column(&conn, "keys", "agents")? {
+                    return Err(format!(
+                        "the database was made by schema version {SCHEMA_VERSION} before the agents, and this portal has no migration for it: make a new database, or add the column keys.agents by hand (see README, Upgrades, version 5.1.0)"
                     ));
                 }
             }
@@ -1411,7 +1423,7 @@ mod tests {
         // This is the file of the portal before version 7: the column `kind` did not exist.
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction;
+            "ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction; ALTER TABLE keys DROP COLUMN agents;
              ALTER TABLE keys DROP COLUMN kind; ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
              PRAGMA user_version = 6;",
         )
@@ -1498,7 +1510,7 @@ mod tests {
                 "key_grants.confirm",
             ),
             (
-                "ALTER TABLE keys DROP COLUMN interaction;",
+                "ALTER TABLE keys DROP COLUMN interaction; ALTER TABLE keys DROP COLUMN agents;",
                 "keys.interaction",
             ),
         ] {
@@ -1518,6 +1530,27 @@ mod tests {
             drop(Sqlite::open(&path).unwrap());
             assert!(Sqlite::open(&path).is_ok(), "{name}");
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The agents changed the base schema in place: a file of version 8 without `keys.agents` is refused.
+    #[test]
+    fn a_file_made_before_the_agents_is_refused_with_a_message_that_says_why() {
+        let dir = std::env::temp_dir().join(format!("portal-v8-agents-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("portal.db");
+        drop(Sqlite::open(&path).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("ALTER TABLE keys DROP COLUMN agents;")
+            .unwrap();
+        drop(conn);
+        let error = Sqlite::open(&path).err().expect("the file is refused");
+        assert!(
+            error.contains("before the agents")
+                && error.contains("keys.agents")
+                && error.contains("5.1.0"),
+            "{error}"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1541,7 +1574,7 @@ mod tests {
         // The file of the portal before the approvals, at version 7.
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction;
+            "ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction; ALTER TABLE keys DROP COLUMN agents;
              ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
              PRAGMA user_version = 7;",
         )
@@ -1566,6 +1599,10 @@ mod tests {
             crate::keys::Interaction::Conversational
         );
         assert_eq!(interaction("api1"), crate::keys::Interaction::OneShot);
+        // The mode of the agents follows the kind too: a script keeps one agent, the others discover.
+        let agents = |id: &str| directory.keys.iter().find(|k| k.id == id).unwrap().agents;
+        assert_eq!(agents("mcp1"), crate::keys::AgentsMode::Discover);
+        assert_eq!(agents("api1"), crate::keys::AgentsMode::Key);
         assert!(directory
             .keys
             .iter()
@@ -1576,6 +1613,8 @@ mod tests {
             .conn()
             .execute("UPDATE keys SET interaction = 'chat'", []);
         assert!(bad.is_err(), "the closed list of values");
+        let bad = store.conn().execute("UPDATE keys SET agents = 'auto'", []);
+        assert!(bad.is_err(), "the mode of the agents has three values");
         let bad = store
             .conn()
             .execute("UPDATE key_grants SET confirm = 2", []);
@@ -1599,7 +1638,7 @@ mod tests {
         drop(store);
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction;",
+            "ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction; ALTER TABLE keys DROP COLUMN agents;",
         )
         .unwrap();
         drop(conn);
@@ -1610,6 +1649,7 @@ mod tests {
             [Grant::new("access", "db").unwrap()]
         );
         assert_eq!(dump.keys[0].interaction, crate::keys::Interaction::OneShot);
+        assert_eq!(dump.keys[0].agents, crate::keys::AgentsMode::Key);
         assert!(dump.keys[0].grants.iter().all(|g| !g.confirm));
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1624,7 +1664,7 @@ mod tests {
         // This is the file of the portal before version 8: the column did not exist. The file has one open session.
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction;
+            "ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction; ALTER TABLE keys DROP COLUMN agents;
              ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
              INSERT INTO sessions_log (sid, login, superadmin, impersonated, user_agent, started_at, last_seen_at)
                VALUES (1, 'alice', 0, 0, 'ua', 10, 10);

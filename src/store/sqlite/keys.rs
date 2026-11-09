@@ -172,11 +172,17 @@ pub(super) fn read_keys(conn: &Connection, with_kind: bool) -> Result<Vec<KeyRow
     } else {
         "''"
     };
+    // A file that the agents did not make has no column `agents`: the keys get the default of their kind.
+    let agents = if has_column(conn, "keys", "agents")? {
+        "k.agents"
+    } else {
+        "''"
+    };
     let with_confirm = has_column(conn, "key_grants", "confirm")?;
     let rows = conn
         .prepare(&format!(
             "SELECT k.id, u.login, k.name, k.digest, k.hint, k.created_at, k.expires_at,
-                        k.last_check_at, k.check_count, {kind}, {interaction}
+                        k.last_check_at, k.check_count, {kind}, {interaction}, {agents}
                    FROM keys k LEFT JOIN users u ON u.id = k.owner_id
                   ORDER BY k.created_at, k.id",
         ))
@@ -194,6 +200,7 @@ pub(super) fn read_keys(conn: &Connection, with_kind: bool) -> Result<Vec<KeyRow
                 row.get::<_, i64>(8)?,
                 row.get::<_, String>(9)?,
                 row.get::<_, String>(10)?,
+                row.get::<_, String>(11)?,
             ))
         })
         .map_err(db)?
@@ -212,6 +219,7 @@ pub(super) fn read_keys(conn: &Connection, with_kind: bool) -> Result<Vec<KeyRow
         check_count,
         kind,
         interaction,
+        agents,
     ) in rows
     {
         let kind = crate::keys::KeyKind::from_name(&kind)
@@ -222,6 +230,13 @@ pub(super) fn read_keys(conn: &Connection, with_kind: bool) -> Result<Vec<KeyRow
             } else {
                 crate::keys::Interaction::from_name(&interaction).ok_or_else(|| {
                     format!("keys: the interaction {interaction:?} of the key {id} is not known")
+                })?
+            },
+            agents: if agents.is_empty() {
+                crate::keys::AgentsMode::default_for(kind)
+            } else {
+                crate::keys::AgentsMode::from_name(&agents).ok_or_else(|| {
+                    format!("keys: the mode of the agents {agents:?} of the key {id} is not known")
                 })?
             },
             kind,
@@ -430,17 +445,17 @@ impl Sqlite {
         let conn = self.conn();
         let mut statement = conn
             .prepare(
-                "SELECT id, login, name, hint, created_at, expires_at, last_check_at, check_count, revoked_at, kind, interaction
+                "SELECT id, login, name, hint, created_at, expires_at, last_check_at, check_count, revoked_at, kind, interaction, agents
                    FROM (
                      SELECT k.id AS id, u.login AS login, k.name AS name, k.hint AS hint,
                             k.created_at AS created_at, k.expires_at AS expires_at,
                             k.last_check_at AS last_check_at, k.check_count AS check_count,
                             NULL AS revoked_at, k.owner_id AS owner_id, k.kind AS kind,
-                            k.interaction AS interaction
+                            k.interaction AS interaction, k.agents AS agents
                        FROM keys k LEFT JOIN users u ON u.id = k.owner_id
                      UNION ALL
                      SELECT h.id, u.login, h.name, '', h.created_at, NULL, h.last_check_at,
-                            h.check_count, h.revoked_at, h.owner_id, NULL, NULL
+                            h.check_count, h.revoked_at, h.owner_id, NULL, NULL, NULL
                        FROM key_history h LEFT JOIN users u ON u.id = h.owner_id
                    )
                   WHERE (?1 OR (?2 IS NOT NULL AND login = ?2) OR (?3 AND owner_id IS NULL))
@@ -476,6 +491,9 @@ impl Sqlite {
                         interaction: row
                             .get::<_, Option<String>>(10)?
                             .and_then(|name| crate::keys::Interaction::from_name(&name)),
+                        agents: row
+                            .get::<_, Option<String>>(11)?
+                            .and_then(|name| crate::keys::AgentsMode::from_name(&name)),
                         grants: Vec::new(),
                     })
                 },
@@ -549,8 +567,8 @@ impl Sqlite {
         }
         tx.execute(
             "INSERT INTO keys (id, owner_id, name, digest, hint, created_at, expires_at,
-                               last_check_at, check_count, kind, interaction)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                               last_check_at, check_count, kind, interaction, agents)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 key.id,
                 owner_id,
@@ -562,7 +580,8 @@ impl Sqlite {
                 key.last_check_at,
                 key.check_count,
                 key.kind.name(),
-                key.interaction.name()
+                key.interaction.name(),
+                key.agents.name()
             ],
         )
         .map_err(db)?;
@@ -579,7 +598,7 @@ impl Sqlite {
         id: &str,
         owner: Option<&str>,
         name: &str,
-        interaction: crate::keys::Interaction,
+        modes: crate::store::KeyModes,
         grants: &[Grant],
         caps: &KeyCaps,
     ) -> Result<(), KeyWriteError> {
@@ -600,8 +619,8 @@ impl Sqlite {
             return Err(KeyWriteError::UnknownKey);
         }
         tx.execute(
-            "UPDATE keys SET name = ?2, interaction = ?3 WHERE id = ?1",
-            params![id, name, interaction.name()],
+            "UPDATE keys SET name = ?2, interaction = ?3, agents = ?4 WHERE id = ?1",
+            params![id, name, modes.interaction.name(), modes.agents.name()],
         )
         .map_err(db)?;
         tx.execute("DELETE FROM key_grants WHERE key_id = ?1", [id])
