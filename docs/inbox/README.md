@@ -71,6 +71,22 @@ An alert has one target: a group or one account. An alert to an account goes to 
 - The protocol of the phones does not change. The frame of the alert has the group id `@direct` and the group name `Direct`. A group of the file cannot have this id.
 - The account that is the target, the sender and the superadmin can read the alert. A right on a group does not apply, because the alert has no group.
 
+## Agents in the web pages
+
+Several agents can use one key. The web page of the Inbox shows them apart. This section is for the owner of the agents. [`agents.md`](agents.md) tells how an agent gets its token.
+
+1. Open the tab **Inbox**. The panel **Open items** has one group for each agent that has a request that waits.
+2. Read the name of the group. It is text of the server: your name for the agent, else the key name and a number.
+3. Do not trust the line **Observed, not verified**. The agent or its connection wrote it. Anyone who holds the key can send the same text.
+4. When a notice shows a new agent, decide. Type a name and press **Name and allow**, or press **Allow** to keep the number.
+5. Press **Block** to refuse the agent. The server cancels its open requests and refuses its calls. The page of the agent has **Unblock**.
+6. If the new agent is one that you know, merge it. This happens when an agent loses its token. Choose the known agent and press **Merge into it**.
+7. Open **Agents** in the control at the top to reach each agent, also a blocked one. The page of an agent has its events and its history.
+
+A new agent is not locked by default. With `inbox.agents.lock_new = true`, the server refuses **Approve** for a new agent until you allow it. **Decline** still works.
+
+A group is not a sandbox. The agents of one key share the key. An approval stays bound to its effect, not to an agent.
+
 ## Keys of the senders
 
 A key has one kind. The prefix of the text gives the kind.

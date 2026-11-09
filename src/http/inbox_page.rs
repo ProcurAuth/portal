@@ -13,6 +13,7 @@
 //! A session that "Log in as" opens can read the pages and make a code for the account. It does
 //! not send an alert and does not revoke a phone.
 
+mod agents;
 mod items;
 mod prefs;
 
@@ -440,6 +441,15 @@ async fn get(state: &Arc<AppState>, ctx: &Context<'_>, rest: &str) -> HttpRespon
     if rest == "/prefs" {
         return prefs::page(state, ctx).await;
     }
+    if rest == "/agents" {
+        return agents::list(state, ctx).await;
+    }
+    if let Some(id) = rest.strip_prefix("/agents/") {
+        if matches!(id, "rename" | "allow" | "block" | "unblock" | "merge") {
+            return text_response(StatusCode::METHOD_NOT_ALLOWED, "Method Not Allowed\n");
+        }
+        return agents::page(state, ctx, id).await;
+    }
     if let Some(tail) = rest.strip_prefix("/items/") {
         if matches!(tail, "answer" | "reply" | "cancel") {
             return text_response(StatusCode::METHOD_NOT_ALLOWED, "Method Not Allowed\n");
@@ -762,6 +772,11 @@ async fn post(
             | "/items/reply"
             | "/items/cancel"
             | "/prefs"
+            | "/agents/rename"
+            | "/agents/allow"
+            | "/agents/block"
+            | "/agents/unblock"
+            | "/agents/merge"
     ) {
         return not_found();
     }
@@ -778,6 +793,11 @@ async fn post(
         "/items/reply" => items::reply(state, &ctx, fields).await,
         "/items/cancel" => items::cancel(state, &ctx, fields).await,
         "/prefs" => prefs::save(state, &ctx, fields).await,
+        "/agents/rename" => agents::rename(state, &ctx, fields).await,
+        "/agents/allow" => agents::allow(state, &ctx, fields).await,
+        "/agents/block" => agents::block(state, &ctx, fields).await,
+        "/agents/unblock" => agents::unblock(state, &ctx, fields).await,
+        "/agents/merge" => agents::merge(state, &ctx, fields).await,
         _ => code(state, &ctx, fields).await,
     }
 }
