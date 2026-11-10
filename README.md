@@ -2342,6 +2342,10 @@ Version 5.1.0 adds the agents of a key. Read these points before you upgrade fro
 - The Android app of 5.1.0 and the server of 5.1.0 go together. The app keeps its portals when it updates from an earlier build, and it drops its local items: they come back from the server at the next connection. A phone of an earlier build cannot read the new frames of the agents. Update the app and the server in one step.
 
 
+Version 5.2.1 changes only the Android app. It has no change of the server, of the protocol or of the database. Read this point before you upgrade from 5.2.0:
+
+- The app now shows the new state of an agent at once after the owner names or allows it. The line of observed hints no longer marks its own separator. Install the APK of 5.2.1. The server of 5.2.0 keeps working.
+
 Version 5.2.0 adds the questions. Read these points before you upgrade from 5.1.0:
 
 - The block `inbox.questions` is new and optional. It needs the blocks `inbox.items` and `inbox.at_rest`. Without it, nothing changes: the tool `ask` and the route `POST /api/v1/questions` do not exist.
