@@ -736,3 +736,201 @@ async fn canary_for_question_bodies_in_every_place() {
     );
     assert_eq!(number(&pep, "SELECT COUNT(*) FROM approvals"), 0);
 }
+
+// ---------------------------------------------------------------------------------------------
+// The web forms of the questions (lot L14): `POST /auth/settings/inbox/items/question` and `/items/reply`.
+
+const WEB_QUESTION: &str = "/auth/settings/inbox/items/question";
+const WEB_REPLY: &str = "/auth/settings/inbox/items/reply";
+
+/// A POST of the owner with a body that can be above the limit of the form. The result is the status and the head.
+fn web_post_big(pep: &Pep, cookie: &str, path: &str, body: &str) -> (u16, String) {
+    let host = format!("127.0.0.1:{}", pep.s.port);
+    let (status, text) = post_big(
+        pep.s.port,
+        path,
+        &[
+            ("Content-Type", "application/x-www-form-urlencoded".into()),
+            ("Cookie", cookie.to_string()),
+            ("Origin", format!("http://{host}")),
+        ],
+        body,
+    );
+    (status, text)
+}
+
+/// The forms of the page of a question are bounded: a body above 128 KiB gets 413, a text that is too long or empty is
+/// refused and kept out of the storage, the replies stop at `max_turns`, an answer after the first changes nothing,
+/// and an account that does not own the question gets the answer of an unknown question and writes nothing.
+#[test]
+fn the_web_forms_of_a_question_are_bounded_and_owner_only() {
+    let pep = Pep::with_questions(|_| {});
+    let cookie = pep.cookie(common::approvals::OWNER);
+    let text_id = {
+        let made = pep.tool(
+            "ask",
+            json!({"title": "When may I run it?", "lease_s": 900, "idempotency_key": "w-text",
+                   "input": {"type": "text", "allow_ask_back": true}}),
+        );
+        made["request_id"].as_str().unwrap().to_string()
+    };
+    let plain_id = {
+        let made = pep.tool("ask", question(1));
+        made["request_id"].as_str().unwrap().to_string()
+    };
+    let closed_id = {
+        let made = pep.tool(
+            "ask",
+            json!({"title": "No talk?", "lease_s": 900, "idempotency_key": "w-closed",
+                   "input": {"type": "text"}}),
+        );
+        made["request_id"].as_str().unwrap().to_string()
+    };
+    let token = pep.inbox_csrf(&cookie);
+    let before = sizes(&pep);
+    let answer = |id: &str, text: &str| format!("request_id={id}&action=accept&b0t={text}");
+
+    // An oversize body: refused at the edge, as 413, before any field is read.
+    let huge = format!(
+        "csrf={}&{}",
+        common::form_value(&token),
+        answer(&text_id, &"x".repeat(200 * 1024))
+    );
+    for path in [WEB_QUESTION, WEB_REPLY] {
+        let (status, _) = web_post_big(&pep, &cookie, path, &huge);
+        assert_eq!(status, 413, "{path}");
+    }
+    let (status, _) = web_post_big(&pep, &cookie, WEB_QUESTION, &"y".repeat(5 * 1024 * 1024));
+    assert!(status == 413 || status == 403 || status == 400, "{status}");
+    assert_eq!(sizes(&pep), before, "an oversize body writes nothing");
+
+    // A flood of refused answers: too long, empty, unknown field. Each gets a page or a 4xx, never a stored answer.
+    let too_long = "z".repeat(2001);
+    for n in 0..40 {
+        let fields = match n % 3 {
+            0 => answer(&text_id, &too_long),
+            1 => answer(&text_id, ""),
+            _ => format!("{}&extra=1", answer(&text_id, "ok")),
+        };
+        let (status, head, _) = pep.post(&cookie, WEB_QUESTION, &token, &fields, None);
+        assert!(
+            status != 303 || !common::location(&head).ends_with("?s=q_answered"),
+            "a refused answer was taken: {status} {head}"
+        );
+        assert!(status < 500, "{status}");
+    }
+    assert_eq!(
+        pep.tool("get_answer", json!({"request_id": text_id}))["status"],
+        "pending"
+    );
+    assert_eq!(sizes(&pep), before, "40 refused answers write nothing");
+
+    // A flood of replies on a question that allows them: the thread stops at `max_turns` (40), and no reply gets a 5xx.
+    for n in 0..60 {
+        let (status, _, _) = pep.post(
+            &cookie,
+            WEB_REPLY,
+            &token,
+            &format!("request_id={text_id}&text=why+{n}"),
+            None,
+        );
+        assert!(status < 500, "{status}");
+    }
+    let turns = number(
+        &pep,
+        &format!("SELECT COUNT(*) FROM turns WHERE request_id = '{text_id}'"),
+    );
+    assert!(
+        (1..=40).contains(&turns),
+        "the turns stop at max_turns: {turns}"
+    );
+    // A reply that is too long, empty, or for a question that does not allow replies writes nothing.
+    let after_replies = sizes(&pep);
+    for fields in [
+        format!("request_id={text_id}&text={}", "r".repeat(5000)),
+        format!("request_id={text_id}&text="),
+        format!("request_id={closed_id}&text=hello"),
+        format!("request_id={plain_id}&text={}", "r".repeat(129 * 1024)),
+    ] {
+        let (status, _, _) = pep.post(&cookie, WEB_REPLY, &token, &fields, None);
+        assert!(status < 500, "{status}");
+    }
+    assert_eq!(sizes(&pep), after_replies, "bad replies write nothing");
+    assert_eq!(
+        number(
+            &pep,
+            &format!("SELECT COUNT(*) FROM turns WHERE request_id = '{closed_id}'")
+        ),
+        0
+    );
+
+    // Another account: the answer is the answer of an unknown question, and nothing is written.
+    let other = pep
+        .s
+        .account_with(
+            "erin",
+            &[
+                "access on service:portal",
+                "keys.own.read on service:portal",
+                "keys.own.use on service:portal/key_kind:mcp",
+            ],
+        )
+        .cookie
+        .clone();
+    let other_token = pep.inbox_csrf(&other);
+    let unknown = "0".repeat(32);
+    for path_fields in [
+        (WEB_QUESTION, answer(&text_id, "mine")),
+        (WEB_QUESTION, format!("request_id={text_id}&action=decline")),
+        (WEB_REPLY, format!("request_id={text_id}&text=hello")),
+    ] {
+        let (st1, head1, _) = pep.post(&other, path_fields.0, &other_token, &path_fields.1, None);
+        let again = path_fields.1.replace(&text_id, &unknown);
+        let (st2, head2, _) = pep.post(&other, path_fields.0, &other_token, &again, None);
+        assert_eq!(
+            (st1, common::location(&head1).replace(&text_id, "ID")),
+            (st2, common::location(&head2).replace(&unknown, "ID")),
+            "{}: a foreign question looks like an unknown one",
+            path_fields.0
+        );
+    }
+    assert_eq!(
+        sizes(&pep),
+        after_replies,
+        "the other account wrote nothing"
+    );
+    assert_eq!(
+        pep.tool("get_answer", json!({"request_id": text_id}))["status"],
+        "replied"
+    );
+
+    // The right answer ends the question one time. The answers after it change nothing.
+    let (status, head, _) = pep.post(
+        &cookie,
+        WEB_QUESTION,
+        &token,
+        &answer(&closed_id, "tonight"),
+        None,
+    );
+    assert_eq!(status, 303, "{head}");
+    let after_answer = sizes(&pep);
+    for _ in 0..30 {
+        let (status, head, _) = pep.post(
+            &cookie,
+            WEB_QUESTION,
+            &token,
+            &answer(&closed_id, "again"),
+            None,
+        );
+        assert!(
+            !(status == 303 && common::location(&head).ends_with("?s=q_answered")),
+            "a second answer was taken"
+        );
+        assert!(status < 500, "{status}");
+    }
+    assert_eq!(sizes(&pep), after_answer, "30 more answers change nothing");
+    assert_eq!(
+        pep.tool("get_answer", json!({"request_id": closed_id}))["answer"]["untrusted"]["text"],
+        "tonight"
+    );
+}

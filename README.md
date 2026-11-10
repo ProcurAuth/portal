@@ -1351,7 +1351,9 @@ At start, the portal compares each key with a check value in the table `content_
 
 ### The engine of the items
 
-One engine runs the approvals and the questions. It lives in the Inbox and needs the blocks `inbox.items` and `inbox.at_rest`. The PDP uses `consume` and `release` (see "The approval gate"). The approval API of a service creates the approvals (see "The approval API for a service"). The agent channel reads and writes the items (see "Agents and senders"). The phones read and answer the items (see "Items on the phone"). The next lots of 5.1.0 add the web pages.
+One engine runs the approvals and the questions. It lives in the Inbox and needs the blocks `inbox.items` and `inbox.at_rest`. The PDP uses `consume` and `release` (see "The approval gate"). The approval API of a service creates the approvals (see "The approval API for a service"). The agent channel reads and writes the items (see "Agents and senders"). The phones read and answer the items (see "Items on the phone").
+
+The web pages of the Inbox show the approvals and the questions, and the owner answers them there (see "The tab Inbox").
 
 An item has one of seven states: `pending`, `replied`, `answered`, `abandoned`, `expired`, `cancelled` and `superseded`. The states `pending` and `replied` are open. The server decides `abandoned` and `expired` with its own clock. It checks them at each read, at each answer and in a task that runs every 2 seconds. A clock of a phone changes nothing.
 
