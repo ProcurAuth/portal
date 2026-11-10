@@ -35,8 +35,11 @@ object QuestionHistory {
     }
 
     /** The word of the chip: `answered`, `declined`, `abandoned`... */
-    fun word(item: Item, own: Own?): String =
-        if (item.state == ItemState.ANSWERED && own?.declined == true) "declined" else ItemTexts.stateWord(item)
+    fun word(item: Item, own: Own?): String = when {
+        // `decision` of a `settled` frame is for approvals: a question that was answered is `answered`.
+        item.state == ItemState.ANSWERED -> if (own?.declined == true) "declined" else "answered"
+        else -> ItemTexts.stateWord(item)
+    }
 
     private const val SHORT = 60
 

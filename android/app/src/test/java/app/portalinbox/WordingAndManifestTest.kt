@@ -30,9 +30,24 @@ class WordingAndManifestTest {
     @Test
     fun theTextsOfTheAgentsAreAsciiOnly() {
         // Lot G4: no hidden, bidirectional or look-alike character can enter the screen through a resource.
-        val text = File("src/main/res/values/strings_agents.xml", "src/main/res/values/strings_questions.xml").readText()
+        val text = File("src/main/res/values/strings_agents.xml").readText()
         val bad = text.filter { it.code !in 0x20..0x7E && it != '\n' }
         assertEquals("only ASCII: <${bad.map { "U+%04X".format(it.code) }}>", "", bad)
+    }
+
+    @Test
+    fun theTextsOfTheQuestionsAreAsciiOnly() {
+        // Lot A4: a resource of the question screens never holds a hidden, bidirectional or look-alike character.
+        val text = File("src/main/res/values/strings_questions.xml").readText()
+        val bad = text.filter { it.code !in 0x20..0x7E && it != '\n' }
+        assertEquals("only ASCII: <${bad.map { "U+%04X".format(it.code) }}>", "", bad)
+    }
+
+    @Test
+    fun theQuestionScreenIsNotExportedAndHasNoIntentFilter() {
+        val q = activity(".ui.QuestionActivity")
+        assertTrue(q.contains("""android:exported="false""""))
+        assertFalse(q.contains("intent-filter"))
     }
 
     @Test
