@@ -1,6 +1,7 @@
 package app.portalinbox.ui
 
 import app.portalinbox.data.AgentDirectory
+import app.portalinbox.data.AnswerSheet
 import app.portalinbox.data.Item
 import app.portalinbox.proto.RequestKind
 
@@ -49,7 +50,7 @@ object ItemListOrder {
         val code: String?,
         val old: Boolean,
         val invalid: Boolean,
-        /** The row opens a screen. A question opens its screen in lot A4. */
+        /** The row opens a screen: an approval opens [ApprovalActivity], a question opens [QuestionActivity] ([ItemScreens]). */
         val openable: Boolean,
     )
 
@@ -89,7 +90,7 @@ object ItemListOrder {
             code = approval?.code,
             old = item.kind == RequestKind.APPROVAL && item.isOpen && ApprovalState.isStale(ApprovalState.ageOf(item, nowMs)),
             invalid = item.kind == RequestKind.APPROVAL && !item.validity.isValid,
-            openable = item.kind == RequestKind.APPROVAL,
+            openable = true,
         )
     }
 
@@ -108,14 +109,18 @@ object ItemListOrder {
         val openable: Boolean,
     )
 
-    fun doneRow(item: Item): DoneRow = DoneRow(
+    /**
+     * A card of the list "Done". [own] is the answer that this phone sent for a question (it tells `declined` and what was
+     * chosen, which the `settled` frame does not say, see [QuestionHistory]).
+     */
+    fun doneRow(item: Item, own: QuestionHistory.Own? = null): DoneRow = DoneRow(
         serverId = item.serverId,
         requestId = item.requestId,
         chip = if (item.kind == RequestKind.APPROVAL) Chip.APPROVAL else if (ItemTexts.isAutomatic(item)) Chip.DECISION else Chip.QUESTION,
         title = ItemTexts.title(item),
-        word = ItemTexts.stateWord(item),
-        detail = ItemTexts.reasonLine(item),
+        word = if (item.kind == RequestKind.QUESTION) QuestionHistory.word(item, own) else ItemTexts.stateWord(item),
+        detail = if (item.kind == RequestKind.QUESTION) QuestionHistory.reasonLine(item, own, AnswerSheet.of(item.request)) else ItemTexts.reasonLine(item),
         whenMs = item.settled?.atMs ?: item.updatedAtMs,
-        openable = item.kind == RequestKind.APPROVAL,
+        openable = true,
     )
 }

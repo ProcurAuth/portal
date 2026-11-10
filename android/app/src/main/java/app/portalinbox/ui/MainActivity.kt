@@ -728,13 +728,8 @@ class MainActivity : BaseActivity() {
         override fun merge(m: NewAgentCard.Model) = agentMergeSheet(m.choices) { into -> sendAgent(m, AgentOp.MERGE, into = into) }
     }
 
-    private fun openItem(item: Item, r: ItemListOrder.Row) {
-        if (r.openable) {
-            startActivity(ApprovalActivity.intent(this, item.serverId, item.requestId))
-        } else {
-            // The screens of the questions come with the questions of version 5.2.0.
-            root.snackbar(getString(R.string.question_later))
-        }
+    private fun openItem(item: Item, @Suppress("UNUSED_PARAMETER") r: ItemListOrder.Row) {
+        startActivity(ItemScreens.intent(this, item))
     }
 
     // ------------------------------------------------------------ done
@@ -750,7 +745,10 @@ class MainActivity : BaseActivity() {
             return
         }
         done.forEachIndexed { i, item ->
-            val r = ItemListOrder.doneRow(item)
+            val own = if (item.kind == app.portalinbox.proto.RequestKind.QUESTION && item.state == app.portalinbox.proto.ItemState.ANSWERED) {
+                QuestionHistory.own(Items.repository(this).outboxOf(item.serverId, item.requestId))
+            } else null
+            val r = ItemListOrder.doneRow(item, own)
             val (chipText, fg, _) = chipStyle(r.chip)
             val (stateFg, stateBg) = when (r.word) {
                 "approved", "answered" -> color(R.color.info) to color(R.color.info_soft)
@@ -768,7 +766,7 @@ class MainActivity : BaseActivity() {
                 background = rowRipple()
                 isClickable = true
                 contentDescription = listOfNotNull(byId[r.serverId]?.identity?.nickname?.let { "Portal $it" }, chipText, r.title, r.word, r.detail).joinToString(". ")
-                setOnClickListener { if (r.openable) startActivity(ApprovalActivity.intent(this@MainActivity, r.serverId, r.requestId)) else root.snackbar(getString(R.string.question_later)) }
+                setOnClickListener { startActivity(ItemScreens.intent(this@MainActivity, item)) }
             }
             row.addView(View(this).apply { setBackgroundColor(stateFg) }, lp(dp(3), MATCH))
             val time = lin().apply { setPadding(dp(10), dp(9), 0, dp(9)) }

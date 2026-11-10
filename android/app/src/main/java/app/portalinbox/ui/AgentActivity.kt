@@ -257,7 +257,7 @@ class AgentActivity : BaseActivity() {
             val chipText = getString(if (r.chip == ItemListOrder.Chip.APPROVAL) R.string.chip_approval else R.string.chip_question)
             p.addView(
                 row(r.title, r.subtitle.ifEmpty { r.detail }, chip(chipText, color(R.color.primary), color(R.color.primary_soft))) {
-                    if (r.openable) startActivity(ApprovalActivity.intent(this, item.serverId, item.requestId))
+                    if (r.openable) startActivity(ItemScreens.intent(this, item))
                 }.apply { minimumHeight = dp(52) },
             )
         }

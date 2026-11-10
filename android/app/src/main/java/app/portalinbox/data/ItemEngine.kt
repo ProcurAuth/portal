@@ -315,6 +315,24 @@ class ItemEngine(
         }
     }
 
+    /**
+     * Answers a question or a form (lot A4). The frame is built from the draft of the sheet with the rules of the server
+     * ([AnswerSheet.build]). A question that the flags do not allow ([FlagsMatrix]) is never answered: the owner can decline it.
+     * The caller asks for the local biometric check before it calls this.
+     */
+    fun answerQuestion(serverId: Long, requestId: String, draft: SheetDraft): Submit {
+        val item = repo.item(serverId, requestId) ?: return refused(Refusal.NOT_FOUND)
+        if (item.kind != RequestKind.QUESTION) return refused(Refusal.NOT_A_QUESTION)
+        if (!item.isOpen) return refused(Refusal.NOT_OPEN)
+        if (FlagsMatrix.rows(item.request).invalid != null) return refused(Refusal.INVALID_REQUEST)
+        val sheet = AnswerSheet.of(item.request) ?: return refused(Refusal.NOT_A_QUESTION)
+        if (hasPendingAnswer(serverId, requestId)) return refused(Refusal.ALREADY_QUEUED)
+        if (draft.blocks.size != sheet.blocks.size || AnswerSheet.missing(sheet, draft).isNotEmpty()) return refused(Refusal.BAD_INPUT)
+        return queue(serverId, requestId, OutboxType.ANSWER) { id ->
+            (AnswerSheet.build(sheet, draft, requestId, id) as Built.Frame).frame
+        }
+    }
+
     /** Asks the agent a question. The item stays open. One message waits in the outbox at a time. */
     fun reply(serverId: Long, requestId: String, text: String): Submit {
         val item = repo.item(serverId, requestId) ?: return refused(Refusal.NOT_FOUND)

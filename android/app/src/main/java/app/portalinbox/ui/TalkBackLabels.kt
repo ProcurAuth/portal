@@ -88,4 +88,39 @@ object TalkBackLabels {
     /** The label of the header of the thread: the title, the sender and the state in one sentence. */
     fun threadHeader(screen: ThreadState.Screen): String =
         listOfNotNull(screen.title, screen.senderLine, screen.chip?.word, screen.statusSpoken.ifEmpty { null }).joinToString(". ")
+
+    // ------------------------------------------------------------ the screen of a question (lot A4)
+
+    /**
+     * The label of the header of a question: "Question from the agent triage, asked 6 days ago, agent active 3 minutes ago, 3
+     * options". An automatic system has no agent that is active: "Decision from the automatic system jev, asked 12 minutes ago,
+     * last computed 12 minutes ago, 3 options". The sender text is a text of a third party: its hidden characters show as marks.
+     */
+    fun questionHeader(item: Item, nowMs: Long, label: String = item.request.from.label): String {
+        val r = item.request
+        val from = VisibleText.escapeLine(label)
+        val title = VisibleText.escapeLine(r.question?.title ?: "Question")
+        val asked = "asked " + Ages.spoken(r.createdAtMs, nowMs)
+        val automatic = ItemTexts.isAutomatic(item)
+        val seen = if (automatic) "last computed " + Ages.spoken(r.agentSeenAtMs, nowMs) else "agent active " + Ages.spoken(r.agentSeenAtMs, nowMs)
+        val head = if (automatic) "Decision from the automatic system $from" else "Question from the agent $from"
+        return listOfNotNull(head, title, asked, seen, options(item)).joinToString(", ")
+    }
+
+    /** The label of one block of a form: "Question 2 of 3, Retention. Choose one. Not answered". */
+    fun block(number: Int, total: Int, header: String?, rule: String, answered: Boolean): String =
+        listOfNotNull(
+            if (total > 1) "Question $number of $total" else null,
+            header?.let { VisibleText.escapeLine(it) },
+        ).joinToString(", ").let { if (it.isEmpty()) "" else "$it. " } + rule + " " + if (answered) "Answered" else "Not answered"
+
+    /** The label of the Send button: the portal, and why it is off. */
+    fun questionSend(s: QuestionState.Screen, portal: String?): String {
+        val on = portal?.let { " on " + VisibleText.escapeLine(it) } ?: ""
+        return if (s.sendEnabled) s.sendWord + on else s.sendWord + on + ". Not available now. " + (s.bottomHint ?: "")
+    }
+
+    /** The label of the row "Other answer": it says that the text excludes the options and that the agent reads it. */
+    fun otherRow(exclusive: Boolean): String =
+        QuestionState.OTHER_WORD + ". " + QuestionState.OTHER_NOTE + (if (exclusive) " It replaces the options." else "") + " " + QuestionState.SECRET_WARNING
 }

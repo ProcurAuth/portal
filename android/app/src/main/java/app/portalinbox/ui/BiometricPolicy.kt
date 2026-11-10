@@ -28,4 +28,10 @@ object BiometricPolicy {
     /** The subtitle of the prompt: the code, the service and the short hash. It never shows the command. */
     fun subtitle(code: String, service: String, shortEffect: String?): String =
         listOfNotNull(VisibleText.escapeLine(code), VisibleText.escapeLine(service), shortEffect?.let { "sha256:$it" }).joinToString(" · ")
+
+    /** The title of the prompt before an answer to a question: "Send answer on Production". */
+    fun answerTitle(nickname: String): String = "Send answer on " + VisibleText.escapeLine(nickname)
+
+    /** The subtitle of the prompt: the title of the question, on one line. It never shows the answer. */
+    fun answerSubtitle(questionTitle: String): String = QuestionHistory.promptTitle(questionTitle)
 }

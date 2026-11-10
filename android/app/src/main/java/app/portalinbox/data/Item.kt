@@ -157,6 +157,9 @@ data class SessionStart(val sync: ClientFrame?, val outbox: List<OutboxEntry>)
 enum class Refusal {
     NOT_FOUND, NOT_AN_APPROVAL, NOT_OPEN,
 
+    /** An answer of a question for an item that is not a question, or a question that takes no answer on a sheet. */
+    NOT_A_QUESTION,
+
     /** The request is not valid: the phone never approves it. */
     INVALID_REQUEST,
 
