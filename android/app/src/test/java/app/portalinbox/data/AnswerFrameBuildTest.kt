@@ -97,7 +97,7 @@ class AnswerFrameBuildTest {
         val max = "x".repeat(AnswerSheet.MAX_TEXT_CHARS)
         assertEquals(max, frame(build(s, AnswerSheet.typeOther(s, AnswerSheet.empty(s), 0, max))).text)
         val over = AnswerSheet.typeOther(s, AnswerSheet.empty(s), 0, max + "x")
-        assertEquals(BlockStatus.Invalid("The text is too long. Use 8000 characters at most."), AnswerSheet.status(s, over, 0))
+        assertEquals(BlockStatus.Invalid("The text is too long. Use 2000 characters at most."), AnswerSheet.status(s, over, 0))
         assertTrue(build(s, over) is Built.Refused)
         // A pair of surrogates counts as one character, as in the core crate.
         val emoji = "😀".repeat(AnswerSheet.MAX_TEXT_CHARS)

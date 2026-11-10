@@ -6,7 +6,6 @@ import app.portalinbox.proto.FormAnswer
 import app.portalinbox.proto.FormQuestionType
 import app.portalinbox.proto.InputOption
 import app.portalinbox.proto.InputType
-import app.portalinbox.proto.MAX_USER_TEXT_CHARS
 import app.portalinbox.proto.RequestFrame
 import app.portalinbox.proto.RequestKind
 
@@ -90,11 +89,12 @@ sealed interface Built {
  * - A radio takes one tick. A checkbox takes `min` to `max` ticks. A tick names a known option, once.
  * - The free answer ("Other answer") exists only when the request has `allow_custom`. It is exclusive of the ticks: choosing
  *   it clears them, and ticking an option clears it. `min` and `max` count the ticks only.
- * - A text answer has 1 to 8000 characters and no NUL. A text of only spaces is no answer. The text is not changed.
+ * - A text answer has 1 to 2000 characters and no NUL. A text of only spaces is no answer. The text is not changed.
  * - Every block of a form needs an answer. A decline carries no text.
  */
 object AnswerSheet {
-    const val MAX_TEXT_CHARS = MAX_USER_TEXT_CHARS
+    /** The server takes 2000 characters of free text for a question (SPEC 3.6.23). The core takes more for a form: the phone keeps the lower limit. */
+    const val MAX_TEXT_CHARS = 2000
 
     val CONFIRM_OPTIONS: List<InputOption> = listOf(
         InputOption("yes", "Yes", null),
