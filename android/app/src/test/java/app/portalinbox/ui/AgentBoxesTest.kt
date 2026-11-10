@@ -256,4 +256,15 @@ class AgentBoxesTest {
             assertFalse(s, s.contains("server", ignoreCase = true))
         }
     }
+
+    @Test
+    fun theSeparatorOfTheObservedLineIsNotMarked() {
+        val joined = UntrustedText.joined(listOf("says \"bot\"", "client/1", "10.0.0.0/24"), " \u00B7 ")
+        assertEquals("says \"bot\" \u00B7 client/1 \u00B7 10.0.0.0/24", joined.text)
+        assertTrue(joined.spans.isEmpty())
+        // A mark of a part stays on its own characters.
+        val marked = UntrustedText.joined(listOf("a", "b\u200Bc"), " \u00B7 ")
+        assertEquals("a \u00B7 b<U+200B>c", marked.text)
+        assertTrue(marked.spans.all { it.start >= 4 })
+    }
 }
