@@ -710,7 +710,22 @@ class MainActivity : BaseActivity() {
             return
         }
         if (op == AgentOp.ALLOW) nameDrafts.remove(AgentKey.of(m.serverId, m.agentId))
+        endTyping()
         render()
+    }
+
+    /**
+     * The owner tapped a button: the typing is over. Release the hold on the redraw and the focus of the name field, so that the screen
+     * shows the new state of the agent. Without this, the field keeps the focus and the old card stays.
+     */
+    private fun endTyping() {
+        typing = false
+        redrawAfterTyping = false
+        (currentFocus as? EditText)?.let {
+            it.clearFocus()
+            (getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                .hideSoftInputFromWindow(it.windowToken, 0)
+        }
     }
 
     private val agentActions = object : NewAgentActions {
