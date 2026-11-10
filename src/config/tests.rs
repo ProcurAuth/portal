@@ -4571,6 +4571,58 @@ fn a_bad_key_of_the_block_mcp_or_a_contradiction_stops_the_start_with_the_key_th
     );
 }
 
+// ---------------------------------------------------------------- inbox.questions
+
+#[test]
+fn questions_block_closed_schema_and_defaults() {
+    // Without the block, the questions are off.
+    let (config, _) = items_ok(ITEMS, AT_REST);
+    assert!(config.inbox.as_ref().unwrap().questions.is_none());
+    // An empty block gives the documented default, and the line says `default`.
+    let (config, _) = items_ok(&format!("{ITEMS} questions {{ }}"), AT_REST);
+    let q = config.inbox.as_ref().unwrap().questions.as_ref().unwrap();
+    assert_eq!(q.max_options, 8);
+    let l = line(&config, "inbox.questions.max_options");
+    assert_eq!((l.value.as_str(), l.source.as_str()), ("8", "default"));
+    // The ends of the range apply.
+    for n in [2, 8] {
+        let (config, _) = items_ok(
+            &format!("{ITEMS} questions {{ max_options = {n} }}"),
+            AT_REST,
+        );
+        assert_eq!(config.inbox.unwrap().questions.unwrap().max_options, n);
+    }
+    // The schema is closed: an unknown key, a duplicate key, a wrong type and a value out of range. The message names
+    // the key.
+    for (keys, expected) in [
+        ("unknown_key = 1", "unknown_key"),
+        ("max_options = 3 max_options = 4", "max_options"),
+        ("max_options = 1", "inbox.questions.max_options"),
+        ("max_options = 9", "inbox.questions.max_options"),
+        (r#"max_options = "8""#, "inbox.questions.max_options"),
+    ] {
+        let message = items_err(&format!("{ITEMS} questions {{ {keys} }}"), AT_REST);
+        assert!(message.contains(expected), "{keys}: {message}");
+    }
+    // A block that the table does not know is refused.
+    let message = items_err(&format!("{ITEMS} questions {{ }} asks {{ }}"), AT_REST);
+    assert!(message.contains("asks"), "{message}");
+}
+
+#[test]
+fn questions_block_needs_items_and_at_rest() {
+    let message = items_err("questions { }", "");
+    assert!(
+        message.contains("inbox.questions needs the blocks inbox.items and inbox.at_rest"),
+        "{message}"
+    );
+    let message = items_err(&format!("{ITEMS} questions {{ }}"), "");
+    assert!(
+        message.contains("inbox.items needs the block inbox.at_rest"),
+        "{message}"
+    );
+}
+
 // ---------------------------------------------------------------- inbox.agents
 
 #[test]

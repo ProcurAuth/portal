@@ -6614,9 +6614,17 @@ mod kinds_tests {
                 .collect();
             assert_eq!(
                 names,
-                ["access", "alert.send", "alert.send_user", "alert.read"]
+                [
+                    "access",
+                    "alert.send",
+                    "alert.send_user",
+                    "alert.read",
+                    "question.ask",
+                    "question.cancel"
+                ]
             );
-            // The form of an MCP key holds the services and no portal feature.
+            // The form of an MCP key holds the services. It offers the two actions of the questions only to an owner that
+            // holds one of them: this owner holds none.
             let mcp = get_new_key(&node, &alice, "?kind=mcp");
             let editor = editor_json(&mcp.body);
             assert!(editor["features"].is_null());

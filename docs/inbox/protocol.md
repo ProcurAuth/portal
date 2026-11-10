@@ -440,7 +440,7 @@ The result of an `answer` or a `reply`.
 |---|---|
 | `accepted` | The server took the frame. An `answer` is then the only answer of the item. |
 | `already_answered` | Another answer won. The same `client_msg_id` sent again also gets this status. |
-| `closed` | The item is final in another way. |
+| `closed` | The item is final in another way. A question gets `closed` with no `state` when the answer does not fit it: an option that the question does not have, a wrong number of ticks, or a text where a choice is due. The server writes nothing, and the device drops the entry of its outbox. |
 | `abandoned`, `superseded`, `expired`, `cancelled` | The item is in this state. |
 | `effect_mismatch` | `shown_effect` is not the effect of the item. |
 | `device_revoked` | The device is revoked. The state of the item does not change, and the server closes the session with 4403. |

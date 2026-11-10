@@ -14,7 +14,8 @@
 //!   `phone.read`, `phone.revoke` and `phone.log` apply to the service. The actions `alert.send`
 //!   and `alert.send_user` list the budget `alerts`. `approval.read` and `approval.cancel` apply to
 //!   the service: the first shows the metadata of the requests of all the accounts, the second
-//!   cancels an open request. No action reads a content, and no action decides. The value of a budget is on the grant `access`
+//!   cancels an open request. `question.ask`, `question.read` and `question.cancel` apply to the service
+//!   too: the first lists the budget `questions`. No action reads a content, and no action decides. The value of a budget is on the grant `access`
 //!   of the service, as for each other service. The PDP counts it as a use of the key or of the
 //!   account. A group with `critical = true` never counts a use, so it never has a limit. An
 //!   alert to an account is never critical: it always counts.
@@ -58,11 +59,17 @@ pub const PHONE_REVOKE: &str = "phone.revoke";
 pub const PHONE_LOG: &str = "phone.log";
 pub const APPROVAL_READ: &str = "approval.read";
 pub const APPROVAL_CANCEL: &str = "approval.cancel";
+pub const QUESTION_ASK: &str = "question.ask";
+pub const QUESTION_READ: &str = "question.read";
+pub const QUESTION_CANCEL: &str = "question.cancel";
 
 /// The name of the ceiling of `keys.own.use`: the longest lifetime of a key, in seconds.
 pub const MAX_KEY_LIFETIME: &str = "max_key_lifetime";
 /// The name of the budget of `alert.send`.
 pub const ALERTS: &str = "alerts";
+/// The name of the budget of `question.ask`. A question, a `say` and a `supersede` count one unit each. A renewal of a
+/// lease counts nothing.
+pub const QUESTIONS: &str = "questions";
 
 /// The actions of the keys, in the order of the document.
 const KEY_GROUP: [&str; 8] = [
@@ -77,7 +84,7 @@ const KEY_GROUP: [&str; 8] = [
 ];
 
 /// The actions of the inbox, in the order of the document.
-const INBOX_GROUP_ACTIONS: [&str; 9] = [
+const INBOX_GROUP_ACTIONS: [&str; 12] = [
     INBOX_RECEIVE,
     ALERT_SEND,
     ALERT_SEND_USER,
@@ -87,18 +94,29 @@ const INBOX_GROUP_ACTIONS: [&str; 9] = [
     PHONE_LOG,
     APPROVAL_READ,
     APPROVAL_CANCEL,
+    QUESTION_ASK,
+    QUESTION_READ,
+    QUESTION_CANCEL,
 ];
 
 /// The actions of the service `portal` that a key can hold, other than `access`. A key never holds
 /// a `keys.*` action (portal 6.5). The kind of the key limits the list (see [`key_actions`]).
-pub const KEY_ACTIONS: [&str; 3] = [ALERT_SEND, ALERT_READ, ALERT_SEND_USER];
+/// `question.read` is not in the list: a key reads its own questions with no permission, and the
+/// action gives an account the metadata of the questions of all the accounts.
+pub const KEY_ACTIONS: [&str; 5] = [
+    ALERT_SEND,
+    ALERT_READ,
+    ALERT_SEND_USER,
+    QUESTION_ASK,
+    QUESTION_CANCEL,
+];
 
-/// The actions that a key of this kind can hold. An MCP key has none today: the tools map of the
-/// agents gives the first one.
+/// The actions that a key of this kind can hold. An MCP key holds the two actions of the
+/// questions. An API key holds them and the actions of the alerts.
 pub fn key_actions(kind: KeyKind) -> &'static [&'static str] {
     match kind {
         KeyKind::Api => &KEY_ACTIONS,
-        KeyKind::Mcp => &[],
+        KeyKind::Mcp => &[QUESTION_ASK, QUESTION_CANCEL],
     }
 }
 
@@ -198,6 +216,21 @@ fn action_json(name: &str) -> serde_json::Value {
             &[],
         ),
         APPROVAL_CANCEL => (&["service"], "Cancel an open request of any account.", &[]),
+        QUESTION_ASK => (
+            &["service"],
+            "Ask a question to the owner of the key. A question, a message in its thread and a replacement count one unit of the budget.",
+            &[QUESTIONS],
+        ),
+        QUESTION_READ => (
+            &["service"],
+            "See the questions of all the accounts: state, key and times. The content stays hidden.",
+            &[],
+        ),
+        QUESTION_CANCEL => (
+            &["service"],
+            "Withdraw an open question. A key withdraws its own questions. An account with this action and `question.read` cancels the open question of any account.",
+            &[],
+        ),
         other => unreachable!("the action {other} is not an action of the service portal"),
     };
     serde_json::json!({ "name": name, "resource_types": types, "description": description,
@@ -229,6 +262,9 @@ pub fn document(features: &Features) -> Arc<Document> {
         limits.push(serde_json::json!({ "name": ALERTS, "label": "Alerts sent",
             "description": "The alerts that the subject sends in a time window. A critical group has no limit. An alert to an account always counts.",
             "unit": "alert", "kind": "budget" }));
+        limits.push(serde_json::json!({ "name": QUESTIONS, "label": "Questions asked",
+            "description": "The questions, the messages in a thread and the replacements that the subject sends in a time window. A renewal of a lease does not count.",
+            "unit": "question", "kind": "budget" }));
     }
     let text = serde_json::json!({ "server": SERVICE, "resource_types": types,
                                    "actions": actions, "limits": limits });
@@ -577,8 +613,23 @@ mod tests {
         let document = document(&all_features());
         let names: Vec<&str> = document.actions.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, action_names(&all_features()));
-        assert_eq!(names.len(), 17);
+        assert_eq!(names.len(), 20);
         assert!(names.contains(&APPROVAL_READ) && names.contains(&APPROVAL_CANCEL));
+        // The questions: three actions on the service, and the budget `questions` on the first.
+        for name in [QUESTION_ASK, QUESTION_READ, QUESTION_CANCEL] {
+            assert!(names.contains(&name), "{name}");
+            assert_eq!(find(&document, name).resource_types, ["service"], "{name}");
+        }
+        assert_eq!(find(&document, QUESTION_ASK).limits, [QUESTIONS]);
+        assert!(find(&document, QUESTION_READ).limits.is_empty());
+        assert_eq!(
+            document
+                .limits
+                .iter()
+                .find(|l| l.name == QUESTIONS)
+                .map(|l| l.kind),
+            Some(crate::limits::Kind::Budget)
+        );
         // No action reads a content, and no action decides.
         assert!(!names
             .iter()
@@ -809,9 +860,21 @@ mod tests {
 
     #[test]
     fn the_actions_that_a_key_can_hold_follow_its_kind() {
-        assert_eq!(KEY_ACTIONS, [ALERT_SEND, ALERT_READ, ALERT_SEND_USER]);
+        assert_eq!(
+            KEY_ACTIONS,
+            [
+                ALERT_SEND,
+                ALERT_READ,
+                ALERT_SEND_USER,
+                QUESTION_ASK,
+                QUESTION_CANCEL
+            ]
+        );
         assert_eq!(key_actions(KeyKind::Api), KEY_ACTIONS);
-        assert!(key_actions(KeyKind::Mcp).is_empty());
+        // An MCP key holds the two actions of the questions and no action of the alerts. `question.read` is the
+        // right of an account: a key reads its own questions with no permission.
+        assert_eq!(key_actions(KeyKind::Mcp), [QUESTION_ASK, QUESTION_CANCEL]);
+        assert!(!KEY_ACTIONS.contains(&QUESTION_READ));
         let good = grants(&[
             "access on service:db",
             "data.read on service:db/host:x",
@@ -873,14 +936,28 @@ mod tests {
     #[test]
     fn the_document_of_a_key_holds_only_what_the_kind_can_use() {
         let features = all_features();
-        assert!(key_document(&features, KeyKind::Mcp).is_none());
+        // An MCP key holds the two actions of the questions and the budget of the questions.
+        let mcp = key_document(&features, KeyKind::Mcp).unwrap();
+        let names: Vec<&str> = mcp.actions.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, [QUESTION_ASK, QUESTION_CANCEL]);
+        assert_eq!(mcp.limits.len(), 1);
+        assert_eq!(mcp.limits[0].name, QUESTIONS);
         let api = key_document(&features, KeyKind::Api).unwrap();
         let names: Vec<&str> = api.actions.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, [ALERT_SEND, ALERT_SEND_USER, ALERT_READ]);
+        assert_eq!(
+            names,
+            [
+                ALERT_SEND,
+                ALERT_SEND_USER,
+                ALERT_READ,
+                QUESTION_ASK,
+                QUESTION_CANCEL
+            ]
+        );
         assert_eq!(api.types.len(), 1);
         assert_eq!(api.types[0].name, INBOX_GROUP);
         assert!(api.resources.iter().all(|r| r.path[0].kind == INBOX_GROUP));
-        assert_eq!(api.limits.len(), 1);
+        assert_eq!(api.limits.len(), 2);
         assert!(api.limit_inputs(crate::grants::ACCESS)[0].budget);
         assert!(
             key_document(&Features::default(), KeyKind::Api).is_none(),
@@ -1093,8 +1170,9 @@ mod tests {
             .is_err());
         // Each budget of the service is a value of `access`: an action takes no number but a ceiling.
         let inputs = document.limit_inputs("access");
-        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs.len(), 2);
         assert!(inputs[0].budget && inputs[0].name == ALERTS);
+        assert!(inputs[1].budget && inputs[1].name == QUESTIONS);
         assert!(document.limit_inputs(ALERT_SEND).is_empty());
         assert_eq!(
             document.limit_inputs(KEYS_OWN_USE)[0].name,

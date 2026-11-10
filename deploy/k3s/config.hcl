@@ -191,6 +191,11 @@ inbox {
   #   purge_after  = "365d"
   # }
 
+  # Optional: the questions that an agent asks to the owner of its key. A key needs the permission question.ask.
+  # questions {
+  #   max_options = 8   # 2 to 8
+  # }
+
   group "infra" {
     name        = "Infra"
     description = "Outages of the infrastructure"

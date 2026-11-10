@@ -1540,10 +1540,10 @@ fn the_tools_carry_the_token_the_label_and_the_fixed_sentence() {
                 tool["description"].as_str().unwrap().contains(sentence),
                 "[{name}] {tool_name}: the fixed sentence"
             );
-            // Only `approval_intent` has a label.
+            // The tools that name an agent have a label: `approval_intent`, `ask` and `supersede` (a question).
             assert_eq!(
                 properties.get("agent_label").is_some(),
-                tool_name == "approval_intent",
+                matches!(tool_name, "approval_intent" | "ask" | "supersede"),
                 "[{name}] {tool_name}"
             );
             assert_eq!(tool["inputSchema"]["additionalProperties"], false);

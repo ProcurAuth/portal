@@ -739,6 +739,22 @@ pub async fn read<T: ItemTx>(
     done(tx, cx, l, fx).await
 }
 
+/// The item that a key made with this idempotency key, after the clock decided its state. `None` when the key made none.
+/// The agent channel asks it before it takes a unit of a budget: a repeat of a call costs nothing.
+pub async fn by_idempotency<T: ItemTx>(
+    tx: &mut T,
+    cx: &Cx,
+    key_id: &str,
+    idempotency_key: &str,
+) -> Result<Done<Option<Loaded>>, DbError> {
+    let mut fx = Effects::default();
+    let found = match tx.find_by_idempotency(key_id, idempotency_key).await? {
+        Some(id) => fresh(tx, cx, &id, &mut fx).await?,
+        None => None,
+    };
+    done(tx, cx, found, fx).await
+}
+
 pub async fn list<T: ItemTx>(
     tx: &mut T,
     cx: &Cx,

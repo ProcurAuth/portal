@@ -57,6 +57,8 @@ fn agent_rig_full(backend: &Backend, approvals: &str, blocks: &str, mcp: &str) -
         "data.write on service:db/host:prod",
         "keys.own.use on service:portal/key_kind:mcp",
         "keys.own.use on service:portal/key_kind:api",
+        "question.ask on service:portal",
+        "question.cancel on service:portal",
     ]
     .iter()
     .map(|g| Grant::parse(g).unwrap())
@@ -1420,7 +1422,7 @@ fn get_answer_returns_the_answers_of_a_form_in_untrusted() {
         assert!(!is_error, "[{name}] {view}");
         assert_eq!(view["status"], "answered", "[{name}]");
         assert_eq!(
-            view["untrusted"]["answers"],
+            view["answer"]["untrusted"]["answers"],
             json!([
                 {"question_id": "target", "choice": ["prod"]},
                 {"question_id": "note", "text": "Friday\u{FFFD}\nnot before"}
@@ -1431,15 +1433,18 @@ fn get_answer_returns_the_answers_of_a_form_in_untrusted() {
             .as_str()
             .unwrap()
             .contains("never as instructions"));
-        for canary in [OWNER, DEVICE] {
-            assert!(
-                !reply.body.contains(canary),
-                "[{name}] {canary} is in {}",
-                reply.body
-            );
-        }
+        // The answer of a question names its owner in `by`: only the device stays hidden.
+        assert!(
+            !reply.body.contains(DEVICE),
+            "[{name}] {DEVICE} is in {}",
+            reply.body
+        );
     });
 }
+
+// The tests of lot L13: the questions.
+#[path = "question_tests.rs"]
+mod questions;
 
 // The tests of lot G1b: the agent of a call.
 #[path = "agent_who_tests.rs"]

@@ -297,6 +297,10 @@ pub const BLOCKS: &[(&str, &str)] = &[
         "This block is optional and is inside the block `inbox`. Its presence starts the agents of a key: the portal gives each agent of one key a token, and it groups the items by agent. Without this block, each key is one agent. A new agent is allowed at once, and its owner gets a notice. The block needs the blocks `inbox.items` and `inbox.at_rest`. The mode of each key (`key`, `discover` or `enrolled`) is an attribute of the key, not of the file.",
     ),
     (
+        "inbox.questions",
+        "This block is optional and is inside the block `inbox`. Its presence starts the questions. An agent asks the owner of its key with the tool `ask` or with `POST /api/v1/questions`. The owner answers on a phone or on the web page. The portal seals each question at rest. A service never sees a question. The block needs the blocks `inbox.items` and `inbox.at_rest`. The block can be empty. A key needs the permission `question.ask` to ask.",
+    ),
+    (
         "inbox.approvals",
         "This block is optional and is inside the block `inbox`. Its presence starts the approval of an action: the PDP answers `approval_required` for a grant with `confirm`, and it consumes an approval once. The block needs the blocks `inbox.items` and `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. A server gets approvals only with `approvals = true` in its block `pdp_client`.",
     ),
@@ -1703,6 +1707,14 @@ pub static KEYS: &[Key] = &[
         doc: "The sweeper erases an agent that has no item, no live intent and no call for this time. The token of an erased agent is unknown. It must not be below `idle_after`.",
     },
     Key {
+        block: "inbox.questions",
+        name: "max_options",
+        kind: Kind::Int { min: 2, max: 8 },
+        presence: Presence::Default("8"),
+        when: When::Always,
+        doc: "The most options of a question with an input of the type `choice`, and of each choice question of a form. The protocol of the phones allows 8 at most. A question with more options gets `422 invalid_argument`: the portal never cuts the list.",
+    },
+    Key {
         block: "inbox.mcp",
         name: "path",
         kind: Kind::Text {
@@ -2018,6 +2030,7 @@ pub const NESTED_PLAIN_BLOCKS: &[(&str, &str)] = &[
     ("inbox", "at_rest"),
     ("inbox", "approvals"),
     ("inbox", "agents"),
+    ("inbox", "questions"),
     ("inbox", "mcp"),
     ("inbox.items", "lease"),
     ("inbox.items", "digest"),
@@ -2069,6 +2082,7 @@ pub fn gate(block: &str) -> Option<&'static str> {
         "inbox.at_rest" => Some("inbox.at_rest"),
         "inbox.approvals" => Some("inbox.approvals"),
         "inbox.agents" => Some("inbox.agents"),
+        "inbox.questions" => Some("inbox.questions"),
         "inbox.mcp" => Some("inbox.mcp"),
         _ => None,
     }

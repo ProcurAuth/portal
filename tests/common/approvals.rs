@@ -157,6 +157,23 @@ impl Pep {
     /// The same, with the mode of the agents of the key of the rig (`Some("enrolled")`). The field exists only when the file has
     /// the block `inbox.agents`, so `tweak` adds the block.
     pub fn with_mode(tweak: impl FnOnce(&Server), agents: Option<&str>) -> Pep {
+        Pep::with_full(tweak, agents, false)
+    }
+
+    /// A server with the block `inbox.questions`: the owner and its key hold `question.ask` and `question.cancel`
+    /// (lot L13). `tweak` can add more blocks.
+    pub fn with_questions(tweak: impl FnOnce(&Server)) -> Pep {
+        Pep::with_full(
+            |s| {
+                s.add_to_inbox("questions { }");
+                tweak(s)
+            },
+            None,
+            true,
+        )
+    }
+
+    fn with_full(tweak: impl FnOnce(&Server), agents: Option<&str>, questions: bool) -> Pep {
         let mut s = Server::setup();
         // The test phones send no heartbeat: the session must outlive the pauses of the test.
         let text = std::fs::read_to_string(s.config())
@@ -232,12 +249,12 @@ discovery {{
             key_id: String::new(),
             key_text: String::new(),
         };
-        pep.make_owner_and_key(agents);
+        pep.make_owner_and_key(agents, questions);
         pep
     }
 
     /// The owner, with the grants on the service `db`, and its agent key.
-    fn make_owner_and_key(&mut self, agents: Option<&str>) {
+    fn make_owner_and_key(&mut self, agents: Option<&str>, questions: bool) {
         let s = &self.s;
         users_form(
             s,
@@ -253,6 +270,11 @@ discovery {{
             "keys.own.create on service:portal/key_kind:mcp",
             "keys.own.use on service:portal/key_kind:mcp",
         ];
+        let mut grants: Vec<&str> = grants.to_vec();
+        if questions {
+            grants.push("question.ask on service:portal");
+            grants.push("question.cancel on service:portal");
+        }
         let mut fields = format!("login={OWNER}&grants=1");
         for (n, g) in grants.iter().enumerate() {
             fields.push_str(&format!("&grant{n}={}", form_value(g)));
@@ -294,10 +316,19 @@ discovery {{
         let csrf = page[start..].split('"').next().unwrap().to_string();
         let body = format!(
             "csrf={csrf}&kind=mcp&name=agent-laptop&expires_at=&interaction=conversational{}\
-             &grant0={}&grant1={}&confirm1=1",
+             &grant0={}&grant1={}&confirm1=1{}",
             agents.map_or(String::new(), |m| format!("&agents={m}")),
             form_value("access on service:db"),
             form_value(&format!("data.write on service:db/{RESOURCE}")),
+            if questions {
+                format!(
+                    "&grant2={}&grant3={}",
+                    form_value("question.ask on service:portal"),
+                    form_value("question.cancel on service:portal")
+                )
+            } else {
+                String::new()
+            },
         );
         let (st, _, page) = http_full(
             s.port,
@@ -385,6 +416,88 @@ discovery {{
         (
             list[id..].split(['.', '"']).next().unwrap().to_string(),
             text,
+        )
+    }
+
+    /// A key of the kind `mcp` for the questions (lot L13): it holds `question.ask` and `question.cancel`, and its
+    /// `interaction` is `conversational` or `one_shot`. The result is the id of the key and its text.
+    pub fn make_question_key(&self, name: &str, interaction: &str) -> (String, String) {
+        let s = &self.s;
+        let cookie = self.cookie(OWNER);
+        let host = format!("127.0.0.1:{}", s.port);
+        let (st, _, page) = http_full(
+            s.port,
+            &host,
+            "GET",
+            "/auth/keys/new?kind=mcp",
+            &[("Cookie", cookie.clone())],
+            "",
+        );
+        assert_eq!(st, 200, "{page}");
+        let form = page.find("id=\"key-form\"").expect("the form of a new key");
+        let marker = "name=\"csrf\" value=\"";
+        let start = form + page[form..].find(marker).unwrap() + marker.len();
+        let csrf = page[start..].split('"').next().unwrap().to_string();
+        let body = format!(
+            "csrf={csrf}&kind=mcp&name={name}&expires_at=&interaction={interaction}&grant0={}&grant1={}",
+            form_value("question.ask on service:portal"),
+            form_value("question.cancel on service:portal"),
+        );
+        let (st, _, page) = http_full(
+            s.port,
+            &host,
+            "POST",
+            "/auth/keys/create",
+            &[
+                ("Content-Type", "application/x-www-form-urlencoded".into()),
+                ("Origin", format!("http://{host}")),
+                ("Cookie", cookie.clone()),
+            ],
+            &body,
+        );
+        assert_eq!(st, 200, "the key is not made: {page}");
+        let marker = "id=\"key-text\" type=\"text\" readonly value=\"";
+        let at = page.find(marker).expect("the text of the key") + marker.len();
+        let text = page[at..].split('"').next().unwrap().to_string();
+        let (_, _, list) = http_full(
+            s.port,
+            &host,
+            "GET",
+            "/auth/settings",
+            &[("Cookie", cookie)],
+            "",
+        );
+        let at = list.find(name).expect("the key is listed");
+        let head = &list[..at];
+        let id = head.rfind("title=\"Id ").expect("the id of the key") + "title=\"Id ".len();
+        (
+            list[id..].split(['.', '"']).next().unwrap().to_string(),
+            text,
+        )
+    }
+
+    /// A tool of the agent channel with the key text `key`. The result is the flag `isError` and the structured content.
+    pub fn tool_with_key(&self, key: &str, name: &str, args: Value) -> (bool, Value) {
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                          "params": {"name": name, "arguments": args}})
+        .to_string();
+        let host = format!("127.0.0.1:{}", self.s.port);
+        let (status, _, text) = http_full(
+            self.s.port,
+            &host,
+            "POST",
+            "/mcp",
+            &[
+                ("Authorization", format!("Bearer {key}")),
+                ("Content-Type", "application/json".into()),
+            ],
+            &body,
+        );
+        assert_eq!(status, 200, "{text}");
+        let reply: Value = serde_json::from_str(&text).expect("JSON");
+        (
+            reply["result"]["isError"] == true,
+            reply["result"]["structuredContent"].clone(),
         )
     }
 
