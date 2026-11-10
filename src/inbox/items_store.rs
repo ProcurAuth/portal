@@ -1055,7 +1055,17 @@ pub async fn start_checks(store: &Store, content: &ContentBox) -> Result<(), Str
         ));
     }
     let counts = in_tx!(at, [], tx, tx.kid_counts()).map_err(|e| format!("inbox storage: {e}"))?;
-    content.check_orphans(&counts)
+    content.check_orphans(&counts)?;
+    for (kid, count) in content.rows_to_rekey(&counts) {
+        log::warn!(
+            event = "content_key_rows_to_rekey",
+            kid = kid.as_str(),
+            count = count,
+            active = content.active_kid(),
+            hint = "run `portal inbox rekey`, then remove the old block key"
+        );
+    }
+    Ok(())
 }
 
 /// Erases the sealed values of the key `kid` and keeps the metadata (`portal inbox content-purge`). The result is the

@@ -148,6 +148,102 @@ fn wrong_key_same_id_stops_the_start_and_the_log_names_the_keys() {
     s.stop();
 }
 
+/// The whole rotation with the binary: the approval is sealed with the key `k1`, the operator adds `k2` and makes it
+/// active, `portal inbox rekey` moves the rows, and the start works without the block `k1`. With SQLite the command
+/// refuses to run while the instance runs. With PostgreSQL it runs beside the portal.
+#[test]
+fn rekey_command_rotates_the_content_key_with_the_binary() {
+    let mut pep = Pep::new();
+    let c = command(41);
+    let (id, _) = pep.submit(&c, 600);
+    pep.s.stop();
+    let dir = pep.s.dir.clone();
+    let key2 = dir.join("content_key_2").to_string_lossy().to_string();
+    portal_ok(&["inbox", "content-key", "--out", &key2]);
+    let original = std::fs::read_to_string(pep.s.config()).unwrap();
+    // Step 1: add the key `k2` and make it active.
+    let both = original
+        .replace("active_key = \"k1\"", "active_key = \"k2\"")
+        .replace(
+            "    key \"k1\" {",
+            &format!("    key \"k2\" {{ secret_file = \"{key2}\" }}\n    key \"k1\" {{"),
+        );
+    assert_ne!(both, original);
+    std::fs::write(pep.s.config(), &both).unwrap();
+    pep.s.start();
+    // The start works with both keys and tells that rows wait for `rekey`.
+    assert!(
+        pep.s
+            .log()
+            .contains("\"event\":\"content_key_rows_to_rekey\"")
+            && pep.s.log().contains("\"kid\":\"k1\""),
+        "{}",
+        pep.s.log()
+    );
+    let before = pep.s.scalar("SELECT body_kid FROM items LIMIT 1");
+    assert_eq!(before.as_deref(), Some("k1"));
+    // The old key leaves the file too early: the start stops. The message names the key, the count and `rekey`.
+    pep.s.stop();
+    let only_new: String = both
+        .lines()
+        .filter(|l| !l.contains("key \"k1\" {"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    assert_ne!(only_new, both);
+    std::fs::write(pep.s.config(), &only_new).unwrap();
+    pep.s.spawn();
+    assert!(!exit_status(&mut pep.s).success(), "the start must stop");
+    let log = pep.s.log();
+    assert!(
+        log.contains("1 sealed contents name the key \"k1\"")
+            && log.contains("portal inbox rekey --config FILE --from k1"),
+        "{log}"
+    );
+    std::fs::write(pep.s.config(), &both).unwrap();
+    pep.s.start();
+    // Step 2: the command. With SQLite it refuses while the instance runs.
+    if pep.s.pg.is_none() {
+        let refused = portal(&["inbox", "rekey", "--config", &pep.s.config()], None);
+        assert!(!refused.status.success());
+        let error = String::from_utf8_lossy(&refused.stderr).to_string();
+        assert!(
+            error.contains("the portal runs") && error.contains("stop it first"),
+            "{error}"
+        );
+        pep.s.stop();
+        assert_eq!(
+            pep.s
+                .scalar("SELECT body_kid FROM items LIMIT 1")
+                .as_deref(),
+            Some("k1"),
+            "the refused command wrote nothing"
+        );
+    }
+    let done = portal_ok(&["inbox", "rekey", "--config", &pep.s.config()]);
+    let out = String::from_utf8_lossy(&done.stdout).to_string();
+    assert!(
+        out.contains("items: 1 rows moved") && out.contains("check value is dropped"),
+        "{out}"
+    );
+    assert!(!out.contains(&c.effect) && !out.contains("INSERT"), "{out}");
+    assert_eq!(
+        pep.s
+            .scalar("SELECT body_kid FROM items LIMIT 1")
+            .as_deref(),
+        Some("k2")
+    );
+    // The command again has nothing to do.
+    let again = portal_ok(&["inbox", "rekey", "--config", &pep.s.config()]);
+    let out = String::from_utf8_lossy(&again.stdout).to_string();
+    assert!(out.contains("items: 0 rows moved"), "{out}");
+    // Step 3: the old key leaves the file. The portal starts and still serves the approval.
+    pep.s.stop();
+    std::fs::write(pep.s.config(), &only_new).unwrap();
+    pep.s.start();
+    assert_eq!(pep.verdict(&id)["verdict"], "pending");
+    pep.s.stop();
+}
+
 // ---------------------------------------------------------------------------------------------
 // The phone side of protocol 5: the frames of the items, the answers, the sync. The service asks for an approval through
 // the approval API of the PDP listener (the PEP); a Rust phone speaks Noise to the session of the portal.

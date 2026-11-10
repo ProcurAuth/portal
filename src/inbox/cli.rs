@@ -7,6 +7,7 @@
 //!   `inbox.at_rest.key` of the file.
 //! - `content-purge --config FILE --key ID`: erases the sealed contents of a key that the file lost, and keeps the
 //!   metadata of the items.
+//! - `rekey --config FILE [--from ID]`: seals again the contents of the old keys with the active key.
 //! - `import-sqlite --config FILE --from FILE`: copies the data of a SQLite file of the inbox into
 //!   the empty PostgreSQL database of the portal.
 //! - `healthcheck --config FILE`: asks `/readyz` of the listener of the portal.
@@ -45,6 +46,13 @@ impl Flags {
         Ok(f)
     }
 
+    fn optional(&self, name: &str) -> Option<String> {
+        self.values
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+    }
+
     fn required(&self, name: &str) -> Result<String, String> {
         self.values
             .iter()
@@ -60,6 +68,7 @@ pub const USAGE: &str = "\
   portal inbox token --out FILE
   portal inbox content-key --out FILE
   portal inbox content-purge --config FILE --key ID
+  portal inbox rekey --config FILE [--from ID]
   portal inbox import-sqlite --config FILE --from SQLITE_FILE
   portal inbox healthcheck --config FILE";
 
@@ -106,6 +115,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
             content_purge(
                 &PathBuf::from(f.required("--config")?),
                 &f.required("--key")?,
+            )
+        }
+        "rekey" => {
+            let f = Flags::parse(rest, &["--config", "--from"])?;
+            rekey(
+                &PathBuf::from(f.required("--config")?),
+                f.optional("--from"),
             )
         }
         "import-sqlite" => {
@@ -174,6 +190,70 @@ fn content_purge(config_path: &std::path::Path, kid: &str) -> Result<(), String>
         "erased the sealed contents of the key {kid:?}: {items} items, {turns} turns, {intents} intents, {agents} agent hints (the metadata stays)"
     );
     Ok(())
+}
+
+/// Seals again the contents of the old keys with the active key. With SQLite the command refuses to run while an
+/// instance runs. With PostgreSQL it runs beside the portal.
+fn rekey(config_path: &std::path::Path, from: Option<String>) -> Result<(), String> {
+    let (config, mut secrets) = Config::load(config_path)?;
+    let inbox = config
+        .inbox
+        .as_ref()
+        .filter(|i| i.at_rest.is_some())
+        .ok_or("--config must contain the block inbox.at_rest")?;
+    let content = super::state::Secrets::load(
+        secrets
+            .inbox
+            .as_ref()
+            .ok_or("internal error: the inbox block has no secrets")?,
+        inbox,
+    )?
+    .content
+    .ok_or("--config must contain the block inbox.at_rest")?;
+    let options = super::rekey::Options {
+        from: from.clone(),
+        ..Default::default()
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("cannot start runtime: {e}"))?;
+    let report = match &config.storage.backend {
+        StorageBackend::Sqlite(path) => {
+            let target = super::rekey::open_sqlite(path)?;
+            runtime.block_on(super::rekey::run(&target, &content, &options))?
+        }
+        StorageBackend::Postgres(pg) => {
+            let password = secrets
+                .postgres_password
+                .take()
+                .ok_or("internal error: the postgres block has no password")?;
+            let password = std::str::from_utf8(password.as_bytes())
+                .map(|p| Zeroizing::new(p.to_string()))
+                .map_err(|_| "postgres.password is not valid UTF-8".to_string())?;
+            let settings = PgSettings {
+                host: pg.host.clone(),
+                port: pg.port,
+                database: pg.database.clone(),
+                user: pg.user.clone(),
+                password,
+                pool_size: 1,
+                connect_timeout: pg.connect_timeout,
+            };
+            runtime.block_on(async {
+                let store = super::store::Store::Pg(std::sync::Arc::new(
+                    PgStore::connect(&settings).await?,
+                ));
+                super::rekey::run(&super::rekey::Target::Store(&store), &content, &options).await
+            })?
+        }
+    };
+    print!("{}", report.text(content.active_kid()));
+    if report.complete(content.active_kid(), from.as_deref()) {
+        Ok(())
+    } else {
+        Err("the rotation is not complete: see the report above".into())
+    }
 }
 
 fn import_sqlite(config_path: &std::path::Path, from: &std::path::Path) -> Result<(), String> {

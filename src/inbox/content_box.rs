@@ -273,7 +273,8 @@ impl ContentBox {
 
     /// Checks the rows of the database against the keys of the file. `rows` holds each key id that sealed
     /// contents, with the number of rows. A key id that the file does not hold stops the start: the
-    /// message names the id and the count, and the way out.
+    /// message names the id and the count, and the way out. The way out is the old secret and `rekey`, or
+    /// `content-purge` when the key is lost.
     pub fn check_orphans(&self, rows: &[(String, u64)]) -> Result<(), String> {
         let mut lost: Vec<&(String, u64)> = rows
             .iter()
@@ -283,13 +284,25 @@ impl ContentBox {
         match lost.first() {
             None => Ok(()),
             Some((kid, count)) => Err(format!(
-                "inbox.at_rest: {count} sealed contents name the key {kid:?}, and the file has no block key {kid:?} (the file has {}); add the block key {kid:?} with its old secret, or run `portal inbox content-purge --config FILE --key {kid}` to erase these contents and keep their metadata",
+                "inbox.at_rest: {count} sealed contents name the key {kid:?}, and the file has no block key {kid:?} (the file has {}); if you still have the secret, add the block key {kid:?} again, start, run `portal inbox rekey --config FILE --from {kid}` until it reports 0 rows left, and only then remove the block; if the key is lost, run `portal inbox content-purge --config FILE --key {kid}` to erase these contents and keep their metadata",
                 self.kids()
                     .map(|k| format!("{k:?}"))
                     .collect::<Vec<_>>()
                     .join(", ")
             )),
         }
+    }
+
+    /// The keys that the file holds, that are not active, and that still seal rows. The start logs them: `rekey` moves
+    /// these rows, and the operator removes the key after that.
+    pub fn rows_to_rekey(&self, rows: &[(String, u64)]) -> Vec<(String, u64)> {
+        let mut out: Vec<(String, u64)> = rows
+            .iter()
+            .filter(|(kid, count)| *count > 0 && self.has_kid(kid) && kid != self.active_kid())
+            .cloned()
+            .collect();
+        out.sort();
+        out
     }
 }
 

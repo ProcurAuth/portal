@@ -11,11 +11,14 @@ use rusqlite::{params, params_from_iter, OptionalExtension, Transaction, Transac
 
 use super::db::DbError;
 use super::items::{Loaded, NewEvent, Notice, OwnerAlert, Rules};
-use super::items_ops::{IntentRow, ItemDelivery, ItemTx, ListFilter, Scope, Sealed, TurnRow};
+use super::items_ops::{
+    IntentRow, ItemDelivery, ItemTx, ListFilter, RekeyCursor, RekeyRow, RekeyTable, Scope, Sealed,
+    TurnRow,
+};
 use super::items_sql::PrefsRow;
 use super::items_sql::{
-    approval_write_values, decode, insert_sql, item_values, select_sql, update_sql, Cols,
-    APPROVAL_WRITE_COLUMNS, ITEM_COLUMNS, V,
+    approval_write_values, decode, insert_sql, item_values, rekey_page_sql, rekey_swap_sql,
+    select_sql, update_sql, Cols, APPROVAL_WRITE_COLUMNS, ITEM_COLUMNS, V,
 };
 use inbox_core::proto::Prefs;
 
@@ -777,6 +780,74 @@ impl ItemTx for SqliteTx<'_, '_> {
             params![kid],
         )?;
         Ok((items as u64, turns as u64, intents as u64, agents as u64))
+    }
+
+    async fn rekey_page(
+        &mut self,
+        table: RekeyTable,
+        active: &str,
+        from: &str,
+        after: &RekeyCursor,
+        limit: u32,
+    ) -> Result<Vec<RekeyRow>, DbError> {
+        let sql = rekey_page_sql(table, &ph);
+        let mut values: Vec<Value> = vec![
+            Value::Text(active.to_string()),
+            Value::Text(from.to_string()),
+            Value::Text(after.id.clone()),
+        ];
+        if table == RekeyTable::Turns {
+            values.push(Value::Integer(after.seq));
+        }
+        values.push(Value::Integer(i64::from(limit)));
+        let mut stmt = self.0.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values.iter()), |r| {
+            Ok(RekeyRow {
+                id: r.get(0)?,
+                seq: r.get(1)?,
+                effect: r.get(2)?,
+                sealed: Sealed {
+                    kid: r.get(3)?,
+                    ct: r.get(4)?,
+                },
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    async fn rekey_swap(
+        &mut self,
+        table: RekeyTable,
+        row: &RekeyRow,
+        new: &Sealed,
+    ) -> Result<bool, DbError> {
+        let sql = rekey_swap_sql(table, &ph);
+        let mut values: Vec<Value> = vec![
+            Value::Text(new.kid.clone()),
+            Value::Blob(new.ct.clone()),
+            Value::Text(row.id.clone()),
+        ];
+        if table == RekeyTable::Turns {
+            values.push(Value::Integer(row.seq));
+        }
+        values.push(Value::Blob(row.sealed.ct.clone()));
+        let n = self
+            .0
+            .prepare_cached(&sql)?
+            .execute(params_from_iter(values.iter()))?;
+        Ok(n == 1)
+    }
+
+    async fn drop_key_check(&mut self, kid: &str) -> Result<bool, DbError> {
+        let used = self.kid_counts().await?;
+        if used.iter().any(|(k, n)| k == kid && *n > 0) {
+            return Ok(false);
+        }
+        let n = self.0.execute(
+            "DELETE FROM content_key_check WHERE body_kid = ?1",
+            params![kid],
+        )?;
+        Ok(n > 0)
     }
 }
 
