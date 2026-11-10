@@ -172,7 +172,7 @@ inbox {
   #   consume_within = "5m"   # the time after the decision in which the approval can be used
   # }
 
-  # Optional: the MCP endpoint of the agents (`/mcp`), with the tools approval_intent, get_answer, keepalive, say,
+  # Optional: the MCP endpoint of the agents (`/mcp`), with the tools approval_intent, ask, get_answer, keepalive, say,
   # supersede and cancel. It needs the block items and keys.mcp = true, which this example does not have. Defaults:
   # path = "/mcp", max_wait = "25s" (at most items.wait_max), rate_limit_per_minute = 120,
   # max_unauthenticated_per_minute = 10, max_body_bytes = "64KiB". `allowed_origins` and `allowed_client_cidrs` are
@@ -185,6 +185,11 @@ inbox {
   # lock_new = false (true: the owner must allow a new agent before it can get an approval), idle_after = "14d",
   # purge_after = "365d". A call over a limit goes to the bucket "Unattributed" and the owner gets an alert.
   # agents {
+  # }
+
+  # Optional: the questions that an agent asks to the owner of its key (the tool `ask` and POST /api/v1/questions).
+  # It needs the blocks items and at_rest. A key needs the permission question.ask. Default: max_options = 8 (2 to 8).
+  # questions {
   # }
 
   group "infra" {

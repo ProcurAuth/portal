@@ -384,6 +384,36 @@ Each decision below is final. It has a requirement that a test can check.
 
 3.10.6 **[5.1.0]** **Decision: plain text, and safe Markdown for the explanation.** The command, the comments of the owner and the turns of the owner are plain text. The explanation of an agent is plain text unless the agent sets `explanation_format` to `markdown` (3.6.26). No screen MUST render HTML, an image, an active link or a script from any text.
 
+### 3.11 Questions
+
+3.11.1 **[5.2.0]** With the block `inbox.questions`, an agent MUST be able to ask a question with the tool `ask` and with `POST /api/v1/questions`. The key MUST hold `question.ask`. The owner of the key MUST be the only recipient, and a question MUST NOT have a field `to`. Without the block, the tool and the route MUST NOT exist.
+
+3.11.2 **[5.2.0]** The flags `allow_custom` and `allow_ask_back` MUST be `false` by default. The portal MUST refuse with `422 invalid_flags` a `text` input with `allow_custom` and a `none` input with a flag. It MUST refuse a `form` with `allow_custom` and no `choice` question. The other types MUST take every pair of flags. The portal MUST NOT correct a flag. With `multiple` and `allow_custom`, a free text MUST exclude the ticks, and `min` and `max` MUST apply to the ticks only.
+
+3.11.3 **[5.2.0]** A key that is `one_shot` MUST ask a `choice` or a `confirm` with no flag. A flag, or another type of input, MUST give `422 interaction_not_allowed`. The key MUST NOT see `say`, and a `reply` of the owner MUST be refused for its items. The key MUST see `ask` and `supersede`.
+
+3.11.4 **[5.2.0]** The portal MUST refuse a value that is out of its limit and MUST NOT cut it. The title has 128 characters on one line. The explanation has 2000 characters, and the command has 16 KiB. A choice has 2 to `inbox.questions.max_options` options. The portal MUST refuse a control character other than the line end and the tab, and a bidirectional control, in `command` with `422 invalid_command_chars`. It MUST accept a zero-width character and keep it in the frame.
+
+3.11.5 **[5.2.0]** The answer MUST be the member `answer` with `by`, `action`, `choice`, `asked_at`, `answered_at` and `age_at_answer_s`. A free text, and the answers of a form, MUST be in `answer.untrusted`. A text answer MUST have `choice` equal to `[]`. The result MUST start with `data_notice`.
+
+3.11.6 **[5.2.0]** The portal MUST find a repeat of `ask` by the `idempotency_key` of the key. A repeat MUST give the same item and MUST renew the lease. The same key with another question MUST give `409 idempotency_conflict`. The portal MUST compare the unsealed bodies.
+
+3.11.7 **[5.2.0]** A key with `allow_ask_back` MUST be able to talk with `say`. A turn MUST have 4000 characters at most. A stale `expect_seq` MUST give `409 stale_thread`. Two turns of an agent MUST be 2 seconds apart, and a thread MUST have `max_turns` turns at most.
+
+3.11.8 **[5.2.0]** The portal MUST add the actions `question.ask`, `question.read` and `question.cancel`, and the budget `questions`. A key MUST hold `question.ask` to ask. A key MUST hold `question.cancel` to withdraw a question. An `ask`, a `say` on a question and a `supersede` MUST take one unit of the budget. A repeat of a call, a renewal of a lease and a read MUST take none.
+
+3.11.9 **[5.2.0]** The portal MUST refuse a question with `422 agent_token_in_text` when a text holds a live token of an agent of the owner. The texts are the title, the explanation, the command, the labels and descriptions of the options, the placeholder, the text of a form and `agent_label`. The refusal MUST come before any write.
+
+3.11.10 **[5.2.0]** A question MUST belong to an agent, as 3.8.10 to 3.8.17 say. A write on the question of a real agent MUST need its token. A read MUST go by the key.
+
+3.11.11 **[5.2.0]** The server MUST check the answer of the owner against the question, for a phone and for the web page. It MUST refuse a text when `allow_custom` is false. It MUST refuse an option that does not exist, a wrong number of ticks and an answer that does not fit a form. A refusal MUST write nothing. For a phone, the refusal MUST be an `answer_result` with the status `custom_not_allowed`, or with the status `closed` and no state.
+
+3.11.12 **[5.2.0]** A question MUST NOT pass through a service. No approval, no intent and no evaluation MUST exist for it. No log line, metric or error of a question MUST hold a text of the question, and no table MUST hold it in clear text.
+
+3.11.13 **[5.2.0]** The list of the tools MUST show `ask` only when the block is on and the key holds `question.ask`. A key that does not see a tool MUST get the error of a tool that does not exist.
+
+3.11.14 **[5.2.0]** The block `inbox.questions` MUST need `inbox.items` and `inbox.at_rest`. It MUST have the key `max_options`, from 2 to 8, with the default 8. The configuration MUST be closed and MUST NOT change a value.
+
 ## 4. Delivery guarantee
 
 The transport is at least once. The phone ignores a repeat. The result is that the user sees each alert exactly once.
@@ -737,6 +767,20 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.10.4 | 5.1.0 | L7, G1b, G5 | L7: `approval_api_tests::pep_observation_unit`. G1b: `agent_channel::who::service_never_sees_agent_token_agent_label_or_hints`. G5: `tools/dev/pep-e2e.sh` with the real reference PEP: `pep_e2e::pep_end_to_end` (steps S6 and SA) and the scan of the logs of the containers `service`, `tap` and `sock`. L12: to fill |
 | 3.10.5 | 5.1.0 | L4 | to fill |
 | 3.10.6 | 5.1.0 | L10 | `items_web_e2e::xss_bidi_control_zero_width_rendered_visible`, `ui::markdown_html::tests` |
+| 3.11.1 | 5.2.0 | L13 | `agent_channel::questions::ask_makes_a_pending_question_and_the_answer_reaches_the_agent_in_the_documented_form`, `the_tool_ask_needs_the_block_and_the_permission_and_tools_list_follows`, `the_rest_routes_of_the_questions_make_read_renew_replace_and_withdraw`; `questions_e2e::the_phone_gets_a_question_and_answers_a_choice_a_custom_text_a_decline_and_asks_back` |
+| 3.11.2 | 5.2.0 | L13 | `questions::tests::flags_matrix_all_valid_combinations_per_type`, `invalid_flag_combinations_422`; `agent_channel::questions::invalid_questions_are_refused_with_their_codes_and_create_nothing`, `multiple_with_custom_is_exclusive` |
+| 3.11.3 | 5.2.0 | L13 | `questions::tests::one_shot_with_any_flag_interaction_not_allowed`; `agent_channel::questions::one_shot_key_asks_a_closed_choice_and_gets_interaction_not_allowed_for_a_flag`, `reply_refused_for_one_shot`, `jev_style_rest_loop_get_wait_keeps_lease_600s`; `questions_e2e::a_one_shot_question_is_closed_on_the_phone_and_a_reply_is_refused` |
+| 3.11.4 | 5.2.0 | L13 | `questions::tests::command_with_bidi_or_control_refused`, `command_zero_width_accepted_and_flagged_in_frame`, `the_limits_refuse_and_never_cut`, `the_defaults_of_the_bounds_and_the_body_form` |
+| 3.11.5 | 5.2.0 | L13 | `agent_channel::questions::text_answer_arrives_as_choice_empty_plus_untrusted_text`, `a_form_answer_is_checked_and_reaches_the_agent_inside_the_answer`, `ask_makes_a_pending_question_and_the_answer_reaches_the_agent_in_the_documented_form` |
+| 3.11.6 | 5.2.0 | L13 | `agent_channel::questions::idempotency_conflict_detected`, `a_repeat_of_an_answered_question_gives_the_answer`, `ask_blocks_at_most_wait_s_then_returns_handle` |
+| 3.11.7 | 5.2.0 | L13 | `agent_channel::questions::ask_with_allow_ask_back_runs_the_thread_replied_say_pending`; `questions_e2e::the_phone_gets_a_question_and_answers_a_choice_a_custom_text_a_decline_and_asks_back` |
+| 3.11.8 | 5.2.0 | L13 | `agent_channel::questions::question_budget_counts_ask_say_supersede_not_renewals`, `a_cancel_needs_the_permission_and_a_withdrawn_question_is_cancelled`; `portal_actions::tests::the_document_has_the_keys_and_the_inbox_in_one_scope`, `the_actions_that_a_key_can_hold_follow_its_kind` |
+| 3.11.9 | 5.2.0 | L13 | `agent_channel::questions::token_in_text_refused_for_every_question_field` |
+| 3.11.10 | 5.2.0 | L13 | `agent_channel::questions::two_agents_of_one_key_ask_and_write_only_on_their_own_questions` |
+| 3.11.11 | 5.2.0 | L13 | `questions::tests::the_check_of_an_answer_follows_the_input_and_the_flags`, `a_form_answer_goes_through_the_form_validator`; `agent_channel::questions::a_text_without_allow_custom_and_a_wrong_answer_are_refused_and_write_nothing`; `questions_e2e::answers_that_do_not_fit_the_question_get_a_result_and_change_nothing` |
+| 3.11.12 | 5.2.0 | L13 | `agent_channel::questions::question_never_passes_through_a_service`; `questions_e2e::canary_for_question_bodies` |
+| 3.11.13 | 5.2.0 | L13 | `agent_channel::questions::the_tool_ask_needs_the_block_and_the_permission_and_tools_list_follows`, `one_shot_key_asks_a_closed_choice_and_gets_interaction_not_allowed_for_a_flag` |
+| 3.11.14 | 5.2.0 | L13 | `config::tests::questions_block_closed_schema_and_defaults`, `questions_block_needs_items_and_at_rest`, `the_configuration_reference_in_the_readme_is_the_generated_one` |
 | 4.9.2a | 5.1.0 | L5 | `degraded_storage_returns_storage_degraded_and_writes_nothing` |
 | 4.11.1 | 5.1.0 | L5 | `an_item_reaches_each_phone_of_its_owner_that_is_not_revoked` |
 | 4.11.2 | 5.1.0 | L8 | `phone_enrolled_after_creation_receives_open_items`, `offline_phone_receives_request_and_settled_on_reconnect`, `answer_after_abandon_gets_abandoned_and_settled` |

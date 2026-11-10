@@ -1133,6 +1133,9 @@ The Inbox is a feature of the portal, and the portal has one internal scope for 
 | `phone.log` | the service | See the connection log. |
 | `approval.read` | the service | See the requests of all the accounts: the state, the key, the service and the times. It never gives a content. |
 | `approval.cancel` | the service | Cancel an open request of any account. It needs `approval.read`. |
+| `question.ask` | the service | Ask a question to the owner of the key. It has the budget `questions`. |
+| `question.read` | the service | See the questions of all the accounts: the state, the key and the times. It never gives a content. |
+| `question.cancel` | the service | Withdraw an open question. A key withdraws its own questions. |
 
 The text of a grant is, for example, `alert.send on service:portal/inbox_group:infra`. The superadmin has all of them. A permission on the whole service is not possible for the actions of a group: give one permission for each group.
 
@@ -1151,9 +1154,13 @@ The two kinds of key are in "Keys and limits". The kind `api_` sends alerts. A s
 
 An `mcp_` key, a key with a bad form and an unknown prefix get `401` with no detail. The routes are `POST /api/v1/alerts`, `POST /api/v1/notify/{group}` and `POST /api/v1/webhooks/alertmanager/{group}`. The book icon of the tab Inbox opens a popover with the routes, the groups and the form of the header. `docs/inbox/README.md` has the long text: the recipes for Grafana and Alertmanager and the table of the HTTP statuses.
 
-**Agents.** An agent talks to the portal for everything except the command of an action. The block `inbox.mcp` starts the MCP endpoint at `inbox.mcp.path`, `/mcp` by default. It needs `inbox.items` and `keys.mcp = true`. The agent sends an `mcp_` key and calls the tools `approval_intent`, `get_answer`, `keepalive`, `say`, `supersede` and `cancel`. The explanation, the flags, the comment of the person and the thread go through the portal.
+**Agents.** An agent talks to the portal for everything except the command of an action. The block `inbox.mcp` starts the MCP endpoint at `inbox.mcp.path`, `/mcp` by default. It needs `inbox.items` and `keys.mcp = true`. The agent sends an `mcp_` key and calls the tools `approval_intent`, `ask`, `get_answer`, `keepalive`, `say`, `supersede` and `cancel`. The explanation, the flags, the comment of the person and the thread go through the portal.
 
 The service never sees these texts: it learns the verdict only.
+
+**Questions.** The block `inbox.questions` lets an agent ask a question to the owner of its key. The tool `ask` and the route `POST /api/v1/questions` make it. The key needs the permission `question.ask`. The owner is the only recipient, and no service is on the path. The portal seals the question at rest. The `input` is a `choice`, a `confirm`, a `text`, a `none` or a `form`.
+
+The flags `allow_custom` and `allow_ask_back` are `false` by default. A key that is `one_shot` asks a closed `choice` or `confirm` and sets no flag. The answer reaches the agent in the member `answer`, and the text of the owner is in `answer.untrusted`. The budget `questions` counts each `ask`, `say` and `supersede`, and never a renewal. See `docs/inbox/agents.md`, "Questions".
 
 The endpoint speaks JSON-RPC over Streamable HTTP with JSON answers, no session and no SSE. It supports the protocol versions `2026-07-28`, `2025-11-25` and `2025-06-18`. It checks a request in this order: the method, the `Origin`, the client address and the key. Then it checks the rate of the key and the size of the body. The message comes last. A request with no valid key gets `401` with an empty body.
 
@@ -2277,6 +2284,14 @@ Version 5.1.0 adds the agents of a key. Read these points before you upgrade fro
 - The metrics `portal_agents_created_total`, `portal_agent_refused_total` and `portal_agent_actions_total` are new.
 - The Android app of 5.1.0 and the server of 5.1.0 go together. The app keeps its portals when it updates from an earlier build, and it drops its local items: they come back from the server at the next connection. A phone of an earlier build cannot read the new frames of the agents. Update the app and the server in one step.
 
+
+Version 5.2.0 adds the questions. Read these points before you upgrade from 5.1.0:
+
+- The block `inbox.questions` is new and optional. It needs the blocks `inbox.items` and `inbox.at_rest`. Without it, nothing changes: the tool `ask` and the route `POST /api/v1/questions` do not exist.
+- The actions `question.ask`, `question.read` and `question.cancel` and the budget `questions` are new. A key asks only when it holds `question.ask`, and its owner must hold it too. Give the permission to the keys that must ask.
+- The database has no change. The schema and the tables are the same as in 5.1.0, and there is no migration.
+- The answer of a question has a new form for the agent: the member `answer`. A form answer moved from `untrusted.answers` to `answer.untrusted.answers`.
+- The Android app of 5.2.0 and the server of 5.2.0 go together.
 
 Version 5.0.5 changes how the launcher opens a service, and it adds external services. It adds one table to the database. It has no change of the protocol. Read these points before you upgrade from 5.0.4:
 

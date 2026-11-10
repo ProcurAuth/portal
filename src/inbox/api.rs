@@ -1143,12 +1143,34 @@ async fn item_action_inner(
         }
         "supersede" => {
             // The body of an approval has the token at most. The body of a question is the new question.
-            let (token, ask) = supersede_body(&body)?;
             let cap = app
                 .config
                 .items
                 .as_ref()
                 .map_or(std::time::Duration::ZERO, |i| i.wait_max);
+            let (token, ask) = match supersede_body(&body) {
+                Ok(parts) => parts,
+                Err(bad_body) => {
+                    // An item that the key does not have gives `not_found`, whatever the body says. The call with no
+                    // question changes nothing: it only finds the item.
+                    let probe = super::mcp_tools::supersede(
+                        app,
+                        &who,
+                        None,
+                        id,
+                        None,
+                        inbox_core::proto::Via::Api,
+                        cap,
+                    )
+                    .await;
+                    return match probe {
+                        Err(e) if e.code == "not_found" || e.code.starts_with("agent_") => {
+                            Err(agent_error(e))
+                        }
+                        _ => Err(bad_body),
+                    };
+                }
+            };
             agent_reply(
                 StatusCode::OK,
                 super::mcp_tools::supersede(

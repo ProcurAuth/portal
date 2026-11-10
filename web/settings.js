@@ -411,6 +411,13 @@
     var readIds = groupIds(feature, held, "alert.read");
     if (readIds.length) lines.push("GET /api/v1/alerts/{id}  (alerts of: " + readIds.join(", ") + ")");
     if (toUser) lines.push("POST /api/v1/alerts  (user: an account)");
+    if (
+      held.some(function (item) {
+        return item.action === "question.ask";
+      })
+    ) {
+      lines.push("POST /api/v1/questions  (the owner of the key)");
+    }
     calls.textContent = "";
     if (!lines.length) {
       calls.textContent = "No call yet. Tick a permission.";
@@ -1680,6 +1687,7 @@
     var DIRECT_ROWS = ["alert.send_user"];
     var PHONE_ROWS = ["phone.read", "phone.revoke", "phone.log"];
     var APPROVAL_ROWS = ["approval.read", "approval.cancel"];
+    var QUESTION_ROWS = ["question.ask", "question.read", "question.cancel"];
     var INBOX_COLUMNS = [
       ["inbox.receive", "Receive", "Receive the alerts of the group on the phones", ""],
       ["alert.send", "Send", "Send alerts to the group", "send"],
@@ -1955,8 +1963,9 @@
               if (typeof held.limits.alerts !== "object") held.limits.alerts = {};
               held.limits.alerts[w[0]] = input.value.trim();
               // The grant `access` of the portal has no use but the budget: no value, no grant.
-              var any = WINDOWS.some(function (x) {
-                return held.limits.alerts[x[0]];
+              var any = Object.keys(held.limits).some(function (name) {
+                var value = held.limits[name];
+                return value && typeof value === "object" && WINDOWS.some(function (x) { return value[x[0]]; });
               });
               if (!any && !held.locked) ticked.delete(k);
               syncFields();
@@ -1970,6 +1979,48 @@
         }
       }
 
+      // The budget of the questions: one value for the account, on `access`, as the budget of the alerts.
+      function questionBudget() {
+        if (!actions.access || !actions.access.limits.length || !actions["question.ask"]) return;
+        if (!holds("question.ask")) return;
+        var item = ticked.get(keyOf(svc.id, "access", ""));
+        var budget = item && item.limits.questions && typeof item.limits.questions === "object" ? item.limits.questions : {};
+        var row = node("div", "limitRow");
+        row.appendChild(node("span", "label", "Questions asked"));
+        WINDOWS.forEach(function (w) {
+          var unit = node("span", "u");
+          var input = node("input", "num-input num-input--s");
+          input.type = "text";
+          input.inputMode = "numeric";
+          input.value = budget[w[0]] || "";
+          input.disabled = !!(item && item.locked);
+          input.placeholder = "no limit";
+          input.setAttribute("aria-label", "Questions asked for each " + w[0]);
+          input.addEventListener("input", function () {
+            var k = keyOf(svc.id, "access", "");
+            var held = ticked.get(k);
+            if (!held) {
+              held = { action: "access", service: svc.id, path: "", limits: {} };
+              ticked.set(k, held);
+            }
+            if (typeof held.limits.questions !== "object") held.limits.questions = {};
+            held.limits.questions[w[0]] = input.value.trim();
+            // The grant `access` of the portal has no use but the budgets: no value, no grant.
+            var any = Object.keys(held.limits).some(function (name) {
+              var value = held.limits[name];
+              return value && typeof value === "object" && WINDOWS.some(function (x) { return value[x[0]]; });
+            });
+            if (!any && !held.locked) ticked.delete(k);
+            syncFields();
+          });
+          unit.appendChild(input);
+          unit.appendChild(node("span", "unit", w[1]));
+          row.appendChild(unit);
+        });
+        ui.appendChild(row);
+        ui.appendChild(node("p", "uiField__hint limitHint", "An empty field means no limit. A question, a message and a replacement count one."));
+      }
+
       function draw() {
         var focus = ui.contains(document.activeElement) ? document.activeElement : null;
         var again = focus && focus.dataset ? [focus.dataset.cellAction, focus.dataset.cellPath, focus.dataset.columnAction] : null;
@@ -1981,6 +2032,8 @@
         flatSection("user", "Direct alerts", DIRECT_ROWS);
         flatSection("device-mobile", "Phones", PHONE_ROWS);
         flatSection("shield-check", "Requests", APPROVAL_ROWS);
+        flatSection("inbox", "Questions", QUESTION_ROWS);
+        questionBudget();
         if (again) {
           var boxes = ui.querySelectorAll("input[type=checkbox]");
           for (var b = 0; b < boxes.length; b += 1) {

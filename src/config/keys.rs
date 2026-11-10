@@ -298,7 +298,7 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ),
     (
         "inbox.questions",
-        "This block is optional and is inside the block `inbox`. Its presence starts the questions: an agent asks a question to the owner of its key with the tool `ask` of the MCP endpoint or with `POST /api/v1/questions`, and the owner answers on a phone or on the web page. The portal seals each question at rest. A service never sees a question. The block needs the blocks `inbox.items` and `inbox.at_rest`. The block can be empty. A key needs the permission `question.ask` to ask.",
+        "This block is optional and is inside the block `inbox`. Its presence starts the questions. An agent asks the owner of its key with the tool `ask` or with `POST /api/v1/questions`. The owner answers on a phone or on the web page. The portal seals each question at rest. A service never sees a question. The block needs the blocks `inbox.items` and `inbox.at_rest`. The block can be empty. A key needs the permission `question.ask` to ask.",
     ),
     (
         "inbox.approvals",

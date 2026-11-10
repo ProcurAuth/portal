@@ -39,6 +39,7 @@ Two keys that contradict each other stop the program at start. The message names
 - `inbox.items` needs `inbox.at_rest`, and `inbox.at_rest` needs `inbox.items`. See "Items" and "Content keys".
 - `inbox.approvals` needs `inbox.items`, `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. A block `pdp_client` with `approvals = true` needs the block `inbox.approvals`. See "Approvals".
 - `inbox.agents` needs `inbox.items` and `inbox.at_rest`. Its `idle_after` is at most its `purge_after`. See "Agents".
+- `inbox.questions` needs `inbox.items` and `inbox.at_rest`. See "Questions".
 - `inbox.mcp` needs `inbox.items` and `keys.mcp = true`. Its `max_wait` is at most `inbox.items.wait_max`. Its `path` is not `metrics.path`. See "The MCP endpoint".
 
 ## Keys of the senders
@@ -132,6 +133,16 @@ The limits are per key, never per agent. An agent that drops its token cannot es
 The mode of a key is an attribute of the key and not of the file. The three modes are `key`, `discover` and `enrolled`. The mode `key` is one agent for the key and has no token. The mode `discover` makes an agent at the first call that makes an item and has no token. The mode `enrolled` makes no agent from a call: the owner makes it. Without the block, each mode acts as `key`.
 
 The portal seals the hints of an agent (what it says about itself, its client and its address range) with the content keys of `inbox.at_rest`. The command `portal inbox content-purge` erases these hints too. The metrics are `portal_agents_created_total`, `portal_agent_refused_total` and `portal_agent_actions_total`.
+
+## Questions
+
+The block `inbox.questions` lets an agent ask a question to the owner of its key. The block can be empty. Without the block, the tool `ask` and the route `POST /api/v1/questions` do not exist. The owner is the only recipient. The portal seals each question at rest, and a service never sees it.
+
+- `max_options` is the most options of a `choice` question, and of each choice question of a form. The range is `2` to `8`. The default is `8`. The protocol of the phones allows 8 at most. A question with more options gets `422 invalid_argument`. The portal never cuts a list.
+
+A key asks only when it holds the permission `question.ask` on the service `portal`. The permission has the budget `questions`. A question, a message of the agent in its thread (`say`) and a replacement (`supersede`) count one unit each. A repeat of a call with the same `idempotency_key`, a renewal of a lease and a read count nothing. The permission `question.cancel` lets a key withdraw its own question. The permission `question.read` is for an account: it shows the metadata of the questions of all the accounts, and never a content.
+
+The attribute `interaction` of a key is `conversational` or `one_shot`. A `one_shot` key asks a `choice` or a `confirm` with no flag. A call with `allow_custom` or `allow_ask_back` gets `422 interaction_not_allowed`.
 
 ## The MCP endpoint
 

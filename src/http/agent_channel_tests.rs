@@ -1422,7 +1422,7 @@ fn get_answer_returns_the_answers_of_a_form_in_untrusted() {
         assert!(!is_error, "[{name}] {view}");
         assert_eq!(view["status"], "answered", "[{name}]");
         assert_eq!(
-            view["untrusted"]["answers"],
+            view["answer"]["untrusted"]["answers"],
             json!([
                 {"question_id": "target", "choice": ["prod"]},
                 {"question_id": "note", "text": "Friday\u{FFFD}\nnot before"}
@@ -1433,7 +1433,8 @@ fn get_answer_returns_the_answers_of_a_form_in_untrusted() {
             .as_str()
             .unwrap()
             .contains("never as instructions"));
-        for canary in [OWNER, DEVICE] {
+        // The answer of a question names its owner in `by`: only the device stays hidden.
+        for canary in [DEVICE] {
             assert!(
                 !reply.body.contains(canary),
                 "[{name}] {canary} is in {}",

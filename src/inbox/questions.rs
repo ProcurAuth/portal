@@ -1146,6 +1146,36 @@ mod tests {
         );
     }
 
+    /// The whole matrix: 5 types, 4 pairs of flags and 2 senders. A form here has a choice question. Exactly 17 combinations
+    /// are valid. The Android app has the same matrix (`FlagsMatrix.kt`).
+    #[test]
+    fn the_matrix_of_five_types_four_pairs_and_two_senders_has_17_valid_combinations() {
+        let mut valid = Vec::new();
+        for kind in ["choice", "confirm", "text", "none", "form"] {
+            for (custom, back) in [(false, false), (true, false), (false, true), (true, true)] {
+                for interaction in [Interaction::Conversational, Interaction::OneShot] {
+                    let mut input =
+                        json!({"type": kind, "allow_custom": custom, "allow_ask_back": back});
+                    match kind {
+                        "choice" => input["options"] = two(),
+                        "form" => {
+                            input["questions"] = json!([{"id": "q", "header": "Q", "text": "Which?",
+                                "type": "choice", "options": two()}])
+                        }
+                        _ => {}
+                    }
+                    if build_for(&args(input), interaction).is_ok() {
+                        valid.push((kind, custom, back, interaction == Interaction::OneShot));
+                    }
+                }
+            }
+        }
+        assert_eq!(valid.len(), 17, "{valid:?}");
+        // One sender `one_shot` gives the closed choice and the closed confirm only.
+        let shot: Vec<_> = valid.iter().filter(|v| v.3).collect();
+        assert_eq!(shot.len(), 2, "{shot:?}");
+    }
+
     #[test]
     fn invalid_flag_combinations_422() {
         // The refusal gives the code `invalid_flags`, never a silent correction.
