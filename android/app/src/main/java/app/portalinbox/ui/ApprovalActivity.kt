@@ -680,13 +680,7 @@ class ApprovalActivity : BaseFragmentActivity() {
         afterSubmit(i, Items.engine(this).approve(serverId, requestId))
     }
 
-    private fun authenticators(): Int = when (BiometricPolicy.allowed(Build.VERSION.SDK_INT)) {
-        BiometricPolicy.Allowed.STRONG_OR_CREDENTIAL ->
-            BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL
-        BiometricPolicy.Allowed.WEAK_OR_CREDENTIAL ->
-            BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.DEVICE_CREDENTIAL
-    }
+    private fun authenticators(): Int = LocalAuth.authenticators()
 
-    private fun canAuthenticate(): Boolean =
-        BiometricManager.from(this).canAuthenticate(authenticators()) == BiometricManager.BIOMETRIC_SUCCESS
+    private fun canAuthenticate(): Boolean = LocalAuth.canAuthenticate(this)
 }

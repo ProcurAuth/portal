@@ -38,7 +38,11 @@ class ExplanationZone(
         redraw()
     }
 
-    private fun redraw() = with(context) {
+    private fun redraw() {
+        context.redrawIn()
+    }
+
+    private fun Context.redrawIn() {
         view.removeAllViews()
         val shownView = ExplanationText.view(explanation, format, expanded, rawMarkdown)
         val zone = lin().apply {
@@ -95,7 +99,7 @@ class ExplanationZone(
         view.addView(zone)
     }
 
-    private fun markdownBox(source: String): View = with(context) {
+    private fun Context.markdownBox(source: String): View {
         val doc = MarkdownSpans.build(source, NativeRender, NativeRender)
         val inner = lin(padH = 12, padV = 8)
         val applier = SpanApplier(this, CodePalette.AGENT)
@@ -135,7 +139,7 @@ class ExplanationZone(
             redraw()
         })
         wrap.addView(foot)
-        wrap
+        return wrap
     }
 
     private fun Context.dashedDivider(): View = View(this).apply {

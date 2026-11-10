@@ -2,6 +2,7 @@ package app.portalinbox.ui
 
 import app.portalinbox.data.AnswerProgress
 import app.portalinbox.data.AnswerSheet
+import app.portalinbox.data.BlockKind
 import app.portalinbox.data.FlagsMatrix
 import app.portalinbox.data.Item
 import app.portalinbox.data.OutboxAnswer
@@ -179,6 +180,13 @@ object QuestionState {
             closedLine = if (automatic && mode != Mode.CLOSED) NO_DISCUSSION else null,
             queued = i.link == ApprovalState.Link.OFFLINE && mode == Mode.OPEN,
         )
+    }
+
+    /** The note under the row "Other answer": what the text does to the options. */
+    fun otherNote(kind: BlockKind, isForm: Boolean): String = when {
+        kind == BlockKind.CHECKBOX -> "Your own answer. It replaces the ticks."
+        isForm -> "Your own answer. It replaces the choices."
+        else -> OTHER_NOTE
     }
 
     /** "ops-agent · key of alice · conversational agent", or "Automatic system (no conversation) · jev · key of alice". */

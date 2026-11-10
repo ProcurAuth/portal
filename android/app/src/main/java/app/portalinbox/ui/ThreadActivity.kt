@@ -305,7 +305,7 @@ class ThreadActivity : BaseActivity() {
             }
         }
 
-        s.opening?.let { content.addView(openingBubble(s, it), lp().margins(this, t = 14)) }
+        s.opening?.let { content.addView(openingBubble(s, it, item.isOpen && !ItemTexts.isAutomatic(item)), lp().margins(this, t = 14)) }
         for (e in s.entries) content.addView(entryView(e, s.agentLabel), lp().margins(this, t = 14))
         if (s.writing) content.addView(writingRow(s.agentLabel), lp().margins(this, t = 14, b = 8, l = 4))
         content.addView(View(this), lp(MATCH, dp(12)))
@@ -467,8 +467,8 @@ class ThreadActivity : BaseActivity() {
         addView(label("•••", SP_S, color(R.color.text_subtle)), lp(WRAP, WRAP).margins(this@ThreadActivity, l = 8))
     }
 
-    /** The first bubble of a question: its text and its choices. The choices do not answer here (lot A4 builds that screen). */
-    private fun openingBubble(s: ThreadState.Screen, o: ThreadState.Opening): View {
+    /** The first bubble of a question: its text and its choices. The choices do not answer here: a link opens the screen of the question. */
+    private fun openingBubble(s: ThreadState.Screen, o: ThreadState.Opening, open: Boolean): View {
         val box = lin()
         box.addView(whoRow(s.agentLabel, o.whenText, agent = true, markdown = o.format == ExplanationFormat.MARKDOWN, gravityEnd = false))
         val bubble = agentBubble(o.explanation, o.format, o.command) as LinearLayout
@@ -478,7 +478,17 @@ class ThreadActivity : BaseActivity() {
                 label(getString(R.string.thread_choices, o.options.joinToString(" · ")), SP_S, color(R.color.text_muted)),
                 lp().margins(this, t = 6),
             )
-            bubble.addView(label(getString(R.string.thread_choices_later), SP_S, color(R.color.text_subtle)), lp().margins(this, t = 2))
+            if (open) {
+                bubble.addView(
+                    textLink(getString(R.string.question_answer_to_agent)) {
+                        startActivity(
+                            QuestionActivity.intent(this, serverId, requestId)
+                                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                        )
+                    },
+                    lp().margins(this, t = 2),
+                )
+            }
         }
         box.addView(bubble, lp().margins(this, t = 4))
         box.isFocusable = true

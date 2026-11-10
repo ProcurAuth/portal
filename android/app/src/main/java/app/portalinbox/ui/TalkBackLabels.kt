@@ -120,7 +120,9 @@ object TalkBackLabels {
         return if (s.sendEnabled) s.sendWord + on else s.sendWord + on + ". Not available now. " + (s.bottomHint ?: "")
     }
 
-    /** The label of the row "Other answer": it says that the text excludes the options and that the agent reads it. */
-    fun otherRow(exclusive: Boolean): String =
-        QuestionState.OTHER_WORD + ". " + QuestionState.OTHER_NOTE + (if (exclusive) " It replaces the options." else "") + " " + QuestionState.SECRET_WARNING
+    /** The label of the row "Other answer": [note] says what the text does to the options. The warning against a secret is read too. */
+    fun otherRow(note: String): String = QuestionState.OTHER_WORD + ". " + note + " " + QuestionState.SECRET_WARNING
+
+    /** The label of a field of the answer: what it is, and the warning against a secret. */
+    fun questionField(description: String): String = VisibleText.escapeLine(description) + ". " + QuestionState.SECRET_WARNING
 }
