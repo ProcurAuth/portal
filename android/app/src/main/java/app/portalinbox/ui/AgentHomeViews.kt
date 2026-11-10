@@ -64,7 +64,17 @@ fun Context.agentGroupHeader(g: AgentGroups.Group, nowMs: Long, portal: HomePort
         val line = lin(vertical = false, padH = 12, padV = 5).apply { gravity = Gravity.CENTER_VERTICAL }
         line.addView(caption(h.label, color(R.color.warning)), lp(WRAP, WRAP).margins(this, r = 10))
         val text = h.parts.joinToString(" · ")
-        line.addView(if (h.untrusted) untrustedLabel(text, SP_S, color(R.color.text_muted)) else label(text, SP_S, color(R.color.text_muted)), lp(0, WRAP, 1f))
+        line.addView(
+            if (h.untrusted) {
+                // Each part is marked alone: the separator of the portal is not a mark.
+                label(SpanApplier(this).apply(UntrustedText.joined(h.parts, " · ")), SP_S, color(R.color.text_muted)).apply {
+                    setTextIsSelectable(false)
+                    isLongClickable = false
+                    movementMethod = null
+                }
+            } else label(text, SP_S, color(R.color.text_muted)),
+            lp(0, WRAP, 1f),
+        )
         box.addView(line)
     }
     // A hairline between the header and the rows. A folded group has no row under it.

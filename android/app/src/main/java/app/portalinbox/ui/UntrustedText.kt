@@ -27,4 +27,21 @@ object UntrustedText {
         val shifted = m.spans.map { it.copy(start = it.start + prefix.length, end = it.end + prefix.length) }
         return StyledText(prefix + m.text + "\"", shifted)
     }
+
+    /**
+     * The parts of a line, each one marked, with [separator] between them. The separator is a text of the portal: it is never marked,
+     * also when it is not ASCII (the middle dot).
+     */
+    fun joined(parts: List<String>, separator: String): StyledText {
+        val out = StringBuilder()
+        val spans = ArrayList<app.portalinbox.render.Span>()
+        parts.forEachIndexed { i, part ->
+            if (i > 0) out.append(separator)
+            val m = mark(part)
+            val shift = out.length
+            m.spans.mapTo(spans) { it.copy(start = it.start + shift, end = it.end + shift) }
+            out.append(m.text)
+        }
+        return StyledText(out.toString(), spans)
+    }
 }
