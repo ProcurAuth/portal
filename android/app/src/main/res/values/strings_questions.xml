@@ -21,7 +21,4 @@
     <string name="question_changed">The question changed while you were answering. Read it again.</string>
     <string name="question_no_lock">This phone has no screen lock or fingerprint. Set one to send an answer.</string>
     <string name="question_answer_to_agent">Answer the question</string>
-    <string name="question_open_question_description">Open the screen of the question</string>
-    <string name="question_declined_sent">Your decline is saved.</string>
-    <string name="question_sent">Your answer is saved.</string>
 </resources>
