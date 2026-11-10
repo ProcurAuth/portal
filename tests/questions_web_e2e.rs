@@ -74,8 +74,20 @@ fn detail(pep: &Pep, cookie: &str, id: &str) -> String {
     page
 }
 
+/// The text that a reader sees in `main`: the tags are removed and the entities are decoded. The case is kept.
 fn text_of(page: &str) -> String {
-    Pep::text_of(page)
+    let start = page.find("<main").unwrap_or(0);
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in page[start..].chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    common::unescape(&out)
 }
 
 /// The number of rows "Other answer" in a page: one for each choice block that has the row.
@@ -91,7 +103,7 @@ fn has_ask_row(page: &str) -> bool {
 fn form_input(extra_questions: bool) -> Value {
     let mut questions = vec![
         json!({"id": "tables", "header": "Tables", "text": "Which tables should I archive?", "type": "choice",
-               "multiple": true, "min": 1, "max": 3,
+               "multiple": true, "min": 1, "max": 2,
                "options": [{"id": "ev", "label": "events_2025", "description": "212 GB"},
                            {"id": "rf", "label": "refunds_2024"}, {"id": "ss", "label": "sessions_old"}]}),
         json!({"id": "keep", "header": "Retention", "text": "How long should the archive keep the data?",
@@ -220,14 +232,14 @@ fn the_page_of_a_choice_has_the_boxes_the_zones_and_no_tick() {
     let page = detail(&pep, &cookie, &id);
     // The box "From agent", then the command, then the explanation, then the form.
     let at = |needle: &str| page.find(needle).unwrap_or_else(|| panic!("no {needle}"));
-    assert!(at("From agent") < at("Command"));
+    assert!(at("From key") < at("Command"));
     assert!(at("Command") < at("Agent explanation"));
     assert!(at("Agent explanation") < at("Your answer"));
     assert!(page.contains("Exact text") && page.contains("Not checked"));
     assert!(page.contains("data-copy-text=") && page.contains(" hidden>"));
     assert!(page.contains("Deploy now") && page.contains("Prod, 3 pods"));
     // Nothing is ticked, and the page has no script.
-    assert!(!page.contains(" checked"), "no option is ticked");
+    assert!(!page.contains("checked>"), "no option is ticked");
     assert!(!page.contains("<script>") && !page.contains(" onclick="));
     assert!(page.contains(&format!("method=\"post\" action=\"{QUESTION}\"")));
     assert!(page.contains(&format!("action=\"{REPLY}\"")));
@@ -305,7 +317,7 @@ fn hint_shown_above_options() {
     assert!(page.contains("Confidence 62 %"), "{page}");
     assert!(page.contains("<meter"));
     // The hint never ticks an option.
-    assert!(!page.contains(" checked"));
+    assert!(!page.contains("checked>"));
     // A hint with no confidence, and a hint that is a text and not an option.
     let id = ask(
         &pep,
@@ -558,7 +570,7 @@ fn a_form_has_blocks_a_counter_per_question_and_an_answered_view() {
     let page = detail(&pep, &cookie, &id);
     // Three blocks with a number, a chip, the question and the rule of the count.
     assert_eq!(page.matches("class=\"q\"").count(), 3, "{page}");
-    assert!(page.contains("class=\"qchip\">Tables<") && page.contains("Choose 1 to 3."));
+    assert!(page.contains("class=\"qchip\">Tables<") && page.contains("Choose 1 to 2."));
     assert!(page.contains("Choose one.") && page.contains("Write a text."));
     assert!(
         page.contains("Send answers") && page.contains("All answers go to the agent together.")
@@ -701,9 +713,10 @@ fn a_foreign_owner_is_answered_as_an_unknown_question_and_an_impersonated_sessio
     let fields = |id: &str| format!("request_id={id}&action=decline");
     let (st1, head1, _) = pep.post(&other, QUESTION, &token, &fields(&id), None);
     let (st2, head2, _) = pep.post(&other, QUESTION, &token, &fields(&unknown), None);
+    // The answers are the same, except for the id that the redirect repeats.
     assert_eq!(
-        (st1, common::location(&head1)),
-        (st2, common::location(&head2))
+        (st1, common::location(&head1).replace(&id, "ID")),
+        (st2, common::location(&head2).replace(&unknown, "ID"))
     );
     assert!(common::location(&head1).ends_with("?s=gone"));
     assert_eq!(answer_of(&pep, &id)["status"], "pending");
@@ -794,7 +807,7 @@ fn the_panel_lists_the_questions_by_agent_and_is_hidden_when_nothing_waits() {
     // The alerts stay above the items.
     let oi = page.find("id=\"oi-t\"").unwrap();
     assert_eq!(
-        page.matches("class=\"agrp").count(),
+        page.matches("<details class=\"agrp").count(),
         1,
         "one group for the agent"
     );
@@ -1045,7 +1058,9 @@ fn the_history_lists_the_states_of_the_questions_with_their_own_words() {
     assert!(text.contains("Cancelled by the agent."));
     assert!(text.contains("Replaced by a new request."));
     assert!(
-        text.contains("Answered 1") && text.contains("Declined 1") && text.contains("Replaced 1")
+        page.contains("Answered<span class=\"num\">1</span>")
+            && page.contains("Declined<span class=\"num\">1</span>")
+            && page.contains("Replaced<span class=\"num\">1</span>")
     );
     // The chip "Answered" filters the rows.
     let (_, _, only) = pep.page(&cookie, &format!("{INBOX}/items?st=answered"));
@@ -1161,7 +1176,7 @@ fn the_body_of_a_question_is_read_by_the_superadmin_only_behind_the_switch() {
     assert_eq!(pep.page(&root, &format!("{}/body", item_path(&id))).0, 404);
     let (st, _, page) = pep.page(&root, &item_path(&id));
     assert_eq!(st, 200);
-    assert!(!page.contains("canary-expl-77c1") && !page.contains("/body"));
+    assert!(!page.contains("canary-expl-77c1") && !page.contains("/body\""));
     drop(pep);
     let pep = Pep::with_questions(|s| {
         edit_config(

@@ -381,9 +381,9 @@ fn type_words(bl: &Block) -> String {
             let n = bl.options.len();
             if min == max {
                 format!("Choose {min}.")
-            } else if max >= n {
+            } else if max >= n && min >= 1 {
                 format!("Choose at least {min}. No maximum.")
-            } else if min <= 1 {
+            } else if min == 0 {
                 format!("Choose at most {max}.")
             } else {
                 format!("Choose {min} to {max}.")
@@ -621,8 +621,17 @@ fn answer_form(d: &QDetail, t: &QText) -> String {
     } else {
         "Your answer goes to the agent."
     };
+    // The second form exists only with the row "Ask the agent": an automatic system has no control of a discussion.
+    let ask_form = if rows.ask_agent {
+        format!(
+            r#"<form id="qask" method="post" action="{REPLY}">{}</form>"#,
+            hidden_fields(d)
+        )
+    } else {
+        String::new()
+    };
     format!(
-        r#"<form class="sec2 qform" method="post" action="{QUESTION}" aria-label="Your answer"><div class="sec2__head"><h2 class="title">Your answer</h2>{trust}<span class="sec2__note">{}</span></div>{body}{notes}{ask}<div class="qform__send">{lock_line}<div class="decide__row">{hidden}{send}<button class="button" type="submit" name="action" value="decline">{DECLINE_WORD}</button><span class="grow"></span><span class="note">{side_note}</span></div></div></form><form id="qask" method="post" action="{REPLY}">{hidden}</form>"#,
+        r#"<form class="sec2 qform" method="post" action="{QUESTION}" aria-label="Your answer"><div class="sec2__head"><h2 class="title">Your answer</h2>{trust}<span class="sec2__note">{}</span></div>{body}{notes}{ask}<div class="qform__send">{lock_line}<div class="decide__row">{hidden}{send}<button class="button" type="submit" name="action" value="decline">{DECLINE_WORD}</button><span class="grow"></span><span class="note">{side_note}</span></div></div></form>{ask_form}"#,
         html_escape(&head_note),
         hidden = hidden_fields(d),
     )
@@ -855,7 +864,7 @@ fn side(d: &QDetail, t: Option<&QText>) -> String {
         let yes = |on: bool| if on { "Allowed" } else { "No" };
         let _ = write!(
             req,
-            r#"<div><dt>Answers</dt><dd>{}</dd></div><div><dt>{OTHER_WORD}</dt><dd>{}</dd></div><div><dt>{ASK_WORD}</dt><dd>{}</dd></div>"#,
+            r#"<div><dt>Answers</dt><dd>{}</dd></div>"#,
             html_escape(&{
                 let w = kind_words(&t.input);
                 let mut c = w.chars();
@@ -863,13 +872,16 @@ fn side(d: &QDetail, t: Option<&QText>) -> String {
                     .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
                     .unwrap_or_default()
             }),
-            yes(rows.other_answer),
-            if automatic(l) {
-                "Never (automatic system)"
-            } else {
-                yes(rows.ask_agent)
-            },
         );
+        // An automatic system has neither row: the box below says so.
+        if !automatic(l) {
+            let _ = write!(
+                req,
+                r#"<div><dt>{OTHER_WORD}</dt><dd>{}</dd></div><div><dt>{ASK_WORD}</dt><dd>{}</dd></div>"#,
+                yes(rows.other_answer),
+                yes(rows.ask_agent),
+            );
+        }
     }
     let line = |class: &str, at: i64, text: &str| {
         format!(
