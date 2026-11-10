@@ -85,7 +85,7 @@ The block `inbox.at_rest` holds the keys that seal the contents of the items. Th
 
 - `active_key` is the id of the key that seals the new contents. It is mandatory. It must be the label of a block `key`.
 - The block has 1 to 8 blocks `key "<id>"`. An id has 1 to 16 characters from `a-z`, `0-9`, `-` and `_`.
-- A key that is not the `active_key` stays readable and seals nothing. Use this for a rotation.
+- A key that is not the `active_key` stays readable and seals nothing. Use this for a rotation (see "Rotate a content key").
 - Each block `key` has exactly one of `secret_env` and `secret_file`. A `secret` in clear text stops the start.
 - A secret is the base64 text of 32 random bytes. It has 44 characters. A secret with all bytes equal stops the start.
 - Two keys must not have the same bytes. All instances of the portal must hold the same keys.
@@ -95,7 +95,49 @@ Make a key with `portal inbox content-key --out FILE`. The command writes one li
 
 Keep the key file outside the data volume and outside the backups of the database. Keep a copy of it in a separate place. A lost key makes the sealed contents unreadable. The metadata stays readable.
 
-At start, the portal compares each key with the check value that the database keeps. A key that changed under the same id stops the start. The message names the id. To change a key, add a new key with a new id, make it the `active_key`, and restart each instance. A database from a version before 5.1.0 has no table for the check values. The portal stops at start and says so (see the README, "Upgrades").
+At start, the portal compares each key with the check value that the database keeps. A key that changed under the same id stops the start. The message names the id. To change a key, rotate it (see "Rotate a content key"). A database from a version before 5.1.0 has no table for the check values. The portal stops at start and says so (see the README, "Upgrades").
+
+At start, the portal also counts the sealed rows of each key. The start stops when a row names a key id that the file does not hold. The message names the id and the number of rows. It gives two ways out. If you still have the secret, add the block `key` again and run `portal inbox rekey`. If the key is lost, run `portal inbox content-purge`.
+
+A row can name a key that the file holds but that is not the `active_key`. Then the portal starts. It writes the log event `content_key_rows_to_rekey` with the key id and the number of rows. These rows wait for `rekey`.
+
+### Rotate a content key
+
+A rotation has three steps. Do them in this order. Each step is safe to stop and to repeat.
+
+1. Add the new key and make it active.
+   1. Run `portal inbox content-key --out FILE`. Keep the file outside the data volume and outside the backups of the database.
+   2. Add a block `key` with a new id. Do not remove the block of the old key.
+   3. Set `active_key` to the new id.
+   4. Restart each instance. Each instance must hold the same keys.
+
+   From now, the new contents use the new key. The old contents stay readable with the old key.
+
+2. Run `portal inbox rekey --config FILE`.
+   - The command seals again every sealed value that uses a key that is not the active key. Use `--from ID` to take one old key only.
+   - It visits four kinds of value. They are the bodies of the items, the turns of the threads, the intents of the agents and the hints of the agents.
+   - It uses batches of 200 rows. It writes each batch in one transaction. It never logs a content.
+   - It is idempotent. If you stop it, or if it is killed, run it again. No row is lost, and no row is sealed twice.
+   - It keeps the associated data of each value (the request id, the field, the sequence number and the effect). Each check of an approval stays valid.
+   - With PostgreSQL, it runs while the portal serves. It writes a row only when the row still holds the value that the command read. A writer that changed the row first keeps its value, and the command reads the row again.
+   - With SQLite, it refuses to run while an instance runs on the file. Stop the instance first.
+   - It reports the number of rows moved for each table, and the number of rows that still use each old key.
+   - A row that does not open stays as it is. The report names its table and id, never its content. The command then ends with an error. Do not remove the old key.
+
+3. Remove the old key when the command reports no row on it.
+   1. Run `portal inbox rekey --config FILE` again. It must move 0 rows. It must report no row left on the old key.
+   2. When no row uses the old key, the command drops the check value of this key from the database.
+   3. Wait at least `inbox.approvals.evaluation_ttl` (5 minutes by default) after the restart of the last instance of step 1.
+   4. Remove the block `key` of the old key, and restart each instance.
+
+The wait of step 3 has a reason. An `evaluation_id` that the PDP made before step 1 names the old key. The PDP checks it with that key, for `evaluation_ttl`. If you remove the key sooner, a service that holds such an id gets `invalid_evaluation` and asks the PDP again. No row stores such an id as a value that needs the key: an approval that the owner already decided stays valid.
+
+If you remove the block of the old key too early, the portal stops at start and names the key and the number of rows. Add the block again, start, and run the command.
+
+Backups and restores need care. A backup of the database holds the rows as they were at the time of the backup. Those rows can use an old key. Keep each old key for as long as you keep a backup that uses it.
+
+After a restore, the file must hold every key that the restored rows name. If it does not, the start stops. Add the key that the file lacks, start, and run `portal inbox rekey`. Keep the keys apart from the backups of the database.
+
 
 `portal check-config` shows for each key its id, whether it is `active` or `read-only`, and its source as `env:VAR` or `file:/path`. It never shows the secret.
 
@@ -172,7 +214,7 @@ Each instance keeps its limits in memory. With N instances, a key can send N tim
 
 `portal inbox token --out FILE` makes the text of an API key.
 
-The `secret` of each block `inbox.at_rest.key` accepts only `_env` and `_file`, like the other secrets. `portal inbox content-key --out FILE` makes the key file.
+The `secret` of each block `inbox.at_rest.key` accepts only `_env` and `_file`, like the other secrets. `portal inbox content-key --out FILE` makes the key file. `portal inbox rekey --config FILE [--from ID]` seals the old contents again with the active key.
 
 ## Default values of the optional keys
 

@@ -550,7 +550,7 @@ The portal seals the body of an item before it writes it. This is not end-to-end
 
 5.11.6 **[5.1.0]** The block `inbox.at_rest` MUST have `active_key` and 1 to 8 blocks `key "<id>"`. An id has 1 to 16 characters from `a-z`, `0-9`, `-` and `_`. A key holds exactly one of `secret_env` and `secret_file`, with 32 random bytes in base64. A secret in clear in the file MUST stop the start.
 
-5.11.7 **[5.1.0]** At start, the portal MUST stop in each of these cases. The error names the id and the count of rows.
+5.11.7 **[5.1.0]** At start, the portal MUST stop in each of these cases. The error names the id and the count of rows. For the last case, the error MUST name the two ways out: `portal inbox rekey` when the operator still has the secret, and `portal inbox content-purge` when the key is lost.
 
 - `active_key` names no block.
 - Two blocks have the same id or the same secret.
@@ -560,7 +560,7 @@ The portal seals the body of an item before it writes it. This is not end-to-end
 
 5.11.8 **[5.1.0]** The command `portal inbox content-key` MUST make a new key and MUST NOT overwrite a file. The command `portal inbox content-purge --key <id>` MUST erase the bodies of a lost key and keep the metadata. The operator MUST keep the keys apart from the database and from the backups.
 
-5.11.9 **[5.2.0]** The command `portal inbox rekey` MUST seal again the rows of an old key with the active key. It MUST be idempotent, work in batches and resume after a stop. With SQLite it MUST refuse to run while an instance runs.
+5.11.9 **[5.2.0]** The command `portal inbox rekey` MUST seal again the rows of an old key with the active key. It MUST be idempotent, work in batches and resume after a stop. With SQLite it MUST refuse to run while an instance runs. With PostgreSQL it MUST run while the portal serves. It MUST visit each sealed value: the bodies of the items, the turns, the intents of the agents and the hints of the agents.
 
 5.11.10 **[5.1.0]** After `body_purge_after`, the portal MUST erase the sealed value of a final item. The metadata, the effect hash and the audit MUST stay. The phone keeps its copy until its own `local_retention`. The `welcome` frame carries `body_purge_after_ms` as the default.
 
@@ -577,6 +577,12 @@ The portal seals the body of an item before it writes it. This is not end-to-end
 5.11.16 **[5.1.0]** No separate right reads a body. The right `approval.read` MUST give metadata only. A session that the superadmin opens as another account MUST NOT read a body and MUST NOT answer.
 
 5.11.17 **[5.1.0]** When `admin_body_read` is true, each read MUST write one row `body_read` in `item_events`. The row holds the login, the time and the request id, and never the body. The portal MUST count the reads in `portal_item_body_reads_total`. This trace does not stop a person who has the key and the database, because that person reads outside the application.
+
+5.11.18 **[5.2.0]** The command `rekey` MUST keep the associated data of each value, so each seal and each effect check stays valid. It MUST write a row only when the row still holds the value that the command read. A writer that changed the row first keeps its value. The command MUST seal no value twice and MUST lose no row if it stops.
+
+5.11.19 **[5.2.0]** The command `rekey` MUST report the number of rows moved for each table and the rows that remain on each old key. It MUST drop the check value of a key only when no row uses the key. It MUST leave a row that does not open as it is, and it MUST name the table and the id of this row. It MUST NOT write a content to the log, to the report or to an error.
+
+5.11.20 **[5.2.0]** At start, the portal MUST write the log event `content_key_rows_to_rekey` for a key that is not active and still seals rows. The event holds the key id and the count. An `evaluation_id` names the key that made it. The PDP MUST check it with that key until its time ends, so the operator removes an old key after `evaluation_ttl`. No row holds an `evaluation_id` that needs an old key.
 
 ### 5.12 Text that comes from an agent
 
@@ -646,7 +652,7 @@ The blocks `inbox.items`, `inbox.at_rest`, `inbox.approvals` and `inbox.mcp` fol
 
 6.9.7 **[5.1.0]** A configuration secret of items MUST come from `_env` or `_file`. `portal check-config` MUST show for each key of content its id, whether it is active or read-only, and its source as `env:VAR` or `file:/path`. It MUST hide the secret. No key of this section MUST be editable from the web.
 
-6.9.8 **[5.2.0]** The block `inbox.questions` MUST activate the questions. It needs `inbox.items` and `inbox.at_rest`. It has the key `max_options` with the range 2 to 12 and the default 8.
+6.9.8 **[5.2.0]** The block `inbox.questions` MUST activate the questions. It needs `inbox.items` and `inbox.at_rest`. It has the key `max_options` with the range 2 to 8 and the default 8.
 
 6.9.9 **[5.1.0]** The block `inbox.agents` is optional. Its keys have the ranges and the defaults of the table of keys: `max_per_key` 16, `new_per_hour` 6, `lock_new` false, `idle_after` 14d and `purge_after` 365d. The block MUST need `inbox.items` and `inbox.at_rest`. `idle_after` above `purge_after` MUST stop the start. The error names the key, the range and the value.
 
@@ -708,11 +714,11 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.6.18 | 5.1.0 | L5 | `caps_per_key_owner_total` |
 | 3.6.19 | 5.1.0 | L5 | `body_purge_keeps_metadata_effect_and_events` |
 | 3.6.20 | 5.1.0 | L5 | `outage_extends_open_leases_by_the_gap_no_false_abandon`, `degraded_storage_returns_storage_degraded_and_writes_nothing` |
-| 3.6.21 | 5.2.0 | L13 | to fill |
-| 3.6.22 | 5.2.0 | L13 | to fill |
-| 3.6.23 | 5.2.0 | L13 | to fill |
-| 3.6.24 | 5.2.0 | L13 | to fill |
-| 3.6.25 | 5.2.0 | L13 | to fill |
+| 3.6.21 | 5.2.0 | L13 | `question_tests::ask_makes_a_pending_question_and_the_answer_reaches_the_agent_in_the_documented_form`, `question_tests::invalid_questions_are_refused_with_their_codes_and_create_nothing`, `questions::tests::the_limits_refuse_and_never_cut`, `questions::tests::the_defaults_of_the_bounds_and_the_body_form`, `questions_e2e::the_phone_gets_a_question_and_answers_a_choice_a_custom_text_a_decline_and_asks_back`. L15: `items_load::a_huge_explanation_options_and_forms_are_refused_before_storage` |
+| 3.6.22 | 5.2.0 | L13 | `questions::tests::flags_matrix_all_valid_combinations_per_type`, `questions::tests::one_shot_with_any_flag_interaction_not_allowed`, `question_tests::multiple_with_custom_is_exclusive`, `question_tests::one_shot_key_asks_a_closed_choice_and_gets_interaction_not_allowed_for_a_flag`, `question_tests::a_text_without_allow_custom_and_a_wrong_answer_are_refused_and_write_nothing` |
+| 3.6.23 | 5.2.0 | L13 | `questions::tests::command_with_bidi_or_control_refused`, `questions::tests::command_zero_width_accepted_and_flagged_in_frame`, `questions::tests::the_limits_refuse_and_never_cut`, `questions_e2e::answers_that_do_not_fit_the_question_get_a_result_and_change_nothing`. L15: `items_load::a_flood_of_answers_from_a_phone_is_bounded` |
+| 3.6.24 | 5.2.0 | L13 | `question_tests::text_answer_arrives_as_choice_empty_plus_untrusted_text`, `question_tests::a_repeat_of_an_answered_question_gives_the_answer`, `question_tests::ask_blocks_at_most_wait_s_then_returns_handle`, `question_tests::jev_style_rest_loop_get_wait_keeps_lease_600s`, `questions_e2e::the_phone_gets_a_question_and_answers_a_choice_a_custom_text_a_decline_and_asks_back` |
+| 3.6.25 | 5.2.0 | L13 | `question_tests::question_budget_counts_ask_say_supersede_not_renewals`, `question_tests::the_tool_ask_needs_the_block_and_the_permission_and_tools_list_follows`, `question_tests::a_cancel_needs_the_permission_and_a_withdrawn_question_is_cancelled`, `question_tests::question_never_passes_through_a_service`. L15: `items_load::a_flood_of_asks_hits_the_budget_questions_and_writes_nothing`, `items_load::many_open_questions_per_key_stop_at_max_open_per_key`, `items_load::a_flood_of_asks_with_and_without_agent_tokens_keeps_rows_events_and_frames_bounded`, `items_load::canary_for_question_bodies_in_every_place` (no service sees a question) |
 | 3.7.1 | 5.1.0 | L2 | `confirm_true_when_key_or_owner_grant_has_it`, `superadmin_owner_uses_key_confirm_only`, `config_confirm_on_portal_service_stops_start`, `config_confirm_on_access_stops_start` |
 | 3.7.2 | 5.1.0 | L6 | Conformance D76, D82, D86 to D88 (`conformance_d::the_cases_of_the_series_d_pass`), `pdp::approval_tests::confirm_with_client_without_approvals_flag_plain_false`, `pdp::approval_tests::answers_carry_only_listed_reasons`, `pdp::approval_tests::other_subject_resource_or_effect_not_applicable` |
 | 3.7.3 | 5.1.0 | L6, L7 | L6: `pdp::approval::tests::the_evaluation_id_is_stateless_valid_on_another_instance_for_the_ttl_and_binds_each_fact`, `pdp::approval::tests::an_evaluation_id_survives_a_rotation_of_the_content_key_while_the_old_key_is_in_the_file`, `pdp::approval_tests::the_evaluation_id_of_an_answer_binds_the_question_and_works_on_another_instance`. L7: `approval_api_tests::a01_evaluation_id_required_other_subject_422`, `pdp::approval::tests::a_submission_opens_the_id_with_the_service_and_the_effect_and_gets_the_sealed_facts` |
@@ -855,17 +861,20 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 5.11.4 | 5.1.0 | L4, L5 | L4: `moved_sealed_value_does_not_open`; L5: `a_sealed_value_that_moves_does_not_open` |
 | 5.11.5 | 5.1.0 | L5 | `canary_absent_in_every_column_and_in_replica_snapshot`, `an_item_reaches_each_phone_of_its_owner_that_is_not_revoked` |
 | 5.11.6 | 5.1.0 | L4 | `plain_secret_in_file_stops_start`, `the_blocks_items_and_at_rest_give_typed_values_with_documented_defaults`, `two_keys_active_writes_all_read`, `active_key_unknown_stops_start` |
-| 5.11.7 | 5.1.0 | L4, L5 | L4: `active_key_unknown_stops_start`, `duplicate_key_id_or_secret_stops_start`, `two_ids_with_one_key_stop_the_start`, `secret_not_32_bytes_or_all_equal_stops_start`, `wrong_key_same_id_fails_check_value`, `wrong_key_same_id_stops_the_start_and_the_log_names_the_keys`, `a_key_id_that_the_file_lost_is_reported_with_its_count`; L5: `orphan_body_kid_stops_start_with_count` |
+| 5.11.7 | 5.1.0 | L4, L5, L15 | L4: `active_key_unknown_stops_start`, `duplicate_key_id_or_secret_stops_start`, `two_ids_with_one_key_stop_the_start`, `secret_not_32_bytes_or_all_equal_stops_start`, `wrong_key_same_id_fails_check_value`, `wrong_key_same_id_stops_the_start_and_the_log_names_the_keys`, `a_key_id_that_the_file_lost_is_reported_with_its_count`; L5: `orphan_body_kid_stops_start_with_count`. L15: `rekey_tests::removed_key_with_rows_stops_start_until_rekey_complete`, `items_e2e::rekey_command_rotates_the_content_key_with_the_binary` (the message names `rekey` and `content-purge`) |
 | 5.11.8 | 5.1.0 | L4, L5 | L4: `content_key_command_never_overwrites`; L5: `orphan_body_kid_stops_start_with_count` (the function behind `content-purge`) |
-| 5.11.9 | 5.2.0 | L15 | to fill |
+| 5.11.9 | 5.2.0 | L15 | `rekey_tests::rekey_moves_rows_to_active_key_resumes_after_kill` (the four tables, a stop in the middle, a second run), `rekey_tests::rekey_refuses_sqlite_while_running`, `rekey_tests::rekey_from_one_key_leaves_the_others_and_refuses_bad_ids`, `items_e2e::rekey_command_rotates_the_content_key_with_the_binary` (the binary: refusal with SQLite, online with PostgreSQL) |
 | 5.11.10 | 5.1.0 | L5 | `body_purge_keeps_metadata_effect_and_events` |
-| 5.11.11 | 5.1.0 | L12 | to fill |
+| 5.11.11 | 5.1.0 | L12, L15 | L15 (questions): `items_load::canary_for_question_bodies_in_every_place` (log, metrics, tables with the alerts, errors, the PDP and the requests of the portal to a service), `questions_e2e::canary_for_question_bodies`. L12: to fill (the full canary of the release) |
 | 5.11.12 | 5.1.0 | L4 | `the_documents_say_what_the_seal_covers_and_does_not_cover` |
 | 5.11.13 | 5.1.0 | L4 | `the_documents_say_what_the_seal_covers_and_does_not_cover` |
 | 5.11.14 | 5.1.0 | A2, L12 | to fill |
 | 5.11.15 | 5.1.0 | L10 | `items_web_e2e::admin_body_route_404_when_switch_false` |
 | 5.11.16 | 5.1.0 | L10 | `items_web_e2e::admin_body_read_true_superadmin_only_writes_audit_and_counter_no_body`, `approval_read_right_shows_metadata_not_body`, `impersonated_session_cannot_answer` |
 | 5.11.17 | 5.1.0 | L10 | `items_web_e2e::admin_body_read_true_superadmin_only_writes_audit_and_counter_no_body` |
+| 5.11.18 | 5.2.0 | L15 | `rekey_tests::rekey_moves_rows_to_active_key_resumes_after_kill`, `rekey_tests::rekey_does_not_overwrite_a_row_that_a_writer_changed` |
+| 5.11.19 | 5.2.0 | L15 | `rekey_tests::rekey_reports_a_row_that_does_not_open_and_leaves_it`, `rekey_tests::the_report_says_what_moved_and_what_is_left`, `items_e2e::rekey_command_rotates_the_content_key_with_the_binary` (the report holds no content) |
+| 5.11.20 | 5.2.0 | L15 | `rekey_tests::removed_key_with_rows_stops_start_until_rekey_complete` (the rows that wait), `items_e2e::rekey_command_rotates_the_content_key_with_the_binary` (the log event), `pdp::approval::tests::an_evaluation_id_survives_a_rotation_of_the_content_key_while_the_old_key_is_in_the_file` |
 | 3.6.26 | 5.1.0 | L3b | `frames::markdown_and_language_members_are_kept_and_plain_is_a_valid_spelling`, `frames::new_invalid_frames_fail_for_the_named_reason`, `frames::tests::a_markdown_turn_of_the_agent_keeps_its_format`, `agent_channel::the_format_and_the_language_of_an_intent_reach_the_frame_of_the_phone`, `agent_channel::a_turn_of_the_agent_can_be_markdown_and_the_message_frame_says_so`, `FramesTest.theMarkdownAndLanguageMembersReadToTheTypedValues` |
 | 3.6.27 | 5.1.0 | L3b | `render::markdown::tests::limits_make_the_text_plain`, `render::markdown::tests::autolinks_html_and_images_are_text`, `render::markdown::tests::tables_footnotes_and_rules_are_text`, `render::markdown::tests::entities_are_text`, `render::markdown::tests::random_markdown_never_panics_and_always_gives_a_tree`, `render::markdown::tests::nested_structures_keep_their_shape`, `markdown_html::the_xss_corpus_gives_only_allowed_tags_and_shows_the_source_as_text`, `markdown_html::bombs_and_long_texts_stay_inside_the_subset` |
 | 3.6.28 | 5.1.0 | L3b | `render::markdown::tests::links_show_the_host_and_never_act`, `markdown_html::the_xss_corpus_gives_only_allowed_tags_and_shows_the_source_as_text`, `markdown_html::no_class_comes_from_the_text`, `markdown_html::bidi_and_zero_width_characters_are_visible_marks` |
@@ -886,7 +895,7 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 6.9.5 | 5.1.0 | L4, L6 | L4: `a_contradiction_of_the_items_stops_the_start_with_the_two_keys_and_values`; L6: `a_contradiction_of_the_approvals_stops_the_start_with_the_key_the_range_and_the_value` (`consume_within` above `max_lifetime` cannot happen with today's ranges: 1 hour at most against 1 day at least) |
 | 6.9.6 | 5.1.0 | L4, L6, L7, L9 | L4: `the_digest_mode_decides_which_keys_apply`, `the_blocks_items_and_at_rest_need_each_other`; L6 has no contradiction in this list. L7: `config::tests::a_bad_key_of_the_approval_api_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` (`max_command_bytes` above `pdp.max_body_bytes`, `require_explanation` with `max_explanation_chars = 0`). L9: `config::tests::a_bad_key_of_the_block_mcp_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` (`inbox.mcp` without `keys.mcp = true`, `max_wait` above `wait_max`, the path of the metrics) |
 | 6.9.7 | 5.1.0 | L4 | `print_config_masks_secret_shows_kid_and_source`, `plain_secret_in_file_stops_start` |
-| 6.9.8 | 5.2.0 | L13 | to fill |
+| 6.9.8 | 5.2.0 | L13 | `config::tests::questions_block_closed_schema_and_defaults`, `config::tests::questions_block_needs_items_and_at_rest` |
 | 6.9.9 | 5.1.0 | G1a | `config::tests::agents_block_closed_schema_and_defaults`, `idle_after_above_purge_after_stops_the_start`, `agents_block_needs_items_and_at_rest` |
 | 6.10.1 | 5.1.0 | L3 | `old_hello_protocol_4_gets_4426`, `frames::old_hello_and_old_ack_do_not_parse` |
 | 6.10.2 | 5.1.0 | L3 | `frames::frames_round_trip_golden`, `frames::every_frame_rejects_unknown_field`, `frames::title_with_newline_or_control_rejected`. L8: `approve_on_phone_then_pdp_true_once`, `sync_reconciles_open_and_closed`, `frames::tests::a_digest_has_the_count_and_the_oldest_first_and_never_comes_empty` |
@@ -902,7 +911,7 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 6.11.3 | 5.1.0 | L12 | to fill |
 | 6.11.4 | 5.1.0 | L12 | to fill |
 | 8.2.1 | 5.1.0 | L12 | to fill |
-| 8.2.2 | 5.2.0 | L15 | to fill |
+| 8.2.2 | 5.2.0 | L15 | The questions: L13 (see 3.6.21 to 3.6.25). The web rows: L14, to fill. The screens of the phone: A4, to fill. The command `rekey`: 5.11.9 and 5.11.18 to 5.11.20. The abuse and load tests: `items_load` (see 3.6.25). |
 | 8.2.3 | 5.1.0 | L12 | to fill |
 | 8.2.4 | 5.1.0 | S1 | this document |
 | 8.3.1 | 5.1.0 | L12 | to fill |

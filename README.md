@@ -1115,6 +1115,7 @@ An instance that owns the lease serves. A standby instance waits for the lease b
 | `portal inbox token --out FILE` | Makes the text of an API key (`api_`, 43 characters and 6 characters of checksum). The file never gets overwritten. |
 | `portal inbox content-key --out FILE` | Makes a key that seals the contents of the items: the base64 text of 32 random bytes. The file never gets overwritten. |
 | `portal inbox content-purge --config FILE --key ID` | Erases the sealed contents of a key that the file lost, and keeps the metadata. It refuses a key that the file still holds. |
+| `portal inbox rekey --config FILE [--from ID]` | Seals again the contents of the old keys with the active key. It works in batches, it is idempotent, and it resumes after a stop. With PostgreSQL it runs while the portal serves. With SQLite it refuses to run while an instance runs. It reports the rows moved for each table. See "Rotate the content key". |
 | `portal inbox import-sqlite --config FILE --from SQLITE_FILE` | Copies a SQLite file into the empty PostgreSQL database that the configuration names. The file must have the current schema of the Inbox. A file of the earlier standalone alert server has an older schema, so the command refuses it. |
 | `portal inbox healthcheck --config FILE` | Asks `/readyz` of the portal port. |
 
@@ -1346,7 +1347,7 @@ The seal does not protect against a person who has the key and the process of th
 
 Keep the keys outside the data volume and outside the backups of the database. A lost key makes the contents unreadable and keeps the metadata. See [`docs/inbox/SECURITY.md`](docs/inbox/SECURITY.md).
 
-At start, the portal compares each key with a check value in the table `content_key_check`. A key that changed under the same id stops the start. `portal check-config` shows the id, `active` or `read-only`, and the source of each key. It hides the secret.
+At start, the portal compares each key with a check value in the table `content_key_check`. A key that changed under the same id stops the start. To change the active key, follow "Rotate the content key" in Operations. `portal check-config` shows the id, `active` or `read-only`, and the source of each key. It hides the secret.
 
 ### The engine of the items
 
@@ -2210,6 +2211,8 @@ portal hash-password < password.txt
 portal inbox keygen --out FILE
 portal inbox token --out FILE
 portal inbox content-key --out FILE
+portal inbox content-purge --config FILE --key ID
+portal inbox rekey --config FILE [--from ID]
 portal inbox import-sqlite --config FILE --from SQLITE_FILE
 portal inbox healthcheck --config FILE
 portal version
@@ -2249,6 +2252,16 @@ The GitHub workflow `ci.yml` runs these checks and the build of the app. It also
 Back up two things: the database and the key file of the Inbox server. With SQLite, copy the file with `sqlite3 .backup`, or stop the instance first. With PostgreSQL, use the backup of the database cluster.
 
 If you lose the key file of the Inbox server, every enrolled phone and every enrollment code becomes invalid. Each person must then enroll again. A new key file has the same effect. Keep the file secret.
+
+### Rotate the content key
+
+A rotation has three steps. The file `docs/inbox/configuration.md` has the full procedure.
+
+1. Make a key with `portal inbox content-key --out FILE`. Add a block `key` for it in `inbox.at_rest`, and set `active_key` to its id. Keep the old block. Restart each instance.
+2. Run `portal inbox rekey --config FILE`. The command seals again each old content with the active key. With SQLite, stop the instance first: the command refuses to run while an instance runs. With PostgreSQL, the portal can serve while the command runs. If the command stops, run it again.
+3. Run the command a second time. When it reports no row on the old key, wait for `inbox.approvals.evaluation_ttl`. Then remove the old block and restart each instance.
+
+If you remove an old block while rows use it, the portal stops at start. The message names the key and the number of rows. Add the block again and run the command. Keep each old key for as long as you keep a backup of the database that uses it.
 
 ### Metrics
 
@@ -2333,6 +2346,8 @@ Version 5.2.0 adds the questions. Read these points before you upgrade from 5.1.
 - The actions `question.ask`, `question.read` and `question.cancel` and the budget `questions` are new. A key asks only when it holds `question.ask`, and its owner must hold it too. Give the permission to the keys that must ask.
 - The database has no change. The schema and the tables are the same as in 5.1.0, and there is no migration.
 - The answer of a question has a new form for the agent: the member `answer`. A form answer moved from `untrusted.answers` to `answer.untrusted.answers`.
+- The command `portal inbox rekey --config FILE [--from ID]` is new. It seals again the contents of the old keys with the active key. See "Rotate the content key" in Operations.
+- The start now writes the log event `content_key_rows_to_rekey` when rows use a key that is not active. The error of a key that the file lost now names `rekey` and `content-purge` as the ways out.
 - The Android app of 5.2.0 and the server of 5.2.0 go together.
 
 Version 5.0.5 changes how the launcher opens a service, and it adds external services. It adds one table to the database. It has no change of the protocol. Read these points before you upgrade from 5.0.4:

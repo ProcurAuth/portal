@@ -44,7 +44,7 @@ The seal does not cover these cases:
 
 The metadata stays in clear: the request id, the service, the action, the resource path, the owner, the state and the dates. A lost key makes the contents unreadable and keeps the metadata. The check value that the database keeps for each key reveals nothing about the key.
 
-The portal erases the sealed body of a final item after `inbox.items.body_purge_after`. The effect hash and the audit events stay. A body that the portal serves is checked first: the portal computes the effect hash of the opened command again. On a difference, it serves nothing and writes the log line `body_effect_mismatch`. At start, the portal stops when sealed rows name a key that the file lost. The command `portal inbox content-purge --config FILE --key ID` erases the contents of that key and keeps the metadata.
+The portal erases the sealed body of a final item after `inbox.items.body_purge_after`. The effect hash and the audit events stay. A body that the portal serves is checked first: the portal computes the effect hash of the opened command again. On a difference, it serves nothing and writes the log line `body_effect_mismatch`. At start, the portal stops when sealed rows name a key that the file lost. The command `portal inbox content-purge --config FILE --key ID` erases the contents of that key and keeps the metadata. To rotate a key, add the new key, make it active, and run `portal inbox rekey --config FILE`. The command seals the old contents again with the active key and keeps the associated data. Remove the old key only when the command reports no row on it. See `docs/inbox/configuration.md`, "Rotate a content key".
 
 ## The agent channel
 
