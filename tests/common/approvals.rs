@@ -108,15 +108,21 @@ pub struct Pep {
     pub key_id: String,
     /// The text of the agent key, shown once when the owner made it.
     pub key_text: String,
+    /// The requests that the fake services (the Docker socket and the page of actions) received from the portal.
+    pub service_tap: ServiceTap,
 }
 
-fn serve_unix(path: std::path::PathBuf, body: String) {
+/// Everything that the fake services received from the portal: the bytes of each request, in order.
+pub type ServiceTap = std::sync::Arc<std::sync::Mutex<Vec<u8>>>;
+
+fn serve_unix(path: std::path::PathBuf, body: String, tap: ServiceTap) {
     let listener = UnixListener::bind(&path).expect("the fake Docker socket");
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
             let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf);
+            let n = stream.read(&mut buf).unwrap_or(0);
+            tap.lock().unwrap().extend_from_slice(&buf[..n]);
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
@@ -127,12 +133,13 @@ fn serve_unix(path: std::path::PathBuf, body: String) {
     });
 }
 
-fn serve_tcp(listener: TcpListener, body: &'static str) {
+fn serve_tcp(listener: TcpListener, body: &'static str, tap: ServiceTap) {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
             let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf);
+            let n = stream.read(&mut buf).unwrap_or(0);
+            tap.lock().unwrap().extend_from_slice(&buf[..n]);
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
@@ -190,7 +197,8 @@ impl Pep {
         // The service: a fake Docker socket that lists one container, and a fake page of actions.
         let actions = TcpListener::bind("127.0.0.1:0").unwrap();
         let actions_port = actions.local_addr().unwrap().port();
-        serve_tcp(actions, DOCUMENT);
+        let tap = ServiceTap::default();
+        serve_tcp(actions, DOCUMENT, tap.clone());
         let containers = json!([{
             "Id": "a", "Names": ["/db"], "State": "running", "Status": "Up 1 minute",
             "Labels": {
@@ -198,7 +206,7 @@ impl Pep {
                 "portal.actions": format!("http://127.0.0.1:{actions_port}/.well-known/procurauth/actions"),
             }
         }]);
-        serve_unix(dir.join("docker.sock"), containers.to_string());
+        serve_unix(dir.join("docker.sock"), containers.to_string(), tap.clone());
 
         // The files of the blocks.
         portal_ok(&["inbox", "content-key", "--out", &p("content_key")]);
@@ -248,6 +256,7 @@ discovery {{
             pdp_port,
             key_id: String::new(),
             key_text: String::new(),
+            service_tap: tap,
         };
         pep.make_owner_and_key(agents, questions);
         pep
@@ -422,6 +431,16 @@ discovery {{
     /// A key of the kind `mcp` for the questions (lot L13): it holds `question.ask` and `question.cancel`, and its
     /// `interaction` is `conversational` or `one_shot`. The result is the id of the key and its text.
     pub fn make_question_key(&self, name: &str, interaction: &str) -> (String, String) {
+        self.make_question_key_with(name, interaction, "")
+    }
+
+    /// The same, with more fields in the form of the key, such as `&grant2=...&limit2.questions.hour=3` (a budget).
+    pub fn make_question_key_with(
+        &self,
+        name: &str,
+        interaction: &str,
+        more: &str,
+    ) -> (String, String) {
         let s = &self.s;
         let cookie = self.cookie(OWNER);
         let host = format!("127.0.0.1:{}", s.port);
@@ -442,7 +461,7 @@ discovery {{
             "csrf={csrf}&kind=mcp&name={name}&expires_at=&interaction={interaction}&grant0={}&grant1={}",
             form_value("question.ask on service:portal"),
             form_value("question.cancel on service:portal"),
-        );
+        ) + more;
         let (st, _, page) = http_full(
             s.port,
             &host,
