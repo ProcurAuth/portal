@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::items::{allowed, body_of, id_ok, key_text, no_store};
+use super::items::{allowed, id_ok, key_text, no_store};
 use super::*;
 use crate::inbox::agents::AgentOrigin;
 use crate::inbox::agents::{
@@ -27,9 +27,8 @@ use crate::ui::agents::{
     self as ui_agents, AgentPage, AgentView, AgentsList, AlsoBy, EnrollForm, FirstUse, KeyCounts,
     ListRow, Lookalike, Sender, Similar, TokenPage,
 };
-use crate::ui::items::{Body, Line, StateFilter, Title};
+use crate::ui::items::{Line, StateFilter};
 use crate::users::KeyOwner;
-use inbox_core::proto::Kind;
 
 type Fields = HashMap<String, String>;
 
@@ -493,23 +492,16 @@ async fn draw(
         Ok(rows) => rows,
         Err(_) => return unavailable(),
     };
-    let open_rows: Vec<Loaded> = open_rows
-        .into_iter()
-        .filter(|l| l.item.kind == Kind::Approval)
-        .collect();
     let mut open = Vec::new();
     for l in &open_rows {
-        let title = match body_of(items, l).await {
-            Ok(Body::Shown(t)) => Title::Text(t.title),
-            Ok(Body::Purged) => Title::Purged,
-            _ => Title::Hidden,
-        };
+        let (title, _, note) = super::questions::list_parts(items, l, false).await;
         open.push(Line {
             loaded: l,
             title,
             first_line: None,
             key_name: view.key_name.clone(),
             agent: None,
+            note,
         });
     }
     let answered = match items
@@ -527,7 +519,7 @@ async fn draw(
             .filter(|l| {
                 matches!(
                     StateFilter::of(l),
-                    Some(StateFilter::Approved | StateFilter::Declined)
+                    Some(StateFilter::Approved | StateFilter::Answered | StateFilter::Declined)
                 )
             })
             .count(),

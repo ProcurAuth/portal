@@ -124,38 +124,20 @@ pub(super) async fn open_panel(state: &AppState, ctx: &Context<'_>, now_ms: i64)
     let Ok(rows) = items.list(filter).await else {
         return (String::new(), 0);
     };
-    // The questions have their own page in a later version: the panel lists the approvals.
-    let rows: Vec<Loaded> = rows
-        .into_iter()
-        .filter(|l| l.item.kind == Kind::Approval)
-        .collect();
     let count = rows.len() as u32;
     let Some(roster) = super::agents::Roster::of(&items, &ctx.viewer.login, None).await else {
         return (String::new(), 0);
     };
     let mut groups: Vec<ui_items::Group> = Vec::new();
     for l in &rows {
-        let (title, first_line) = match body_of(&items, l).await {
-            Ok(Body::Shown(t)) => {
-                let first = t
-                    .command
-                    .lines()
-                    .next()
-                    .unwrap_or_default()
-                    .chars()
-                    .take(200)
-                    .collect();
-                (Title::Text(t.title), Some(first))
-            }
-            Ok(Body::Purged) => (Title::Purged, None),
-            _ => (Title::Hidden, None),
-        };
+        let (title, first_line, note) = super::questions::list_parts(&items, l, true).await;
         let line = Line {
             loaded: l,
             title,
             first_line,
             key_name: key_label(state, l),
             agent: None,
+            note,
         };
         match groups
             .iter_mut()
@@ -211,7 +193,7 @@ pub(super) async fn history(state: &Arc<AppState>, ctx: &Context<'_>) -> HttpRes
         .iter()
         .find(|(n, _)| n == "s")
         .and_then(|(_, c)| ui_items::notice_for(c));
-    let all = ctx.held.approval_read;
+    let all = ctx.held.approval_read || ctx.held.question_read;
     // The filter `agent=` names an agent. A merged agent gives its target.
     let (agent_id, agent_filter) = match &query.agent {
         Some(id) => {
@@ -237,7 +219,14 @@ pub(super) async fn history(state: &Arc<AppState>, ctx: &Context<'_>) -> HttpRes
     let truncated = rows.len() as u32 >= HISTORY_ROWS;
     let rows: Vec<Loaded> = rows
         .into_iter()
-        .filter(|l| l.item.kind == Kind::Approval && l.item.created_at >= since)
+        .filter(|l| l.item.created_at >= since)
+        .filter(|l| {
+            l.item.requester_owner == ctx.viewer.login
+                || match l.item.kind {
+                    Kind::Approval => ctx.held.approval_read,
+                    _ => ctx.held.question_read,
+                }
+        })
         .filter(|l| key_part.is_empty() || key_label(state, l).to_lowercase().contains(&key_part))
         .filter(|l| {
             svc_part.is_empty()
@@ -268,17 +257,14 @@ pub(super) async fn history(state: &Arc<AppState>, ctx: &Context<'_>) -> HttpRes
         let title = if l.item.requester_owner != ctx.viewer.login {
             Title::Hidden
         } else {
-            match body_of(&items, l).await {
-                Ok(Body::Shown(t)) => Title::Text(t.title),
-                Ok(Body::Purged) => Title::Purged,
-                _ => Title::Hidden,
-            }
+            super::questions::list_parts(&items, l, false).await.0
         };
         lines.push((
             Line {
                 loaded: l,
                 title,
                 first_line: None,
+                note: None,
                 key_name: key_label(state, l),
                 agent: tags.get(&l.item.agent_id).map(|t| ui_items::AgentTag {
                     agent_id: t.agent_id.clone(),
@@ -393,7 +379,8 @@ fn turns_of(items_turns: Vec<crate::inbox::page_items::TurnPlain>) -> Vec<Turn> 
         .collect()
 }
 
-/// The page of one request: `rest` is the id. `body` is the route of the administrator.
+/// The page of one request: `rest` is the id. `body` is the route of the administrator. A question has its page in
+/// `questions.rs`.
 pub(super) async fn detail(
     state: &Arc<AppState>,
     ctx: &Context<'_>,
@@ -452,17 +439,30 @@ pub(super) async fn detail(
     };
     let (loaded, mut mode) = match own {
         Some(l) => (l, Mode::Owner),
-        None if ctx.held.approval_read || admin_body => {
+        None if ctx.held.approval_read || ctx.held.question_read || admin_body => {
             match items.get(id, &Caller::System).await {
-                Ok(Some(l)) => (l, Mode::Admin),
-                Ok(None) => return not_found(),
+                // The right of the account is the right of the kind of the item.
+                Ok(Some(l))
+                    if admin_body
+                        || match l.item.kind {
+                            Kind::Approval => ctx.held.approval_read,
+                            _ => ctx.held.question_read,
+                        } =>
+                {
+                    (l, Mode::Admin)
+                }
+                Ok(_) => return not_found(),
                 Err(_) => return unavailable(),
             }
         }
         None => return not_found(),
     };
-    if loaded.item.kind != Kind::Approval {
-        return not_found();
+    if loaded.item.kind == Kind::Question {
+        let draft = None;
+        return super::questions::detail(
+            state, ctx, &items, loaded, mode, admin_body, notice, status, full, draft,
+        )
+        .await;
     }
     let body = if admin_body {
         match items.serve_body(&loaded).await {
@@ -580,7 +580,7 @@ pub(super) async fn limits(state: &Arc<AppState>, ctx: &Context<'_>) -> HttpResp
 
 type Fields = std::collections::HashMap<String, String>;
 
-fn back(id: &str, code: &str) -> HttpResponse {
+pub(super) fn back(id: &str, code: &str) -> HttpResponse {
     redirect_response(
         StatusCode::SEE_OTHER,
         &format!("{}/{id}?s={code}", ui_items::ITEMS),
@@ -761,11 +761,17 @@ pub(super) async fn reply(state: &Arc<AppState>, ctx: &Context<'_>, mut f: Field
     if ctx.viewer.session.impersonated || !allowed(ctx) {
         return forbidden();
     }
-    if text.trim().is_empty() {
-        return back(&id, "no_text_given");
-    }
-    if !text_ok(&text, ui_items::MAX_REPLY_CHARS) {
-        return back(&id, "too_long");
+    for (bad, code) in [
+        (text.trim().is_empty(), "no_text_given"),
+        (!text_ok(&text, ui_items::MAX_REPLY_CHARS), "too_long"),
+    ] {
+        if bad {
+            // A question shows the page again with the text that the owner typed.
+            return match super::questions::ask_refused(state, ctx, &id, &text, code).await {
+                Some(page) => page,
+                None => back(&id, code),
+            };
+        }
     }
     let Some(items) = ctx.app.items() else {
         return not_found();
@@ -811,12 +817,29 @@ pub(super) async fn cancel(
     if !f.is_empty() || !id_ok(&id) {
         return bad_request();
     }
-    if ctx.viewer.session.impersonated || !ctx.held.approval_cancel || !engine(ctx) {
+    if ctx.viewer.session.impersonated
+        || !(ctx.held.approval_cancel || ctx.held.question_cancel)
+        || !engine(ctx)
+    {
         return forbidden();
     }
     let Some(items) = ctx.app.items() else {
         return not_found();
     };
+    // The right is the right of the kind of the item: `approval.cancel` or `question.cancel`.
+    match items.get(&id, &Caller::System).await {
+        Ok(Some(l)) => {
+            let allowed = match l.item.kind {
+                Kind::Approval => ctx.held.approval_cancel,
+                _ => ctx.held.question_cancel,
+            };
+            if !allowed {
+                return forbidden();
+            }
+        }
+        Ok(None) => return back(&id, "gone"),
+        Err(_) => return back(&id, "failed"),
+    }
     let by = CancelBy::System {
         reason: "admin_cancelled",
         actor: format!("user:{}", ctx.viewer.login),

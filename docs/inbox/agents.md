@@ -368,6 +368,16 @@ When the person answers, `get_answer` gives `status` `answered` and the member `
 - `age_at_answer_s` tells how old the question was. An old answer can be stale.
 - The status `abandoned` is not a refusal. It means that you did not renew the lease. `expired` means that `until` or the life of the thread ended.
 
+### What the person sees on the web
+
+The owner can answer on the web page of the question or on the phone. The web page shows your title, the command, the explanation and the options. Each of these texts comes from you, so the page marks it "Not checked" and shows each hidden character as a mark.
+
+The page shows the rows under the options from your two flags, with the same table as the phone. A closed question has no row. The page never ticks an option, also when you send a `hint`. The hint shows above the options with its confidence.
+
+The server checks each web answer with the check of the phone. An answer from the web reaches you as in "The answer". A free text has 2000 characters at most. The portal refuses a longer text, and you never read it.
+
+A question from a key `one_shot` shows the header "Automatic system (no conversation)". The page has no field and no discussion for it.
+
 ### The thread
 
 With `allow_ask_back`, the person can ask you a question. The status is `replied`, and the message is in `untrusted.messages`. Answer with `say`. Send `expect_seq` with the `last_seq` that you read: a newer turn gives `409 stale_thread`. A turn has 4000 characters at most.

@@ -1204,7 +1204,7 @@ An agent can ask the owner of its key to approve an action. The owner answers on
 | Page | Address | Needs |
 |---|---|---|
 | Panel **Open items** | `/auth/settings/inbox` | A request that waits for the account. The panel is absent when nothing waits. |
-| **History** | `/auth/settings/inbox/items` | The account owns keys, or it holds `approval.read`. |
+| **History** | `/auth/settings/inbox/items` | The account owns keys, or it holds `approval.read` or `question.read`. |
 | One request | `/auth/settings/inbox/items/{id}` | The owner of the request, or `approval.read` for the metadata. |
 | Content for the administrator | `/auth/settings/inbox/items/{id}/body` | The superadmin, and `inbox.at_rest.admin_body_read = true`. Else the route answers `404`. |
 | **Agents** | `/auth/settings/inbox/agents` | The block `inbox.agents`. It lists the agents of the account. |
@@ -1413,6 +1413,30 @@ A key `one_shot` is an automatic system. Its screen has the header "Automatic sy
 Send asks for the fingerprint or the device PIN. **Decline to answer** asks for nothing. The phone saves the answer in its outbox and sends it again after each reconnection, until the portal gives the result. When the agent is new and `inbox.agents.lock_new` is true, Send stays off until the owner allows the agent.
 
 The list "Done" shows how each question ended: answered, declined, abandoned, replaced, expired or cancelled. The portal does not send the answer to the other phones. A phone shows what the owner chose only for an answer that it sent itself.
+
+### Questions on the web
+
+The owner answers a question on the web or on the phone. The web page is a second way to answer. It uses the same check as the phone, so both refuse the same answers. The pages need no script. Each page has `Cache-Control: no-store`.
+
+| Page or route | Address | Needs |
+|---|---|---|
+| Panel **Open items** | `/auth/settings/inbox` | A question that waits for the account. The panel lists questions and approvals in one group for each agent. The panel is absent when nothing waits. |
+| One question | `/auth/settings/inbox/items/{id}` | The owner of the question, or `question.read` for the metadata. |
+| Answer or decline | `POST /auth/settings/inbox/items/question` | The owner, the session, the field `csrf` and the right `Origin`. |
+| Ask the agent | `POST /auth/settings/inbox/items/reply` | The owner. The agent must have set `allow_ask_back`. |
+| Content for the administrator | `/auth/settings/inbox/items/{id}/body` | The superadmin and `inbox.at_rest.admin_body_read = true`. Else the route answers `404`. |
+
+- **Zones:** the box "From agent" comes under the title. The command comes next, then the explanation of the agent, then the discussion, then the form. The command has the label "Exact text". The explanation has the label "Not checked" and a dashed edge.
+- **Form:** the form follows `input`. A `choice` is a list of radio buttons, or a list of boxes with `multiple`. The boxes follow `min` and `max`. A `confirm` is Yes and No, and a `text` is a field. A `form` has one block for each question. A `none` message has **Decline to answer** only.
+- **No default:** no option is ticked, also when the agent gives a hint. The hint shows above the options with the label "Not checked" and its confidence.
+- **Rows:** the two flags of the agent decide the rows under the options. The page and the phone use the same table. With no flag, the question is closed. `allow_custom` adds the row "Other answer", and its text ends the question. `allow_ask_back` adds the row "Ask the agent", and its text is not an answer. A `text` question has no row "Other answer".
+- **Free text:** each free field shows the warning "Do not enter a password or a secret". A free text has 2000 characters at most. A text of only spaces is not an answer. The page never changes a text. A mistake gives the page again with status `422`, the mistake on its block and the text that the owner typed.
+- **Other answer:** the free text and the ticks exclude each other. A text with nothing else chosen is the free answer. A text with a tick is a mistake, and the page says so.
+- **Automatic system:** a question of a `one_shot` key shows the header "Automatic system (no conversation)". It has no field, no row and no discussion. The server also refuses a text or a reply for it.
+- **Lock of a new agent:** with `inbox.agents.lock_new = true`, Send stays off for the question of a new agent. A form that forges the answer gets `409` and the page that says why. **Decline to answer** and **Ask the agent** stay on.
+- **A closed question:** an answer for a closed question gets `409` and the page of the question with a notice. The page shows how the question ended: answered, declined, abandoned, replaced, expired or cancelled. An abandoned question is not a decline. A replaced question has a link to the new one.
+- **Answered:** the page shows what the owner chose, the free text, the choices that the owner did not tick, and the messages of the discussion.
+- **Safety:** a session that the superadmin opens as another account answers nothing. An account that does not own the question gets the answer of an unknown question. An account with `question.cancel` sees the button **Cancel this question**. The page shows each hidden character as a mark and never shows an agent token.
 
 ### Stop
 

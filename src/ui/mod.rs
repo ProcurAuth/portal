@@ -30,6 +30,8 @@ pub mod mfa;
 pub mod minify;
 pub mod notify;
 pub mod prefs;
+pub mod question_page;
+pub mod questions;
 pub mod settings;
 pub mod signin;
 
