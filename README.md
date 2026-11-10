@@ -1389,6 +1389,24 @@ The preferences have effect in two places. A `request` that arrives inside the q
 
 The task of the digest writes one row of kind `digest` for each owner at each due time. The key of the row has the login and the due time, so several instances write one row. The session of a phone builds the frame `digest` from the open items when it sends the row. It withdraws the row when no item is open.
 
+### Questions on the phone
+
+The phone shows a question on its own screen. The owner opens it from the list "To answer", from the list "Done" or from the screen of an agent. Only the owner answers.
+
+The screen has the box "From agent" under the title. The command of the agent comes first, in a fixed font, with a Copy button. The explanation of the agent comes below it. It shows in a dashed zone with the label "Not checked". The phone shows each hidden character of these texts as a mark.
+
+A question is a list of options, a yes or no, a text field, or a form of one to four questions. A list with `multiple` takes the number of ticks that `min` and `max` give. Send stays off until each question has an answer that the server accepts.
+
+The two flags of the agent decide the rows under the options. With no flag, the question is closed: the owner chooses or declines. `allow_custom` adds the row "Other answer". Its text is the answer, and it replaces the ticks.
+
+`allow_ask_back` adds the row "Ask the agent a question". This row opens the discussion and is not an answer. Each free field shows the warning "Do not enter a password or a secret".
+
+A key `one_shot` is an automatic system. Its screen has the header "Automatic system (no conversation)". It shows the suggestion and its confidence above the options. It has no free field and no discussion.
+
+Send asks for the fingerprint or the device PIN. **Decline to answer** asks for nothing. The phone saves the answer in its outbox and sends it again after each reconnection, until the portal gives the result. When the agent is new and `inbox.agents.lock_new` is true, Send stays off until the owner allows the agent.
+
+The list "Done" shows how each question ended: answered, declined, abandoned, replaced, expired or cancelled. The portal does not send the answer to the other phones. A phone shows what the owner chose only for an answer that it sent itself.
+
 ### Stop
 
 On SIGTERM, the Inbox tells each phone to reconnect with the close code 1012. It still serves for 5 seconds. Then it closes its listeners and waits for the sessions at most 10 seconds. It writes what the memory holds to the database. With the block `inbox.replica`, it takes a last copy and gives the lease back, so a standby instance takes over at once.

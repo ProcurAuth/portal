@@ -146,11 +146,11 @@ class ItemListOrderTest {
     }
 
     @Test
-    fun aQuestionRowShowsTheKindOfAnswerAndIsNotOpenableYet() {
+    fun aQuestionRowShowsTheKindOfAnswerAndOpensItsScreen() {
         val r = ItemListOrder.row(question(1, t0), now)
         assertEquals(ItemListOrder.Chip.QUESTION, r.chip)
         assertNull(r.code)
-        assertFalse(r.openable)
+        assertTrue(r.openable)
         assertTrue(r.subtitle.contains("choices"))
         assertTrue(r.detail.startsWith("Agent active"))
     }

@@ -86,6 +86,7 @@ object OutboxAnswer {
         is Submit.Refused -> when (s.reason) {
             Refusal.NOT_FOUND -> "This request is gone."
             Refusal.NOT_AN_APPROVAL -> "This is not an approval."
+            Refusal.NOT_A_QUESTION -> "This request takes no answer here."
             Refusal.NOT_OPEN -> "This request is closed."
             Refusal.INVALID_REQUEST -> "Invalid request. The phone does not approve it."
             Refusal.ALREADY_QUEUED -> "An answer is already on its way."

@@ -204,7 +204,6 @@
     <string name="done_title">Done</string>
     <string name="done_link">Done (%1$d)</string>
     <string name="done_empty">Nothing finished yet.</string>
-    <string name="question_later">Questions open in a later version of the app.</string>
     <string name="chip_approval">Approval</string>
     <string name="chip_question">Question</string>
     <string name="chip_decision">Decision</string>
@@ -255,7 +254,6 @@
     <string name="thread_open_request">Open the request</string>
     <string name="thread_open_new">Open the new request</string>
     <string name="thread_choices">Choices: %1$s</string>
-    <string name="thread_choices_later">Answer a question on its own screen.</string>
     <string name="thread_send">Send</string>
     <string name="thread_gone">This discussion is not on this phone any more.</string>
     <string name="thread_code_copied">Copied</string>

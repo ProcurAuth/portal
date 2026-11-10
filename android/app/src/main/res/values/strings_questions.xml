@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The screen of a question (lot A4). ASCII only. The sentences that depend on data are in the pure classes of the package ui
+         (QuestionState, QuestionHistory, AnswerSheet), so that a JVM test reads them. -->
+    <string name="question_command">Command</string>
+    <string name="question_command_from_agent">From the agent</string>
+    <string name="question_your_answer">Your answer</string>
+    <string name="question_suggestion">Suggestion</string>
+    <string name="question_suggestion_confidence">%1$d %%</string>
+    <string name="question_type_your_answer">Type your answer</string>
+    <string name="question_other_hint">Type your answer</string>
+    <string name="question_exclusive">Exclusive</string>
+    <string name="question_not_answered">Not answered</string>
+    <string name="question_answered">Answered</string>
+    <string name="question_max_reached">You chose the most that this question takes.</string>
+    <string name="question_not_chosen">Not chosen: %1$s</string>
+    <string name="question_your_own_answer">Your own answer (Other).</string>
+    <string name="question_back_to_list">Back to the list</string>
+    <string name="question_open_new">Open the new question</string>
+    <string name="question_gone">This question is not on this phone any more.</string>
+    <string name="question_changed">The question changed while you were answering. Read it again.</string>
+    <string name="question_no_lock">This phone has no screen lock or fingerprint. Set one to send an answer.</string>
+    <string name="question_answer_to_agent">Answer the question</string>
+</resources>
