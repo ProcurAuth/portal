@@ -93,6 +93,10 @@ pub(crate) mod page_items {
     pub(crate) use super::items::{Caller, Loaded};
     pub(crate) use super::items_ops::{AnswerVia, CancelBy, Cancelled, ListFilter, TurnOut};
     pub(crate) use super::items_store::{Answer, Answered, ItemError, Items, Served, TurnPlain};
+    /// The check of the answer of a question: the phone and the web page share it. `Items::answer` calls it, so a page
+    /// that answers a question needs no check of its own.
+    #[allow(unused_imports)]
+    pub(crate) use super::questions::{check_answer, input_of, AnswerFault};
 }
 /// What the tests of the portal take from the inbox.
 #[cfg(test)]

@@ -57,6 +57,8 @@ fn agent_rig_full(backend: &Backend, approvals: &str, blocks: &str, mcp: &str) -
         "data.write on service:db/host:prod",
         "keys.own.use on service:portal/key_kind:mcp",
         "keys.own.use on service:portal/key_kind:api",
+        "question.ask on service:portal",
+        "question.cancel on service:portal",
     ]
     .iter()
     .map(|g| Grant::parse(g).unwrap())
@@ -1440,6 +1442,10 @@ fn get_answer_returns_the_answers_of_a_form_in_untrusted() {
         }
     });
 }
+
+// The tests of lot L13: the questions.
+#[path = "question_tests.rs"]
+mod questions;
 
 // The tests of lot G1b: the agent of a call.
 #[path = "agent_who_tests.rs"]
