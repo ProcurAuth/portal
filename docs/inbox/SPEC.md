@@ -236,7 +236,7 @@ An approval asks the owner of a key to allow one exact action of an agent. The p
 
 3.7.25 **[5.1.0]** The Inbox MUST show a repeat as such. When the same effect was approved and consumed before, the screen says "Same effect approved and consumed 00:20 ago". The portal knows this from the hash. It does not read the text.
 
-3.7.26 **[5.1.0]** The page of the Inbox MUST show a panel "Open items" above the phones only when an item waits. It MUST have a zone "History" with filters. The matrix of the editor MUST have the columns Read and Cancel. It MUST have no column that decides. A lock icon MUST mark an action that has `approval: "optional"`.
+3.7.26 **[5.3.0]** The page of the Inbox MUST show a panel "Open items" above the phones only when an item waits. It MUST have a zone "History" with filters. The matrix of the editor MUST have the columns Read and Cancel. It MUST have no column that decides. A lock icon MUST mark each action of a service other than `portal`, except `access`.
 
 3.7.27 **[5.1.0]** The pages of the items MUST work without script. They MUST carry `Cache-Control: no-store`, and MUST check the CSRF token and the origin on an answer and on a reply. An owner MUST see only the items of the owner. With `web_approval` false, the page MUST list the items and MUST NOT let the owner decide.
 
@@ -750,7 +750,7 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.7.23 | 5.1.0 | A2 | to fill |
 | 3.7.24 | 5.1.0 | L10 | `portal_actions::tests::the_document_has_the_keys_and_the_inbox_in_one_scope`, `items_web_e2e::approval_read_right_shows_metadata_not_body`, `an_account_with_approval_cancel_cancels_an_open_request_and_nobody_else_does` |
 | 3.7.25 | 5.1.0 | L10 | `items_web_e2e::history_filters_chains_and_hides_the_open_items` (the side box says it from the hash), `ui::items::tests::the_command_is_first_and_the_copy_text_is_the_exact_bytes` |
-| 3.7.26 | 5.1.0 | L10 | `items_web_e2e::open_items_zone_renders_with_javascript_disabled`, `history_filters_chains_and_hides_the_open_items`; `tools/dev/ui-check-items.js` |
+| 3.7.26 | 5.3.0 | L10, AP2 | AP2: `ui::grant_editor::tests::each_action_of_a_service_gets_the_lock_but_access_and_the_portal_do_not`. L10:  `items_web_e2e::open_items_zone_renders_with_javascript_disabled`, `history_filters_chains_and_hides_the_open_items`; `tools/dev/ui-check-items.js` |
 | 3.7.27 | 5.1.0 | L10 | `items_web_e2e::no_store_header_on_pages_with_bodies`, `csrf_and_origin_required_on_answer_and_reply`, `owner_sees_only_own_items`, `web_approval_false_lists_only`, `web_and_phone_answer_race_one_accepted` |
 | 3.7.28 | 5.1.0 | L10 | `items_web_e2e::alerts_come_before_the_open_items_and_the_phones_after`; `tools/dev/ui-check-items.js` |
 | 3.7.29 | 5.1.0 | L10 | `items_web_e2e::the_limits_page_shows_the_values_the_sources_and_no_secret`, `ui::items::tests::the_limits_page_hides_a_secret_and_shows_the_source` |
