@@ -58,6 +58,9 @@ mod pg;
 pub mod prefs;
 pub(crate) mod questions;
 mod ratelimit;
+mod rekey;
+#[cfg(test)]
+mod rekey_tests;
 mod replica;
 pub mod rights;
 mod shutdown;

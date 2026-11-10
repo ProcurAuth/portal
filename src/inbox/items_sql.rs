@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use super::db::DbError;
 use super::items::{ApprovalRow, ItemRow, Loaded};
+use super::items_ops::RekeyTable;
 use inbox_core::proto::Kind;
 
 /// A value of a column. A null value has its type, because PostgreSQL checks it.
@@ -425,4 +426,68 @@ impl PrefsRow {
         });
         Prefs { quiet, digest }
     }
+}
+
+/// The columns of a table that `rekey` seals again: the table, the column of the id, the column of the sequence number
+/// (a turn only), the column of the key id and the column of the sealed value.
+fn rekey_columns(table: RekeyTable) -> (&'static str, &'static str, &'static str, &'static str) {
+    match table {
+        RekeyTable::Items => ("items", "request_id", "body_kid", "body_ct"),
+        RekeyTable::Turns => ("turns", "request_id", "body_kid", "payload_ct"),
+        RekeyTable::Intents => ("approval_intents", "ref_digest", "body_kid", "body_ct"),
+        RekeyTable::Hints => ("agents", "agent_id", "hints_kid", "hints_ct"),
+    }
+}
+
+/// The page of `rekey`. The values come in this order: the active key id, the id `from` (empty: any key), the id after
+/// which the page starts, the sequence number after which it starts (a turn only), the limit. The columns of the
+/// result are the id, the sequence number, the effect, the key id and the sealed value.
+pub fn rekey_page_sql(table: RekeyTable, ph: &dyn Fn(usize) -> String) -> String {
+    let (name, id, kid, ct) = rekey_columns(table);
+    let filter = format!(
+        "t.{ct} IS NOT NULL AND t.{kid} IS NOT NULL AND t.{kid} <> {} AND ({} = '' OR t.{kid} = {})",
+        ph(1),
+        ph(2),
+        ph(2)
+    );
+    match table {
+        RekeyTable::Items => format!(
+            "SELECT t.{id}, CAST(0 AS BIGINT), a.effect, t.{kid}, t.{ct} FROM {name} t LEFT JOIN approvals a ON a.request_id = t.request_id
+             WHERE {filter} AND t.{id} > {} ORDER BY t.{id} LIMIT {}",
+            ph(3),
+            ph(4)
+        ),
+        RekeyTable::Turns => format!(
+            "SELECT t.{id}, t.seq, CAST(NULL AS TEXT), t.{kid}, t.{ct} FROM {name} t
+             WHERE {filter} AND (t.{id} > {} OR (t.{id} = {} AND t.seq > {})) ORDER BY t.{id}, t.seq LIMIT {}",
+            ph(3),
+            ph(3),
+            ph(4),
+            ph(5)
+        ),
+        RekeyTable::Intents | RekeyTable::Hints => format!(
+            "SELECT t.{id}, CAST(0 AS BIGINT), CAST(NULL AS TEXT), t.{kid}, t.{ct} FROM {name} t
+             WHERE {filter} AND t.{id} > {} ORDER BY t.{id} LIMIT {}",
+            ph(3),
+            ph(4)
+        ),
+    }
+}
+
+/// The compare-and-set of `rekey`. The values come in this order: the new key id, the new sealed value, the id, the
+/// sequence number (a turn only), the old sealed value. The statement changes no other column.
+pub fn rekey_swap_sql(table: RekeyTable, ph: &dyn Fn(usize) -> String) -> String {
+    let (name, id, kid, ct) = rekey_columns(table);
+    let (seq, old) = if table == RekeyTable::Turns {
+        (format!(" AND seq = {}", ph(4)), ph(5))
+    } else {
+        (String::new(), ph(4))
+    };
+    format!(
+        "UPDATE {name} SET {kid} = {}, {ct} = {} WHERE {id} = {}{seq} AND {ct} = {}",
+        ph(1),
+        ph(2),
+        ph(3),
+        old
+    )
 }

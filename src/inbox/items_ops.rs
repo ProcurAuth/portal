@@ -307,6 +307,78 @@ pub trait ItemTx: super::agents_ops::AgentTx {
         kid: &str,
         now: i64,
     ) -> impl Future<Output = Result<(u64, u64, u64, u64), DbError>>;
+    // The command `rekey` (see `rekey.rs`).
+    /// One page of the sealed values that `rekey` has to seal again: the rows of `table` after `after`, in the order of
+    /// the key, whose key id is not `active` and, when `from` is not empty, is `from`.
+    fn rekey_page(
+        &mut self,
+        table: RekeyTable,
+        active: &str,
+        from: &str,
+        after: &RekeyCursor,
+        limit: u32,
+    ) -> impl Future<Output = Result<Vec<RekeyRow>, DbError>>;
+    /// Replaces the sealed value of a row by `new`, only when the row still holds the sealed value `old`. The result
+    /// is `false` when another writer changed the row: the command does not overwrite it.
+    fn rekey_swap(
+        &mut self,
+        table: RekeyTable,
+        row: &RekeyRow,
+        new: &Sealed,
+    ) -> impl Future<Output = Result<bool, DbError>>;
+    /// Drops the check value of the key `kid` when no sealed value uses the key. The result tells whether it dropped.
+    fn drop_key_check(&mut self, kid: &str) -> impl Future<Output = Result<bool, DbError>>;
+}
+
+/// The tables that hold sealed values. The field of each one is the field of the associated data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RekeyTable {
+    /// `items.body_ct`.
+    Items,
+    /// `turns.payload_ct`.
+    Turns,
+    /// `approval_intents.body_ct`.
+    Intents,
+    /// `agents.hints_ct`.
+    Hints,
+}
+
+impl RekeyTable {
+    /// All the tables, in the order of the report.
+    pub const ALL: [RekeyTable; 4] = [
+        RekeyTable::Items,
+        RekeyTable::Turns,
+        RekeyTable::Intents,
+        RekeyTable::Hints,
+    ];
+
+    /// The name that the report uses.
+    pub fn label(self) -> &'static str {
+        match self {
+            RekeyTable::Items => "items",
+            RekeyTable::Turns => "turns",
+            RekeyTable::Intents => "intents",
+            RekeyTable::Hints => "agent hints",
+        }
+    }
+}
+
+/// The place after which a page of `rekey` starts: the id of the row (the request id, the digest of the reference or the
+/// id of the agent) and the sequence number of a turn.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RekeyCursor {
+    pub id: String,
+    pub seq: i64,
+}
+
+/// A sealed value that `rekey` reads, with what its associated data needs.
+#[derive(Clone, Debug)]
+pub struct RekeyRow {
+    pub id: String,
+    pub seq: i64,
+    /// The effect of an approval. `None` for a question, a turn, an intent and a hint.
+    pub effect: Option<String>,
+    pub sealed: Sealed,
 }
 
 /// The tables that a version 5.1 needs for the items. A database that lacks one was made by a version 5.0.

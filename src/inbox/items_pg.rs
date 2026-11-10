@@ -8,10 +8,13 @@ use tokio_postgres::types::ToSql;
 
 use super::db::DbError;
 use super::items::{Loaded, NewEvent, Notice, OwnerAlert, Rules};
-use super::items_ops::{IntentRow, ItemDelivery, ItemTx, ListFilter, Scope, Sealed, TurnRow};
+use super::items_ops::{
+    IntentRow, ItemDelivery, ItemTx, ListFilter, RekeyCursor, RekeyRow, RekeyTable, Scope, Sealed,
+    TurnRow,
+};
 use super::items_sql::{
-    approval_write_values, decode, insert_sql, item_values, select_sql, update_sql, Cols, PrefsRow,
-    APPROVAL_WRITE_COLUMNS, ITEM_COLUMNS, V,
+    approval_write_values, decode, insert_sql, item_values, rekey_page_sql, rekey_swap_sql,
+    select_sql, update_sql, Cols, PrefsRow, APPROVAL_WRITE_COLUMNS, ITEM_COLUMNS, V,
 };
 use super::pg::{db_error, LOCK_ITEMS, WAKE_CHUNK};
 use inbox_core::proto::Prefs;
@@ -919,5 +922,71 @@ impl ItemTx for PgTx<'_> {
             )
             .await?;
         Ok((items, turns, intents, agents))
+    }
+
+    async fn rekey_page(
+        &mut self,
+        table: RekeyTable,
+        active: &str,
+        from: &str,
+        after: &RekeyCursor,
+        limit: u32,
+    ) -> Result<Vec<RekeyRow>, DbError> {
+        let sql = rekey_page_sql(table, &ph);
+        let mut args: Vec<Arg> = vec![
+            Box::new(active.to_string()),
+            Box::new(from.to_string()),
+            Box::new(after.id.clone()),
+        ];
+        if table == RekeyTable::Turns {
+            args.push(Box::new(after.seq));
+        }
+        args.push(Box::new(i64::from(limit)));
+        let rows = self.rows(&sql, &args).await?;
+        Ok(rows
+            .iter()
+            .map(|r| RekeyRow {
+                id: r.get(0),
+                seq: r.get(1),
+                effect: r.get(2),
+                sealed: Sealed {
+                    kid: r.get(3),
+                    ct: r.get(4),
+                },
+            })
+            .collect())
+    }
+
+    async fn rekey_swap(
+        &mut self,
+        table: RekeyTable,
+        row: &RekeyRow,
+        new: &Sealed,
+    ) -> Result<bool, DbError> {
+        let sql = rekey_swap_sql(table, &ph);
+        let mut args: Vec<Arg> = vec![
+            Box::new(new.kid.clone()),
+            Box::new(new.ct.clone()),
+            Box::new(row.id.clone()),
+        ];
+        if table == RekeyTable::Turns {
+            args.push(Box::new(row.seq));
+        }
+        args.push(Box::new(row.sealed.ct.clone()));
+        Ok(self.run(&sql, &args).await? == 1)
+    }
+
+    async fn drop_key_check(&mut self, kid: &str) -> Result<bool, DbError> {
+        let used = self.kid_counts().await?;
+        if used.iter().any(|(k, n)| k == kid && *n > 0) {
+            return Ok(false);
+        }
+        let n = self
+            .run(
+                "DELETE FROM content_key_check WHERE body_kid = $1",
+                &one(kid.to_string()),
+            )
+            .await?;
+        Ok(n > 0)
     }
 }
