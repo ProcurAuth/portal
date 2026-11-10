@@ -309,7 +309,7 @@ fn hint_box(h: &Hint, sheet: Option<&Sheet>) -> String {
         })
         .unwrap_or_default();
     format!(
-        r#"<div class="auto" role="note"><div class="auto__row"><b>Suggestion (not checked): {}</b>{meter}</div><span class="note">Not checked. {} suggests this answer. You decide.</span></div>"#,
+        r#"<div class="auto" role="note"><div class="auto__row"><b>Suggestion (not checked): {}</b>{meter}<span class="muted">Source: {}</span></div><span class="note">Not checked. The sender suggests this answer. You decide.</span></div>"#,
         html::escape(&label),
         html::escape(&h.source),
     )
@@ -981,12 +981,15 @@ pub fn question_page(frame: &Frame, d: &QDetail, notice: Option<Notice>) -> Stri
             if let Some(c) = &t.command {
                 main.push_str(&command_zone(d, c));
             }
-            main.push_str(&explanation_block(
-                t.explanation.as_deref(),
-                t.format,
-                d.full,
-                &detail_href(l),
-            ));
+            // A question has no explanation zone when the agent wrote none.
+            if t.explanation.is_some() {
+                main.push_str(&explanation_block(
+                    t.explanation.as_deref(),
+                    t.format,
+                    d.full,
+                    &detail_href(l),
+                ));
+            }
             main.push_str(&discussion(d));
             if owner_open {
                 main.push_str(&answer_form(d, t));

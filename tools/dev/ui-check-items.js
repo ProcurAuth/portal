@@ -165,12 +165,10 @@ async function questions(browser, owner, root) {
     check("a choice goes through", page.url().includes("s=q_answered") && (await page.content()).includes("Your answer is sent to the agent."), page.url());
     check("the answered page shows the choice and no form", (await page.locator("button[value=accept]").count()) === 0 && (await page.locator(".ans__list li").count()) === 1, "");
     await shot(page, "q-answered-web.390.dark");
-    // A text over the limit: the error shows and the typed text stays.
+    // The field stops at 2000 characters: the browser cuts a longer text, and the server refuses a longer one (tests/questions_web_e2e.rs).
     await fresh(IDS.text);
-    const long = "x".repeat(2100);
-    await page.fill("textarea[name=b0t]", long);
-    await Promise.all([page.waitForNavigation(), page.click("button[value=accept]")]);
-    check("a text over 2000 characters is refused and kept", (await page.content()).includes("The text has 2100 characters. The limit is 2000.") && (await page.inputValue("textarea[name=b0t]")) === long, "");
+    check("the text field stops at 2000 characters", (await page.getAttribute("textarea[name=b0t]", "maxlength")) === "2000", "");
+    check("the secret warning is under the field", (await page.content()).includes("Do not enter a password or a secret"), "");
     await page.fill("textarea[name=b0t]", "Every night, 02:00 to 05:00.");
     await Promise.all([page.waitForNavigation(), page.click("button[value=accept]")]);
     check("a text answer goes through", (await page.content()).includes("Every night, 02:00 to 05:00."), page.url());
@@ -178,6 +176,7 @@ async function questions(browser, owner, root) {
     await fresh(IDS.multiple);
     await page.check("input[name=b0o_go]");
     await page.check("input[name=b0o_stage]");
+    await page.check("input[name=b0x]");
     await page.fill("textarea[name=b0t]", "mine");
     await Promise.all([page.waitForNavigation(), page.click("button[value=accept]")]);
     check("the ticks and a text together are refused", (await page.content()).includes("replaces the choices") && (await page.inputValue("textarea[name=b0t]")) === "mine" && (await page.locator("input[name=b0o_go]:checked").count()) === 1, "");
