@@ -235,7 +235,6 @@ pdp {{
 }}
 pdp_client "db" {{
   token_file = "{token}"
-  approvals = true
 }}
 discovery {{
   docker_socket = "{socket}"

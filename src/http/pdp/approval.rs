@@ -108,7 +108,7 @@ pub(super) fn enabled_for(state: &AppState, document: Option<&crate::actions::Do
 
 /// Whether the service may use the approval API: the block `inbox.approvals` exists, and the document of the service
 /// is known and declares `"approval": "optional"` for at least one action.
-pub(super) fn may_use_api(state: &AppState, service: &str) -> bool {
+pub(in crate::http) fn may_use_api(state: &AppState, service: &str) -> bool {
     inbox_has_approvals(state)
         && state
             .actions

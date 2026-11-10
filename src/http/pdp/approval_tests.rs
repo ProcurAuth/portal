@@ -27,6 +27,15 @@ const DOCUMENT: &str = r#"{"server":"db",
   "limits":[
     {"name":"requests","label":"Requests","description":"d","unit":"request","kind":"budget"}]}"#;
 
+/// The document of `db`. `declared` false: no action has `"approval": "optional"`.
+fn document(declared: bool) -> String {
+    if declared {
+        DOCUMENT.to_string()
+    } else {
+        DOCUMENT.replace(r#","approval":"optional""#, "")
+    }
+}
+
 /// The owner that every seeded answer names. No answer of the PDP may hold it.
 const CANARY_OWNER: &str = "canary-owner-5521";
 const ANALYTICS: &str = "host:prod/database:analytics";
@@ -39,9 +48,9 @@ struct Fixture {
     _rig: InboxRig,
 }
 
-/// A server with the inbox and the service `db`. `approvals` is the flag of the block `pdp_client`. The owner `alice`
+/// A server with the inbox and the service `db`. `declared`: the document of `db` declares `"approval": "optional"` on `data.write`. The owner `alice`
 /// has `access` and `data.write` on the host `prod`.
-fn fixture(backend: &Backend, approvals: bool) -> Option<Fixture> {
+fn fixture(backend: &Backend, declared: bool) -> Option<Fixture> {
     let rig = InboxRig::new(backend, "5m")?;
     let port = free_port();
     let mut env = rig.env.clone();
@@ -58,7 +67,7 @@ fn fixture(backend: &Backend, approvals: bool) -> Option<Fixture> {
             r#"identity {{ issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" }}
             pdp {{ listen_address = "127.0.0.1:{port}" url = "http://pdp.test:{port}" plain_http = true max_evaluations = 8 }}
             keys {{}}
-            pdp_client "db" {{ token_env = "TEST_PDP_DB" approvals = {approvals} }}
+            pdp_client "db" {{ token_env = "TEST_PDP_DB" }}
             {}"#,
             rig.config
         ),
@@ -66,7 +75,7 @@ fn fixture(backend: &Backend, approvals: bool) -> Option<Fixture> {
     publish_catalog(&node, &[]);
     node.state.actions.set_document(
         "db",
-        crate::actions::parse("db", DOCUMENT.as_bytes()).unwrap(),
+        crate::actions::parse("db", document(declared).as_bytes()).unwrap(),
     );
     wait_until(std::time::Duration::from_secs(10), || {
         std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
@@ -101,9 +110,9 @@ fn fixture(backend: &Backend, approvals: bool) -> Option<Fixture> {
 }
 
 /// Runs `test` on each backend that can run it.
-fn each_fixture(approvals: bool, test: impl Fn(&Fixture, &str)) {
+fn each_fixture(declared: bool, test: impl Fn(&Fixture, &str)) {
     for backend in backends() {
-        let Some(f) = fixture(&backend, approvals) else {
+        let Some(f) = fixture(&backend, declared) else {
             eprintln!("INBOX_TEST_PG is not set: skipped on PostgreSQL");
             continue;
         };
@@ -554,7 +563,7 @@ fn abandoned_or_lapsed_reads_as_approval_expired() {
 }
 
 #[test]
-fn confirm_with_client_without_approvals_flag_plain_false() {
+fn confirm_on_an_action_without_approval_declaration_plain_false() {
     each_fixture(false, |f, name| {
         let key = f.key("9b1c04e2aa71f0c3", 1, None);
         let e = effect(1);
@@ -570,7 +579,7 @@ fn confirm_with_client_without_approvals_flag_plain_false() {
         let no_effect = f.post(&f.body(&key, "analytics", None, false)).json();
         assert_eq!(no_effect, json!({"decision": false}), "[{name}]");
         assert_eq!(f.metric("not_enabled"), 3, "[{name}]");
-        // The approval stays: no consumption without the flag.
+        // The approval stays: no consumption without the declaration.
         assert_eq!(f.metric("consumed"), 0, "[{name}]");
     });
 }

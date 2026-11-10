@@ -232,8 +232,8 @@ mod conformance_d {
             .filter(|s| !s["id"].as_str().unwrap().contains(':'))
             .count();
         let pdp_port = free_port();
-        // A directory with approvals needs the inbox with its items and the block `inbox.approvals`, and each
-        // server has `approvals = true`. The cases without approvals run as before, with no inbox.
+        // A directory with approvals needs the inbox with its items and the block `inbox.approvals`. The documents of
+        // the servers declare the approval. The cases without approvals run as before, with no inbox.
         let with_approvals = directory.get("approvals").is_some();
         let rig = if with_approvals {
             match InboxRig::new(backend, "5m") {
@@ -250,7 +250,7 @@ mod conformance_d {
         let mut env = Vec::new();
         for (index, service) in services.iter().enumerate() {
             clients.push_str(&format!(
-                "pdp_client \"{}\" {{ token_env = \"CONFORMANCE_TOKEN_{index}\" approvals = {with_approvals} }}\n",
+                "pdp_client \"{}\" {{ token_env = \"CONFORMANCE_TOKEN_{index}\" }}\n",
                 service.id
             ));
             env.push((

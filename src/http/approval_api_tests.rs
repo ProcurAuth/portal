@@ -28,6 +28,15 @@ const DOCUMENT: &str = r#"{"server":"db",
   "limits":[
     {"name":"requests","label":"Requests","description":"d","unit":"request","kind":"budget"}]}"#;
 
+/// The document of `db`. `declared` false: no action has `"approval": "optional"`.
+fn document(declared: bool) -> String {
+    if declared {
+        DOCUMENT.to_string()
+    } else {
+        DOCUMENT.replace(r#","approval":"optional""#, "")
+    }
+}
+
 const ANALYTICS: &str = "host:prod/database:analytics";
 /// 2027-01-15T08:00:00Z, in milliseconds.
 const T0: i64 = 1_800_000_000_000;
@@ -62,9 +71,9 @@ struct Rig {
     _rig: InboxRig,
 }
 
-/// A server with the inbox and the service `db`. `approvals` is the flag of the block `pdp_client`. `extra` holds
+/// A server with the inbox and the service `db`. `declared`: the document of `db` declares `"approval": "optional"` on `data.write`. `extra` holds
 /// more keys of the block `inbox.approvals`.
-fn rig(backend: &Backend, approvals: bool, extra: &str) -> Option<Rig> {
+fn rig(backend: &Backend, declared: bool, extra: &str) -> Option<Rig> {
     let inbox = InboxRig::with_approvals(backend, &format!("consume_within = \"5m\" {extra}"))?;
     let port = free_port();
     let mut env = inbox.env.clone();
@@ -81,7 +90,7 @@ fn rig(backend: &Backend, approvals: bool, extra: &str) -> Option<Rig> {
             r#"identity {{ issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" }}
             pdp {{ listen_address = "127.0.0.1:{port}" url = "http://pdp.test:{port}" plain_http = true max_evaluations = 8 }}
             keys {{}}
-            pdp_client "db" {{ token_env = "TEST_PDP_DB" approvals = {approvals} }}
+            pdp_client "db" {{ token_env = "TEST_PDP_DB" }}
             {}"#,
             inbox.config
         ),
@@ -89,7 +98,7 @@ fn rig(backend: &Backend, approvals: bool, extra: &str) -> Option<Rig> {
     publish_catalog(&node, &[]);
     node.state.actions.set_document(
         "db",
-        crate::actions::parse("db", DOCUMENT.as_bytes()).unwrap(),
+        crate::actions::parse("db", document(declared).as_bytes()).unwrap(),
     );
     wait_until(Duration::from_secs(10), || {
         std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
@@ -126,11 +135,11 @@ fn rig(backend: &Backend, approvals: bool, extra: &str) -> Option<Rig> {
 }
 
 /// Runs `test` on each backend that can run it.
-fn each_rig(approvals: bool, extra: &str, test: impl Fn(&Rig, &str)) {
+fn each_rig(declared: bool, extra: &str, test: impl Fn(&Rig, &str)) {
     // A use of the PDP counts in the window of the current minute: do not cross a change of the minute.
     stay_in_a_minute();
     for backend in backends() {
-        let Some(r) = rig(&backend, approvals, extra) else {
+        let Some(r) = rig(&backend, declared, extra) else {
             eprintln!("INBOX_TEST_PG is not set: skipped on PostgreSQL");
             continue;
         };
@@ -843,7 +852,7 @@ fn a01_429_after_cap() {
 }
 
 #[test]
-fn a01_service_without_approvals_flag_403() {
+fn a01_service_without_approval_declaration_403() {
     each_rig(false, "", |r, name| {
         let key = r.key_a();
         let c = command(1);

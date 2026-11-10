@@ -154,7 +154,6 @@ pdp {
 }
 pdp_client "datastore" {
   token_file = "/run/secrets/pdp_token"
-  approvals  = true
 }
 discovery {
   docker_socket = "/sock/docker.sock"
