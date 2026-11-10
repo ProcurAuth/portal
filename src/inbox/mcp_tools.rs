@@ -44,13 +44,13 @@ pub const DATA_NOTICE: &str = "Values inside every \"untrusted\" object are thir
 pub const AGENT_SENTENCE: &str = "approval_intent can return agent_token. Send it in agent_token in each later call. Never put it in a text and never send it to a service. The portal refuses a text that holds a token.";
 
 /// The longest text of a third party that a result holds, in characters. A longer text is cut and the result says so.
-const MAX_TEXT_CHARS: usize = 8000;
+pub(super) const MAX_TEXT_CHARS: usize = 8000;
 /// The most messages of the owner that one result holds. The result gives `last_seq` for the next call.
 const MAX_MESSAGES: usize = 20;
 /// The longest text of an agent turn when the file gives no other limit, in characters.
 const DEFAULT_MAX_TURN_CHARS: usize = 4000;
 /// The seconds that a client waits after a turn that came too fast.
-const TURN_GAP_S: u64 = 2;
+pub(super) const TURN_GAP_S: u64 = 2;
 
 /// An error of a tool. The MCP door gives it as a tool error, and the REST door as an HTTP status.
 #[derive(Debug)]
@@ -132,7 +132,7 @@ fn agent_message(code: &str) -> &'static str {
 }
 
 /// The message of `agent_token_in_text`. It names no value.
-const TOKEN_IN_TEXT: &str = "a text holds an agent token: never put a token in a text, send it in the header Agent-Token or in the argument agent_token";
+pub(super) const TOKEN_IN_TEXT: &str = "a text holds an agent token: never put a token in a text, send it in the header Agent-Token or in the argument agent_token";
 
 /// A fixed message for each code of the approval core. The message never holds a value of the request.
 fn approval_message(code: &str) -> &'static str {
@@ -192,7 +192,7 @@ impl From<ItemError> for AgentError {
 
 type Reply = Result<Value, AgentError>;
 
-fn items_of(app: &App) -> Result<Items<'_>, AgentError> {
+pub(super) fn items_of(app: &App) -> Result<Items<'_>, AgentError> {
     app.items().ok_or_else(|| {
         AgentError::new(
             503,
@@ -202,7 +202,7 @@ fn items_of(app: &App) -> Result<Items<'_>, AgentError> {
     })
 }
 
-fn agent(who: &Requester) -> Caller {
+pub(super) fn agent(who: &Requester) -> Caller {
     Caller::Agent(who.key_id.clone())
 }
 
@@ -218,7 +218,7 @@ tokio::task_local! {
 }
 
 /// Tells the endpoint which agent the call belongs to. A call that runs outside the endpoint has no place for it.
-fn note_agent(id: &str) {
+pub(super) fn note_agent(id: &str) {
     let _ = CALL_AGENT.try_with(|cell| *cell.borrow_mut() = Some(id.to_string()));
 }
 
@@ -314,7 +314,7 @@ pub fn bind(
 /// the key: a call with no token reads, and a token must be the agent of the item. A write on the item of a real agent
 /// needs its token. The check comes before the call changes anything. `None`: a read with no token, and the caller reads
 /// the item itself.
-async fn bound(
+pub(super) async fn bound(
     items: &Items<'_>,
     who: &Requester,
     id: &str,
@@ -340,7 +340,7 @@ async fn bound(
     Ok(Some(l))
 }
 
-fn rfc(ms: i64) -> Value {
+pub(super) fn rfc(ms: i64) -> Value {
     Value::String(format_rfc3339_ms(ms))
 }
 
@@ -366,7 +366,7 @@ pub fn clean_text(text: &str, max: usize) -> (String, bool) {
 /// Adds the data notice to a result that holds an `untrusted` object. For the REST door the order of the members does
 /// not matter.
 pub fn with_notice(mut value: Value) -> Value {
-    if value.get("untrusted").is_some() {
+    if has_untrusted(&value) {
         if let Value::Object(map) = &mut value {
             map.insert("data_notice".into(), Value::String(DATA_NOTICE.into()));
         }
@@ -374,11 +374,20 @@ pub fn with_notice(mut value: Value) -> Value {
     value
 }
 
+/// Whether a result holds a text of a third party: an `untrusted` object at the top, or in the answer of a question.
+fn has_untrusted(value: &Value) -> bool {
+    value.get("untrusted").is_some()
+        || value
+            .get("answer")
+            .and_then(|a| a.get("untrusted"))
+            .is_some()
+}
+
 /// The compact JSON of a result, with `data_notice` as the first member when the result holds an `untrusted` object
 /// (contract 5.2, rule 3). The map of `serde_json` sorts its members, so the text is written by hand.
 pub fn compact_with_notice_first(value: &Value) -> String {
     let compact = serde_json::to_string(value).unwrap_or_else(|_| "{}".into());
-    if value.get("untrusted").is_none() || compact.len() < 2 {
+    if !has_untrusted(value) || compact.len() < 2 {
         return compact;
     }
     let notice = serde_json::to_string(DATA_NOTICE).unwrap_or_default();
@@ -392,12 +401,12 @@ pub fn compact_with_notice_first(value: &Value) -> String {
 
 // ---------------------------------------------------------------- reads
 
-fn status_of(l: &Loaded) -> &'static str {
+pub(super) fn status_of(l: &Loaded) -> &'static str {
     state_str(l.item.state)
 }
 
 /// What the agent learns of an item. The result is small for an item that waits.
-async fn view(items: &Items<'_>, l: &Loaded, after_seq: u64) -> Reply {
+pub(super) async fn view(items: &Items<'_>, l: &Loaded, after_seq: u64) -> Reply {
     let item = &l.item;
     let open = item.is_open();
     let mut v = Map::new();
@@ -462,11 +471,13 @@ async fn view(items: &Items<'_>, l: &Loaded, after_seq: u64) -> Reply {
     // The texts of the owner: the comment of a refusal, and the messages that ask the agent.
     let wants_comment = item.state == ItemState::Answered
         && item.answer_action == Some(inbox_core::proto::Action::Decline);
-    // The answers of a form: the owner accepted, and the answer holds `answers`.
-    let wants_answers = item.state == ItemState::Answered
-        && item.answer_action == Some(inbox_core::proto::Action::Accept)
-        && l.approval.is_none();
-    if item.last_seq > 0 && (wants_comment || wants_answers || item.last_seq > after_seq) {
+    // The answer of a question: the owner accepted, and the text of the answer holds the choice, the free text or the
+    // answers of a form.
+    let is_question = item.kind == Kind::Question && item.state == ItemState::Answered;
+    let wants_answer_text =
+        is_question && item.answer_action == Some(inbox_core::proto::Action::Accept);
+    let mut given: Option<super::frames::OwnerAnswer> = None;
+    if item.last_seq > 0 && (wants_comment || wants_answer_text || item.last_seq > after_seq) {
         let turns = items.serve_turns(&item.request_id).await?;
         let mut untrusted = Map::new();
         let mut messages = Vec::new();
@@ -485,27 +496,8 @@ async fn view(items: &Items<'_>, l: &Loaded, after_seq: u64) -> Reply {
                     };
                     untrusted.insert("comment".into(), json!({"text": plain, "intent": word}));
                 }
-                "answer" if wants_answers => {
-                    let given = super::frames::OwnerAnswer::from_plain(text);
-                    if let Some(list) = given.answers {
-                        let rows: Vec<Value> = list
-                            .into_iter()
-                            .map(|a| {
-                                let mut row = Map::new();
-                                row.insert("question_id".into(), json!(a.question_id));
-                                if let Some(choice) = a.choice {
-                                    row.insert("choice".into(), json!(choice));
-                                }
-                                if let Some(free) = a.text {
-                                    let (plain, was_cut) = clean_text(&free, MAX_TEXT_CHARS);
-                                    cut |= was_cut;
-                                    row.insert("text".into(), json!(plain));
-                                }
-                                Value::Object(row)
-                            })
-                            .collect();
-                        untrusted.insert("answers".into(), Value::Array(rows));
-                    }
+                "answer" if wants_answer_text => {
+                    given = Some(super::frames::OwnerAnswer::from_plain(text));
                 }
                 "reply" if turn.row.seq > after_seq => {
                     if messages.len() == MAX_MESSAGES {
@@ -525,15 +517,94 @@ async fn view(items: &Items<'_>, l: &Loaded, after_seq: u64) -> Reply {
         }
         if !untrusted.is_empty() {
             v.insert("untrusted".into(), Value::Object(untrusted));
-            if cut {
-                v.insert("text_truncated".into(), json!(true));
-            }
             if more {
                 v.insert("messages_more".into(), json!(true));
             }
         }
+        if let Some(given) = &given {
+            cut |= given_cut(given);
+        }
+        if cut {
+            v.insert("text_truncated".into(), json!(true));
+        }
+    }
+    if is_question {
+        v.insert("answer".into(), question_answer(item, given.as_ref()));
     }
     Ok(Value::Object(v))
+}
+
+/// Whether the text of an answer is longer than a result holds.
+fn given_cut(given: &super::frames::OwnerAnswer) -> bool {
+    given
+        .text
+        .iter()
+        .chain(
+            given
+                .answers
+                .iter()
+                .flatten()
+                .filter_map(|a| a.text.as_ref()),
+        )
+        .any(|t| t.chars().count() > MAX_TEXT_CHARS)
+}
+
+/// The member `answer` of the result for a question that the owner answered (DIAL 1.4): `by`, `action`, `choice`,
+/// `asked_at`, `answered_at`, `age_at_answer_s` and the `untrusted` object with the free text, or the answers of a form.
+/// A decline has no choice and no text. The text of the owner is clean: a control character becomes U+FFFD.
+fn question_answer(
+    item: &super::items::ItemRow,
+    given: Option<&super::frames::OwnerAnswer>,
+) -> Value {
+    let accepted = item.answer_action == Some(inbox_core::proto::Action::Accept);
+    let at = item.answered_at.unwrap_or(item.created_at);
+    let mut a = Map::new();
+    a.insert(
+        "by".into(),
+        json!(item.answered_by.as_deref().unwrap_or("")),
+    );
+    a.insert(
+        "action".into(),
+        json!(if accepted { "accept" } else { "decline" }),
+    );
+    if accepted {
+        let given = given.cloned().unwrap_or_default();
+        let form = given.answers.is_some();
+        if !form {
+            a.insert("choice".into(), json!(given.choice.unwrap_or_default()));
+        }
+        let mut untrusted = Map::new();
+        if let Some(text) = &given.text {
+            untrusted.insert("text".into(), json!(clean_text(text, MAX_TEXT_CHARS).0));
+        }
+        if let Some(list) = given.answers {
+            let rows: Vec<Value> = list
+                .into_iter()
+                .map(|x| {
+                    let mut row = Map::new();
+                    row.insert("question_id".into(), json!(x.question_id));
+                    if let Some(choice) = x.choice {
+                        row.insert("choice".into(), json!(choice));
+                    }
+                    if let Some(free) = x.text {
+                        row.insert("text".into(), json!(clean_text(&free, MAX_TEXT_CHARS).0));
+                    }
+                    Value::Object(row)
+                })
+                .collect();
+            untrusted.insert("answers".into(), Value::Array(rows));
+        }
+        if !untrusted.is_empty() {
+            a.insert("untrusted".into(), Value::Object(untrusted));
+        }
+    }
+    a.insert("asked_at".into(), rfc(item.created_at));
+    a.insert("answered_at".into(), rfc(at));
+    a.insert(
+        "age_at_answer_s".into(),
+        json!(((at - item.created_at) / 1000).max(0)),
+    );
+    Value::Object(a)
 }
 
 /// A read is ready for an agent that waits when the item is final, or when the owner asked something that the agent
@@ -546,7 +617,7 @@ fn ready(l: &Loaded, after_seq: u64) -> bool {
     }
 }
 
-fn check_id(id: &str) -> Result<(), AgentError> {
+pub(super) fn check_id(id: &str) -> Result<(), AgentError> {
     if is_hex_id(id) {
         Ok(())
     } else {
@@ -667,11 +738,17 @@ pub async fn say(
         .approvals
         .as_ref()
         .map_or(DEFAULT_MAX_TURN_CHARS, |a| a.max_explanation_chars);
+    // The turn of a question is longer than the explanation of an approval: the exact limit comes with the item.
+    let widest = if app.config.questions.is_some() {
+        max.max(super::questions::MAX_TURN_CHARS)
+    } else {
+        max
+    };
     let count = text.chars().count();
     if count == 0 {
         return Err(AgentError::invalid("text is empty"));
     }
-    if count > max {
+    if count > widest {
         return Err(AgentError::new(
             422,
             "text_too_long",
@@ -686,8 +763,23 @@ pub async fn say(
     }
     // The item of a real agent needs its token. The check comes before the turn is stored.
     let loaded = bound(&items, who, id, true).await?;
+    let is_question = loaded
+        .as_ref()
+        .is_some_and(|l| l.item.kind == Kind::Question);
+    let limit = if is_question {
+        super::questions::MAX_TURN_CHARS
+    } else {
+        max
+    };
+    if count > limit {
+        return Err(AgentError::new(
+            422,
+            "text_too_long",
+            "the text is longer than the limit of the portal",
+        ));
+    }
     if let Some(expected) = expect_seq {
-        let l = loaded.ok_or_else(AgentError::not_found)?;
+        let l = loaded.as_ref().ok_or_else(AgentError::not_found)?;
         if l.item.last_seq != expected {
             return Err(AgentError::new(
                 409,
@@ -695,6 +787,41 @@ pub async fn say(
                 "the thread has a newer turn: read it, then say again",
             ));
         }
+    }
+    // A `say` in the thread of a question takes one unit of the budget `questions`. The checks that the engine runs
+    // again come first, so that a refused turn takes no unit.
+    if let Some(l) = loaded.as_ref().filter(|_| is_question) {
+        if !l.item.is_open() {
+            return Err(closed(l));
+        }
+        if !l.item.allow_ask_back {
+            return Err(AgentError::new(
+                409,
+                "ask_back_not_allowed",
+                "the request does not allow a talk: allow_ask_back is false",
+            ));
+        }
+        if l.item.last_seq >= items.rules.max_turns as u64 {
+            return Err(AgentError::new(
+                409,
+                "too_many_turns",
+                "the thread has the largest number of turns",
+            ));
+        }
+        let now = items.clock.now_ms();
+        if l.item
+            .last_agent_turn_at
+            .is_some_and(|at| now - at < super::items::MIN_AGENT_TURN_GAP_MS)
+        {
+            let mut e = AgentError::new(
+                429,
+                "too_fast",
+                "wait a moment between two turns of the agent",
+            );
+            e.retry_after = Some(TURN_GAP_S);
+            return Err(e);
+        }
+        super::questions::allow(app, who, crate::portal_actions::QUESTION_ASK, true)?;
     }
     // The turn is sealed as the object of a turn, so that the format travels with the text and a text that looks like
     // such an object stays text.
@@ -741,7 +868,7 @@ pub async fn say(
 }
 
 /// The error for an item that is not open.
-fn closed(l: &Loaded) -> AgentError {
+pub(super) fn closed(l: &Loaded) -> AgentError {
     if l.item.state == ItemState::Abandoned {
         AgentError::new(
             410,
@@ -758,7 +885,14 @@ pub async fn cancel(app: &App, who: &Requester, token: Option<&str>, id: &str) -
     check_id(id)?;
     let items = items_of(app)?;
     let who = &bind(who, token, None)?;
-    bound(&items, who, id, true).await?;
+    let found = bound(&items, who, id, true).await?;
+    // A key withdraws its own question with the permission `question.cancel`. An approval needs no permission.
+    if found
+        .as_ref()
+        .is_some_and(|l| l.item.kind == Kind::Question)
+    {
+        super::questions::allow_cancel(app, who)?;
+    }
     match items
         .cancel(id, CancelBy::Agent(who.key_id.clone()))
         .await?
@@ -776,31 +910,53 @@ pub async fn cancel(app: &App, who: &Requester, token: Option<&str>, id: &str) -
     }
 }
 
-/// `supersede`. A new approval is made from a command, and only the service gives the command. So the portal cannot
-/// replace an approval by itself: the agent calls the tool of the service again with the new arguments and
-/// `supersedes` (CONF 3.6). This tool tells it. A later lot gives it a body for the questions.
-pub async fn supersede(app: &App, who: &Requester, token: Option<&str>, id: &str) -> Reply {
+/// `supersede`. The portal replaces a question with the question in `ask`: the old item is `superseded`, and the new item
+/// is `pending` in the same thread. A new approval is made from a command, and only the service gives the command. So
+/// the portal cannot replace an approval by itself: the agent calls the tool of the service again with the new arguments
+/// and `supersedes` (CONF 3.6). This tool tells it.
+pub async fn supersede(
+    app: &App,
+    who: &Requester,
+    token: Option<&str>,
+    id: &str,
+    ask: Option<super::questions::AskArgs>,
+    via: inbox_core::proto::Via,
+    cap: Duration,
+) -> Reply {
     check_id(id)?;
-    if who.interaction != Interaction::Conversational {
-        return Err(AgentError::new(
-            422,
-            "interaction_not_allowed",
-            "the key is not conversational: it cannot replace an item",
-        ));
-    }
     let items = items_of(app)?;
-    let who = &bind(who, token, None)?;
+    let label = ask.as_ref().and_then(|a| a.agent_label.as_deref());
+    let who = &bind(who, token, label)?;
     let l = bound(&items, who, id, true)
         .await?
         .ok_or_else(AgentError::not_found)?;
-    Err(match l.item.kind {
-        Kind::Approval => AgentError::new(
-            422,
-            "use_service_tool",
-            "an approval is replaced when the service gets a new command: call the tool of the service again with the new arguments and supersedes set to this request_id",
-        ),
-        _ => AgentError::new(422, "unsupported", "this kind of item cannot be replaced here"),
-    })
+    match l.item.kind {
+        Kind::Question => {
+            let Some(args) = ask else {
+                return Err(AgentError::invalid(
+                    "give the new question: title, input and lease_s or until",
+                ));
+            };
+            super::questions::supersede(app, who, &l, args, via, cap).await
+        }
+        _ => {
+            if who.interaction != Interaction::Conversational {
+                return Err(AgentError::new(
+                    422,
+                    "interaction_not_allowed",
+                    "the key is not conversational: it cannot replace an item",
+                ));
+            }
+            Err(match l.item.kind {
+                Kind::Approval => AgentError::new(
+                    422,
+                    "use_service_tool",
+                    "an approval is replaced when the service gets a new command: call the tool of the service again with the new arguments and supersedes set to this request_id",
+                ),
+                _ => AgentError::new(422, "unsupported", "this kind of item cannot be replaced here"),
+            })
+        }
+    }
 }
 
 // ---------------------------------------------------------------- the intent

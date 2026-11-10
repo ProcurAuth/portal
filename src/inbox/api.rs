@@ -875,6 +875,20 @@ fn body_token(body: &[u8]) -> Result<Option<String>, ApiError> {
     }
 }
 
+/// The body of `POST .../supersede`: the token alone (an approval), or the new question. A body with another member than
+/// `agent_token` is the new question.
+fn supersede_body(
+    body: &[u8],
+) -> Result<(Option<String>, Option<super::questions::AskArgs>), ApiError> {
+    let other = matches!(serde_json::from_slice::<Value>(body), Ok(Value::Object(map))
+        if map.keys().any(|k| k != "agent_token"));
+    if !other {
+        return Ok((body_token(body)?, None));
+    }
+    let args: super::questions::AskArgs = parse_object(&Bytes::copy_from_slice(body))?;
+    Ok((args.agent_token.clone(), Some(args)))
+}
+
 /// The error of the agent core as the REST door answers it.
 fn agent_error(e: super::mcp_tools::AgentError) -> ApiError {
     let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -943,6 +957,73 @@ async fn post_intent_inner(
         StatusCode::CREATED,
         super::mcp_tools::approval_intent(app, &who, args).await,
     )
+}
+
+/// `POST /api/v1/questions`: the agent asks a question to the owner of its key. `201` for a new question, `200` for a repeat
+/// of an earlier call (the same `idempotency_key`). The header `Idempotency-Key` is the same as the member of the body: two
+/// values that differ are refused.
+pub async fn post_question(app: &App, ip: std::net::IpAddr, request: Request<Incoming>) -> Resp {
+    respond(post_question_inner(app, ip, request).await)
+}
+
+async fn post_question_inner(
+    app: &App,
+    ip: std::net::IpAddr,
+    request: Request<Incoming>,
+) -> Result<Resp, ApiError> {
+    if app.config.questions.is_none() {
+        // The routes of the questions need the block `inbox.questions`: without it they do not exist.
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such route",
+        ));
+    }
+    let who = agent_key(app, request.uri(), request.headers(), ip)?;
+    let header_key = request
+        .headers()
+        .get("idempotency-key")
+        .map(|v| v.to_str().map(|t| t.trim().to_string()))
+        .transpose()
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_idempotency_key",
+                "Idempotency-Key must be 1..128 printable ASCII characters",
+            )
+        })?;
+    let body = read_body(
+        request,
+        app.config.devices.max_request_bytes,
+        app.http.body_read_timeout,
+    )
+    .await?;
+    let mut args: super::questions::AskArgs = parse_object(&body)?;
+    match (&header_key, &args.idempotency_key) {
+        (Some(h), Some(b)) if h != b => {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_argument",
+                "the header Idempotency-Key and the member idempotency_key differ",
+            ));
+        }
+        (Some(h), None) => args.idempotency_key = Some(h.clone()),
+        _ => {}
+    }
+    let cap = app
+        .config
+        .items
+        .as_ref()
+        .map_or(std::time::Duration::ZERO, |i| i.wait_max);
+    let (value, created) = super::questions::ask(app, &who, inbox_core::proto::Via::Api, args, cap)
+        .await
+        .map_err(agent_error)?;
+    let status = if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok(json(status, &super::mcp_tools::with_notice(value)))
 }
 
 /// `GET /api/v1/items/{id}`: the answer of an item of the key. With `wait` the call renews the lease and waits at most
@@ -1060,10 +1141,28 @@ async fn item_action_inner(
                 .await,
             )
         }
-        "supersede" => agent_reply(
-            StatusCode::OK,
-            super::mcp_tools::supersede(app, &who, body_token(&body)?.as_deref(), id).await,
-        ),
+        "supersede" => {
+            // The body of an approval has the token at most. The body of a question is the new question.
+            let (token, ask) = supersede_body(&body)?;
+            let cap = app
+                .config
+                .items
+                .as_ref()
+                .map_or(std::time::Duration::ZERO, |i| i.wait_max);
+            agent_reply(
+                StatusCode::OK,
+                super::mcp_tools::supersede(
+                    app,
+                    &who,
+                    token.as_deref(),
+                    id,
+                    ask,
+                    inbox_core::proto::Via::Api,
+                    cap,
+                )
+                .await,
+            )
+        }
         _ => Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "not_found",

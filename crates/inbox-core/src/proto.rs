@@ -247,6 +247,34 @@ fn check_command(c: &Command) -> Result<()> {
     Ok(())
 }
 
+/// The parts of a question that an agent wrote, checked as a `request` frame checks them. The server calls it before it
+/// stores a question, so that the frame of the question is valid when the server builds it. The flags and the
+/// `interaction` of the key are not in it: the server checks them with the rules of the questions.
+pub fn check_question_parts(
+    title: &str,
+    explanation: Option<&str>,
+    command: Option<&Command>,
+    input: &Input,
+    hint: Option<&Hint>,
+    as_of_ms: Option<i64>,
+) -> Result<()> {
+    check_title(title)?;
+    if let Some(e) = explanation {
+        check_text(e, MAX_EXPLANATION_CHARS, "explanation")?;
+    }
+    if let Some(c) = command {
+        check_command(c)?;
+    }
+    input.validate()?;
+    if let Some(h) = hint {
+        h.validate()?;
+    }
+    if let Some(t) = as_of_ms {
+        check_time(t, "as_of")?;
+    }
+    Ok(())
+}
+
 fn is_false(v: &bool) -> bool {
     !*v
 }

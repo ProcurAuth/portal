@@ -1930,6 +1930,14 @@ This block is optional and is inside the block `inbox`. Its presence starts the 
 | `idle_after` | duration, 1h to 365d | `"14d"` | An agent with no open item and no call for this time leaves the active views. It still works, and a call makes it active again. It must not be above `purge_after`. |
 | `purge_after` | duration, 7d to 3650d | `"365d"` | The sweeper erases an agent that has no item, no live intent and no call for this time. The token of an erased agent is unknown. It must not be below `idle_after`. |
 
+#### Block `inbox.questions`
+
+This block is optional and is inside the block `inbox`. Its presence starts the questions: an agent asks a question to the owner of its key with the tool `ask` of the MCP endpoint or with `POST /api/v1/questions`, and the owner answers on a phone or on the web page. The portal seals each question at rest. A service never sees a question. The block needs the blocks `inbox.items` and `inbox.at_rest`. The block can be empty. A key needs the permission `question.ask` to ask.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `max_options` | number, 2 to 8 | `8` | The most options of a question with an input of the type `choice`, and of each choice question of a form. The protocol of the phones allows 8 at most. A question with more options gets `422 invalid_argument`: the portal never cuts the list. |
+
 #### Block `inbox.approvals`
 
 This block is optional and is inside the block `inbox`. Its presence starts the approval of an action: the PDP answers `approval_required` for a grant with `confirm`, and it consumes an approval once. The block needs the blocks `inbox.items` and `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. A server gets approvals only with `approvals = true` in its block `pdp_client`.

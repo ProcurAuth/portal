@@ -226,6 +226,18 @@ pub async fn serve(app: Arc<App>, ip: IpAddr, request: Request<Incoming>) -> Res
             empty(StatusCode::METHOD_NOT_ALLOWED)
         };
     }
+    if path == "/api/v1/questions" {
+        return if post {
+            api::post_question(&app, ip, request).await
+        } else {
+            empty(StatusCode::METHOD_NOT_ALLOWED)
+        };
+    }
+    // The routes of a question are the routes of an item: the agent finds its question by the same id.
+    let path = match path.strip_prefix("/api/v1/questions/") {
+        Some(rest) if app.config.questions.is_some() => format!("/api/v1/items/{rest}"),
+        _ => path,
+    };
     if let Some(id) = segment(&path, "/api/v1/items/") {
         return if get {
             api::get_item(&app, ip, request, id).await

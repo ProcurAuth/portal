@@ -33,6 +33,8 @@ pub struct InboxConfig {
     pub approvals: Option<ApprovalsConfig>,
     /// `None` without the block `inbox.agents`. The block needs `inbox.items` and `inbox.at_rest`.
     pub agents: Option<AgentsConfig>,
+    /// `None` without the block `inbox.questions`. The block needs `inbox.items` and `inbox.at_rest`.
+    pub questions: Option<QuestionsConfig>,
     /// `None` without the block `inbox.mcp`. The block needs `inbox.items` and `keys.mcp = true`.
     pub mcp: Option<McpConfig>,
     /// The blocks `group`, by id.
@@ -128,7 +130,6 @@ pub struct ItemsConfig {
     pub body_purge_after: Duration,
     pub audit_retention: Duration,
     pub digest: DigestConfig,
-    #[allow(dead_code)] // lot L13 reads it
     pub max_body_bytes: usize,
     pub wait_max: Duration,
 }
@@ -207,6 +208,13 @@ pub struct AgentsConfig {
     pub idle_after: Duration,
     /// The sweeper erases an agent that is idle for this time and has no item.
     pub purge_after: Duration,
+}
+
+/// The block `inbox.questions`: the questions that an agent asks to the owner of its key.
+#[derive(Clone, Debug)]
+pub struct QuestionsConfig {
+    /// The most options of a choice.
+    pub max_options: usize,
 }
 
 /// The block `inbox.mcp`: the MCP endpoint of the portal for the agents.
@@ -428,6 +436,18 @@ pub fn build(
         None
     };
 
+    let questions = if r.has_block("inbox.questions") {
+        // `items` and `at_rest` come together (checked above): the block needs both.
+        if items.is_none() {
+            return Err("the block inbox.questions needs the blocks inbox.items and inbox.at_rest: the questions are sealed at rest; add the blocks, or remove the block inbox.questions".into());
+        }
+        Some(QuestionsConfig {
+            max_options: r.int("inbox.questions", "max_options")? as usize,
+        })
+    } else {
+        None
+    };
+
     let mcp = if r.has_block("inbox.mcp") {
         let items = items
             .as_ref()
@@ -585,6 +605,7 @@ pub fn build(
         at_rest,
         approvals,
         agents,
+        questions,
         mcp,
         groups,
         api_keys,

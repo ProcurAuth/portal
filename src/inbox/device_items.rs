@@ -545,6 +545,21 @@ pub(super) async fn answer(
         Ok(Answered::Accepted { loaded, .. }) => (AnswerStatus::Accepted, Some(loaded.item.state)),
         Ok(Answered::Refused { status, loaded }) => (status, Some(loaded.item.state)),
         Ok(Answered::NotFound) => (AnswerStatus::Closed, None),
+        // The answer does not fit the question. The phone checks it before it sends, so this is a fault of the phone: the
+        // server says so, and it takes no answer. The code names the rule and holds no value.
+        Ok(Answered::Invalid(rule)) => {
+            log::warn!(event = "phone_answer_invalid", device.id = %device_id, request.id = %a.request_id);
+            send_msg(
+                socket,
+                session,
+                &ServerMsg::Error {
+                    code: "invalid_answer".into(),
+                    message: rule.into(),
+                },
+            )
+            .await?;
+            return Ok(true);
+        }
         // The agent is new and `lock_new` is true: the owner can decline and reply, not accept. The item stays open.
         Ok(Answered::AgentLocked(loaded)) => (AnswerStatus::AgentLocked, Some(loaded.item.state)),
         Err(ItemError::Degraded | ItemError::Replica) => return unavailable(socket, session).await,

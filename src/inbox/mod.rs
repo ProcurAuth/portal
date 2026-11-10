@@ -56,6 +56,7 @@ pub mod notify;
 mod peer;
 mod pg;
 pub mod prefs;
+pub(crate) mod questions;
 mod ratelimit;
 mod replica;
 pub mod rights;

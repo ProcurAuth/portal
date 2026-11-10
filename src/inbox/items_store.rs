@@ -164,6 +164,10 @@ pub enum Answered {
         status: AnswerStatus,
         loaded: Box<Loaded>,
     },
+    /// The answer of a question does not fit its input (see `questions::check_answer`): an option that does not exist, a
+    /// wrong number of ticks, a text where a choice is due. The text names the rule and holds no value. Nothing was
+    /// written. A phone that follows the rules of the question never sends such an answer.
+    Invalid(&'static str),
     Accepted {
         loaded: Box<Loaded>,
         seq: u64,
@@ -408,6 +412,24 @@ impl Items<'_> {
         Ok(done.value)
     }
 
+    /// The item that the key made with this idempotency key, or `None`.
+    pub async fn by_idempotency(
+        &self,
+        key_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<Loaded>, ItemError> {
+        let cx = self.cx();
+        let (key_id, idem) = (key_id.to_string(), idempotency_key.to_string());
+        let done = in_tx!(
+            self,
+            [cx, key_id, idem],
+            tx,
+            ops::by_idempotency(tx, &cx, &key_id, &idem)
+        )?;
+        self.after(&done.fx);
+        Ok(done.value)
+    }
+
     pub async fn list(&self, filter: ListFilter) -> Result<Vec<Loaded>, ItemError> {
         let cx = self.cx();
         Ok(in_tx!(self, [cx, filter], tx, ops::list(tx, &cx, &filter))?.value)
@@ -542,12 +564,57 @@ impl Items<'_> {
         )))
     }
 
+    /// The check of the answer of a question against the question that is stored. The phone and the web page share it. It
+    /// reads the sealed body once. `None`: the answer fits, or the item is not a question, or the answer is not an accept
+    /// and holds nothing.
+    async fn question_fault(&self, l: &Loaded, a: &Answer) -> Result<Option<Answered>, ItemError> {
+        if l.item.kind != Kind::Question || !l.item.is_open() {
+            return Ok(None);
+        }
+        let id = l.item.request_id.clone();
+        let sealed = in_tx!(self, [id], tx, tx.sealed_body(&id))?;
+        let Some(plain) = sealed.and_then(|s| self.open_body(l, &s)) else {
+            return Ok(Some(Answered::Invalid("the question is not served")));
+        };
+        let Some(input) = super::questions::input_of(&plain) else {
+            return Ok(Some(Answered::Invalid("the question is not valid")));
+        };
+        let given = match &a.payload {
+            Some(p) => super::frames::OwnerAnswer::from_plain(p),
+            None => super::frames::OwnerAnswer::default(),
+        };
+        Ok(
+            match super::questions::check_answer(&input, l.item.allow_custom, a.action, &given) {
+                Ok(()) => None,
+                Err(super::questions::AnswerFault::CustomNotAllowed) => {
+                    if let Some(m) = self.metrics {
+                        m.item_answer("custom_not_allowed");
+                    }
+                    Some(Answered::Refused {
+                        status: AnswerStatus::CustomNotAllowed,
+                        loaded: Box::new(l.clone()),
+                    })
+                }
+                Err(super::questions::AnswerFault::Invalid(rule)) => {
+                    if let Some(m) = self.metrics {
+                        m.item_answer("invalid");
+                    }
+                    Some(Answered::Invalid(rule))
+                }
+            },
+        )
+    }
+
     /// The only answer of an item (see `ops::answer`).
     pub async fn answer(&self, id: &str, a: Answer) -> Result<Answered, ItemError> {
         self.writable()?;
         let Some(l) = self.get(id, &Caller::Owner(a.login.clone())).await? else {
             return Ok(Answered::NotFound);
         };
+        // The answer of a question must fit the question: the same check for the phone and for the web page.
+        if let Some(refusal) = self.question_fault(&l, &a).await? {
+            return Ok(refusal);
+        }
         let mut seq = l.item.last_seq + 1;
         for _ in 0..5 {
             let payload = match &a.payload {

@@ -745,6 +745,7 @@ pub(super) async fn answer(
         // status 409. A decline, a question and a name stay open.
         Ok(Answered::AgentLocked(_)) => refused_with("locked", StatusCode::CONFLICT).await,
         Ok(Answered::NotFound) => back(&id, "gone"),
+        Ok(Answered::Invalid(_)) => back(&id, "closed"),
         Err(_) => back(&id, "failed"),
     }
 }
