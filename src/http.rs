@@ -256,10 +256,7 @@ impl AppState {
             access
                 .pdp_tokens
                 .iter()
-                .map(|(name, token)| {
-                    pdp::Client::new(name.clone(), token.as_bytes())
-                        .with_approvals(config.pdp_approvals.contains(name))
-                })
+                .map(|(name, token)| pdp::Client::new(name.clone(), token.as_bytes()))
                 .collect(),
         )?;
         let mfa = match (config.authentication.mfa.is_on(), &access.totp_key) {

@@ -6,7 +6,8 @@
 //! | `GET /approval/v1/requests/{id}?subject=&wait=&renew=` | `200 {verdict}` |
 //! | `POST /approval/v1/requests/{id}/keepalive` with `{"subject": ...}` | `200 {verdict}` |
 //!
-//! The routes use the bearer token of a `pdp_client` block that has `approvals = true`. The API is narrow on purpose:
+//! The routes use the bearer token of a `pdp_client` block. The service must declare `"approval": "optional"` on an
+//! action, and the block `inbox.approvals` must exist. The API is narrow on purpose:
 //! an answer holds `request_id`, `code` and `verdict`, and nothing else. The service never gets the explanation of
 //! the agent, a comment of the owner, the owner, a device, or a time of an answer (protocol 17.12).
 //!
@@ -18,7 +19,7 @@
 //!
 //! | Status | `error` | Cause | The PEP gives |
 //! | --- | --- | --- | --- |
-//! | 401, 403 | | no valid token; the server has no `approvals = true` | its own 503 |
+//! | 401, 403 | | no valid token; the service declares no approval | its own 503 |
 //! | 404 | `not_found` | an unknown request, of another service, or of another subject | `invalid_argument` |
 //! | 409 | `no_device` | the owner has no phone and `web_approval` is false | `approval_unavailable` |
 //! | 409 | `cannot_supersede` | the request to replace is consumed | its own 503 |
@@ -35,7 +36,7 @@ use inbox_core::effect::{is_effect, Op};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::pdp::{json_response, open_evaluation_id, unauthorized, Client};
+use super::pdp::{self, json_response, open_evaluation_id, unauthorized, Client};
 use super::*;
 use crate::inbox::approvals::{self, ApprovalError, Control, Requester, Submission, Verdict};
 use crate::keyauth;
@@ -83,7 +84,7 @@ pub(super) async fn handle(
     let Some(client) = client_hint else {
         return unauthorized(state);
     };
-    if !client.approvals {
+    if !pdp::may_use_approval_api(state, &client.name) {
         return code(StatusCode::FORBIDDEN, "forbidden");
     }
     let Some(app) = state.inbox.app() else {
@@ -294,6 +295,15 @@ async fn submit(
         Ok(facts) => facts,
         Err(_) => return invalid_evaluation(),
     };
+    // The action comes from the sealed `evaluation_id`, never from the body. The document of the service must still
+    // declare the approval for it: a document that changed since the question closes the way (fail closed).
+    let declared = state
+        .actions
+        .declared(&client.name)
+        .is_some_and(|d| d.approval_for(&facts.action));
+    if !declared {
+        return invalid_evaluation();
+    }
     let Some(who) = requester(state, &facts.subject) else {
         return invalid_evaluation();
     };

@@ -80,7 +80,8 @@ pub(super) struct Ask<'a> {
     pub usage: bool,
     /// `context.approval.effect`.
     pub effect: Option<&'a str>,
-    /// The server that asks has `approvals = true`.
+    /// The approval is possible for this question: the block `inbox.approvals` is there, and the document of the
+    /// service declares `"approval": "optional"` for the action (see [`enabled_for`]).
     pub enabled: bool,
     /// The subject of the question, as the request gives it. The approval is bound to it.
     pub subject: &'a str,
@@ -96,6 +97,30 @@ impl Ask<'_> {
             subject: "",
         }
     }
+}
+
+/// Whether the approval is possible for a question of the action `action`. The block `inbox.approvals` must exist,
+/// and the document of the service must be known and declare `"approval": "optional"` for this action. Else the
+/// answer is a plain `false`: fail closed.
+pub(super) fn enabled_for(state: &AppState, document: Option<&crate::actions::Document>, action: &str) -> bool {
+    inbox_has_approvals(state) && document.is_some_and(|d| d.approval_for(action))
+}
+
+/// Whether the service may use the approval API: the block `inbox.approvals` exists, and the document of the service
+/// is known and declares `"approval": "optional"` for at least one action.
+pub(super) fn may_use_api(state: &AppState, service: &str) -> bool {
+    inbox_has_approvals(state)
+        && state
+            .actions
+            .declared(service)
+            .is_some_and(|d| d.any_approval())
+}
+
+fn inbox_has_approvals(state: &AppState) -> bool {
+    state
+        .inbox
+        .app()
+        .is_some_and(|app| app.config.approvals.is_some())
 }
 
 /// An approval that the gate consumed. `release` gives it back.
@@ -186,7 +211,7 @@ pub(super) fn gate(
     if !ask.enabled {
         state.pdp_stats.approval(NOT_ENABLED);
         return Err(Outcome::deny(
-            "the server has no approvals: fail closed",
+            "the service does not declare the approval for this action: fail closed",
             None,
         ));
     }

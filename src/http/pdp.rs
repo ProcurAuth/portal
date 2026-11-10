@@ -63,7 +63,7 @@ mod approval;
 #[cfg(test)]
 mod approval_tests;
 
-pub(super) use self::approval::open_evaluation_id;
+pub(super) use self::approval::{may_use_api as may_use_approval_api, open_evaluation_id};
 use self::approval::{Ask, Held};
 use super::*;
 use crate::counting::{Outcome as CountOutcome, Unavailable};
@@ -159,8 +159,6 @@ pub fn clients(list: Vec<Client>) -> Result<Clients, String> {
 pub struct Client {
     pub name: String,
     digest: [u8; 32],
-    /// The block `pdp_client` has `approvals = true`: the server can ask for the approval of an action.
-    pub approvals: bool,
 }
 
 impl Client {
@@ -168,14 +166,7 @@ impl Client {
         Self {
             name,
             digest: Sha256::digest(token).into(),
-            approvals: false,
         }
-    }
-
-    /// The same client with the flag `approvals` set to this value.
-    pub fn with_approvals(mut self, approvals: bool) -> Self {
-        self.approvals = approvals;
-        self
     }
 }
 
@@ -915,7 +906,7 @@ fn decide(
     let ask = Ask {
         usage,
         effect,
-        enabled: client.approvals,
+        enabled: approval::enabled_for(state, document.as_deref(), action),
         subject: &subject.id,
     };
     match SubjectId::parse(&subject.id) {

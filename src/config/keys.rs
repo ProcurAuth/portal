@@ -302,7 +302,7 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ),
     (
         "inbox.approvals",
-        "This block is optional and is inside the block `inbox`. Its presence starts the approval of an action: the PDP answers `approval_required` for a grant with `confirm`, and it consumes an approval once. The block needs the blocks `inbox.items` and `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. A server gets approvals only with `approvals = true` in its block `pdp_client`.",
+        "This block is optional and is inside the block `inbox`. Its presence starts the approval of an action: the PDP answers `approval_required` for a grant with `confirm`, and it consumes an approval once. The block needs the blocks `inbox.items` and `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. A server gets approvals only when its document of actions has an action with `\"approval\": \"optional\"`.",
     ),
 ];
 
@@ -1965,14 +1965,6 @@ pub static LABELED_KEYS: &[Key] = &[
         presence: Presence::Required,
         when: When::LabeledBlock,
         doc: "The bearer token of the server. It has at least 32 bytes. Two servers must not have the same token.",
-    },
-    Key {
-        block: "pdp_client",
-        name: "approvals",
-        kind: Kind::Bool,
-        presence: Presence::Default("false"),
-        when: When::LabeledBlock,
-        doc: "`true`: the server can ask for the approval of an action, with `context.approval.effect`, and it can use the approval API. It needs the block `inbox.approvals`. `false`: a grant with `confirm` gives this server a plain `false` without a reason.",
     },
     Key {
         block: "inbox.at_rest.key",

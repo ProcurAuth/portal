@@ -127,6 +127,20 @@ pub struct Resource {
 impl Resource {}
 
 impl Document {
+    /// Whether the document has at least one action with `"approval": "optional"`. A service
+    /// with such a document can use the approval API of the portal (portal 3.7.2).
+    pub fn any_approval(&self) -> bool {
+        self.actions.iter().any(Action::approval_optional)
+    }
+
+    /// Whether the document has the action `name` with `"approval": "optional"`. A grant of
+    /// another action cannot carry `confirm`, and the approval API refuses it.
+    pub fn approval_for(&self, name: &str) -> bool {
+        self.actions
+            .iter()
+            .any(|a| a.name == name && a.approval_optional())
+    }
+
     /// A document of one level, as a document without the top-level `resource_types` gives.
     pub fn one_level(actions: Vec<Action>) -> Self {
         let mut names: Vec<String> = Vec::new();
