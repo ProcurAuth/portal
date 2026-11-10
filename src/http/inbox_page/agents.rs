@@ -519,7 +519,7 @@ async fn draw(
             .filter(|l| {
                 matches!(
                     StateFilter::of(l),
-                    Some(StateFilter::Approved | StateFilter::Declined)
+                    Some(StateFilter::Approved | StateFilter::Answered | StateFilter::Declined)
                 )
             })
             .count(),
