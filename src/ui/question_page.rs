@@ -1046,3 +1046,348 @@ pub fn question_page(frame: &Frame, d: &QDetail, notice: Option<Notice>) -> Stri
     );
     fill_page(Tab::Inbox, frame, &format!("Inbox: question {code}"), &out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inbox::agents::{AgentKind, AgentState};
+    use crate::inbox::page_items::ItemRow;
+    use crate::ui::agents::AgentView;
+    use crate::ui::questions::BlockDraft;
+    use inbox_core::proto::{FormAnswer, Kind, Urgency, Via};
+
+    const NOW: i64 = 1_800_000_000_000;
+
+    fn frame() -> Frame<'static> {
+        Frame {
+            logout_token: "out",
+            keys: true,
+            inbox: true,
+            superadmin: false,
+            notify: None,
+            security: false,
+            tab: crate::ui::TabLook::DEFAULT,
+        }
+    }
+
+    fn item(state: ItemState) -> Loaded {
+        Loaded {
+            item: ItemRow {
+                request_id: "0123456789abcdef0123456789abcdef".into(),
+                kind: Kind::Question,
+                chain_id: "c".into(),
+                supersedes: None,
+                superseded_by: None,
+                previous_id: None,
+                requester_key_id: "k1".into(),
+                requester_owner: "alice".into(),
+                agent_id: "a1".into(),
+                via: Via::Mcp,
+                interaction: Interaction::Conversational,
+                urgency: Urgency::Normal,
+                input_type: Some(InputType::Choice),
+                state,
+                settle_reason: None,
+                body_kid: None,
+                body_size: 0,
+                body_purged_at: None,
+                created_at: NOW - 60_000,
+                chain_created_at: NOW - 60_000,
+                lease_s: Some(60),
+                lease_until: Some(NOW + 180_000),
+                until_at: None,
+                agent_seen_at: NOW - 30_000,
+                last_agent_turn_at: None,
+                abandoned_at: None,
+                revivals: 0,
+                last_seq: 0,
+                allow_custom: false,
+                allow_ask_back: false,
+                answer_action: None,
+                answered_at: None,
+                answered_by: None,
+                answered_via: None,
+                final_at: None,
+                idempotency_key: "i".into(),
+            },
+            approval: None,
+        }
+    }
+
+    fn sender(lock: bool, state: AgentState) -> Sender {
+        Sender {
+            agent: AgentView {
+                agent_id: "a1".into(),
+                label: "ops-agent #1".into(),
+                key_name: "ops-agent".into(),
+                kind: AgentKind::Agent,
+                state,
+                named: false,
+                created_at: NOW - 86_400_000,
+                last_seen_at: NOW - 60_000,
+                observed: None,
+                plain: false,
+            },
+            lookalike: None,
+            owner: true,
+            lock,
+            also: Vec::new(),
+        }
+    }
+
+    fn input() -> Input {
+        Input {
+            kind: InputType::Choice,
+            multiple: false,
+            min: 1,
+            max: 1,
+            options: ["go", "wait"]
+                .iter()
+                .map(|id| InputOption {
+                    id: (*id).into(),
+                    label: id.to_uppercase(),
+                    description: None,
+                })
+                .collect(),
+            placeholder: None,
+            questions: None,
+        }
+    }
+
+    fn text(input: Input) -> QText {
+        QText {
+            title: "Deploy <b>now</b>?".into(),
+            explanation: Some("Because.".into()),
+            format: ExplanationFormat::Plain,
+            command: None,
+            input,
+            hint: None,
+            as_of_ms: None,
+        }
+    }
+
+    fn render(l: &Loaded, t: QText, sender: Sender, f: impl FnOnce(&mut QDetail)) -> String {
+        render_draft(l, t, sender, None, f)
+    }
+
+    fn render_draft(
+        l: &Loaded,
+        t: QText,
+        sender: Sender,
+        draft: Option<&Draft>,
+        f: impl FnOnce(&mut QDetail),
+    ) -> String {
+        let mut d = QDetail {
+            loaded: l,
+            body: QBody::Shown(Box::new(t)),
+            sender,
+            turns: Vec::new(),
+            answer: None,
+            now_ms: NOW,
+            stale_after_ms: 86_400_000,
+            csrf: "tok",
+            mode: Mode::Owner,
+            can_cancel: false,
+            body_link: false,
+            full: false,
+            draft,
+            next: None,
+        };
+        f(&mut d);
+        question_page(&frame(), &d, None)
+    }
+
+    fn open_page(l: &Loaded, t: QText) -> String {
+        render(l, t, sender(false, AgentState::Known), |_| {})
+    }
+
+    #[test]
+    fn the_title_is_escaped_and_no_option_is_ticked() {
+        let l = item(ItemState::Pending);
+        let page = open_page(&l, text(input()));
+        assert!(page.contains("Deploy &lt;b&gt;now&lt;/b&gt;?") && !page.contains("<b>now</b>"));
+        assert!(!page.contains("checked>"));
+        assert!(page.contains("value=\"o:go\"") && page.contains("value=\"o:wait\""));
+        assert!(page.contains("name=\"action\" value=\"accept\""));
+        assert!(page.contains("name=\"action\" value=\"decline\""));
+    }
+
+    #[test]
+    fn a_new_agent_with_the_lock_turns_send_off_and_keeps_decline_and_ask() {
+        let mut l = item(ItemState::Pending);
+        l.item.allow_ask_back = true;
+        let page = render(&l, text(input()), sender(true, AgentState::New), |_| {});
+        assert!(page.contains(LOCK_LINE) && page.contains("button--off"));
+        assert!(!page.contains("name=\"action\" value=\"accept\""));
+        assert!(page.contains("name=\"action\" value=\"decline\""));
+        assert!(page.contains("form=\"qask\""));
+    }
+
+    #[test]
+    fn a_mistake_of_a_block_is_shown_and_the_typed_text_is_kept_not_marked() {
+        let mut l = item(ItemState::Pending);
+        l.item.allow_custom = true;
+        let draft = Draft {
+            blocks: vec![BlockDraft {
+                other_on: true,
+                other_text: "a\u{200B}b <i>".into(),
+                error: Some("Type your answer. An empty text is not an answer.".into()),
+                ..BlockDraft::default()
+            }],
+            ..Draft::default()
+        };
+        let page = render_draft(
+            &l,
+            text(input()),
+            sender(false, AgentState::Known),
+            Some(&draft),
+            |_| {},
+        );
+        assert!(page.contains("An empty text is not an answer."));
+        assert!(
+            page.contains("a\u{200B}b &lt;i&gt;"),
+            "the owner text is not changed"
+        );
+        assert!(page.contains("value=\"x\" checked>"));
+    }
+
+    #[test]
+    fn the_closed_states_have_their_words_and_no_field() {
+        for (state, words) in [
+            (ItemState::Abandoned, "This is not a decline."),
+            (ItemState::Superseded, "The agent proposes something else."),
+            (ItemState::Expired, "This question expired."),
+            (ItemState::Cancelled, "Cancelled."),
+        ] {
+            let l = item(state);
+            let page = render(&l, text(input()), sender(false, AgentState::Known), |d| {
+                d.next = Some("f".repeat(32))
+            });
+            assert!(page.contains(words), "{state:?}");
+            assert!(!page.contains("name=\"action\""), "{state:?}");
+            assert!(page.contains("Not open for an answer."), "{state:?}");
+            assert_eq!(
+                page.contains(&format!("{ITEMS}/{}", "f".repeat(32))),
+                state == ItemState::Superseded
+            );
+        }
+    }
+
+    #[test]
+    fn an_answered_form_shows_each_block_the_free_text_and_what_was_not_chosen() {
+        let mut l = item(ItemState::Answered);
+        l.item.allow_custom = true;
+        l.item.answer_action = Some(Action::Accept);
+        l.item.answered_at = Some(NOW - 1000);
+        let mut multi = input();
+        multi.multiple = true;
+        multi.max = 2;
+        let form = Input {
+            kind: InputType::Form,
+            multiple: false,
+            min: 0,
+            max: 0,
+            options: vec![],
+            placeholder: None,
+            questions: Some(vec![
+                inbox_core::proto::FormQuestion {
+                    id: "one".into(),
+                    header: "Tables".into(),
+                    text: "Which?".into(),
+                    kind: FormQuestionType::Choice,
+                    multiple: true,
+                    min: 1,
+                    max: 2,
+                    options: multi.options.clone(),
+                    placeholder: None,
+                },
+                inbox_core::proto::FormQuestion {
+                    id: "two".into(),
+                    header: "Window".into(),
+                    text: "When?".into(),
+                    kind: FormQuestionType::Text,
+                    multiple: false,
+                    min: 0,
+                    max: 0,
+                    options: vec![],
+                    placeholder: None,
+                },
+            ]),
+        };
+        let answer = OwnerAnswer {
+            answers: Some(vec![
+                FormAnswer {
+                    question_id: "one".into(),
+                    choice: Some(vec!["go".into()]),
+                    text: None,
+                },
+                FormAnswer {
+                    question_id: "two".into(),
+                    choice: None,
+                    text: Some("every <b>night</b>".into()),
+                },
+            ]),
+            ..OwnerAnswer::default()
+        };
+        let page = render(&l, text(form), sender(false, AgentState::Known), |d| {
+            d.answer = Some(answer)
+        });
+        assert!(page.contains("Your answers") && page.contains("You cannot change them."));
+        assert!(page.contains("Not chosen: WAIT."));
+        assert!(page.contains("every &lt;b&gt;night&lt;/b&gt;"));
+        assert!(!page.contains("name=\"action\""));
+        assert!(page.contains("pill--ok"));
+    }
+
+    #[test]
+    fn a_stale_question_has_a_banner_and_no_checkbox() {
+        let l = item(ItemState::Pending);
+        let page = render(&l, text(input()), sender(false, AgentState::Known), |d| {
+            d.stale_after_ms = 1000
+        });
+        assert!(page.contains("This question is old.") && page.contains("Old question"));
+        assert!(!page.contains("stale_ack") && !page.contains("type=\"checkbox\""));
+    }
+
+    #[test]
+    fn a_viewer_that_is_not_the_owner_reads_no_content() {
+        let l = item(ItemState::Pending);
+        let mut d = QDetail {
+            loaded: &l,
+            body: QBody::Hidden,
+            sender: sender(false, AgentState::Known),
+            turns: Vec::new(),
+            answer: None,
+            now_ms: NOW,
+            stale_after_ms: i64::MAX,
+            csrf: "tok",
+            mode: Mode::Admin,
+            can_cancel: false,
+            body_link: true,
+            full: false,
+            draft: None,
+            next: None,
+        };
+        let page = question_page(&frame(), &d, None);
+        assert!(page.contains("You read the metadata only.") && page.contains("Read the content"));
+        assert!(!page.contains(QUESTION) && !page.contains("name=\"action\""));
+        d.body_link = false;
+        assert!(!question_page(&frame(), &d, None).contains("Read the content"));
+    }
+
+    #[test]
+    fn the_words_of_a_row_say_the_kind_of_answer_and_the_discussion() {
+        let mut l = item(ItemState::Pending);
+        assert_eq!(row_note(&l, &input()), "2 choices");
+        l.item.last_seq = 3;
+        assert_eq!(
+            row_note(&l, &input()),
+            "2 choices · open discussion, 3 messages"
+        );
+        l.item.interaction = Interaction::OneShot;
+        assert_eq!(
+            row_note(&l, &input()),
+            "2 choices · automatic system, no chat"
+        );
+    }
+}
