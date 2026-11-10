@@ -309,7 +309,6 @@ async fn a_flood_of_asks_with_and_without_agent_tokens_keeps_rows_events_and_fra
 /// raises `rev`, so the portal writes one row in `alerts` and one delivery for each phone for each call. No limit stops
 /// it: the key is valid, and the refused `ask` still updates the hints. Run this test with `--ignored` to see it fail.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "finding: a flipping User-Agent writes one alert row for each call (hints of an agent)"]
 async fn a_flood_that_flips_the_user_agent_writes_no_alert_for_each_call() {
     let pep = agents_pep();
     let phone = pep.phone("pixel").await;

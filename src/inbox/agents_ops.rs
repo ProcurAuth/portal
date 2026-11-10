@@ -51,13 +51,15 @@ pub trait AgentTx {
     fn save_agent(&mut self, a: &AgentRow) -> impl Future<Output = Result<(), DbError>>;
     /// Moves the time of the last call forward. It never moves it back, and it never changes `rev`.
     fn touch_agent(&mut self, id: &str, now: i64) -> impl Future<Output = Result<(), DbError>>;
-    /// Replaces the sealed hints when `rev` is still `expected_rev`, and raises `rev`. False when the row moved.
+    /// Replaces the sealed hints when `rev` is still `expected_rev`. With `bump` it raises `rev`: the phones then get the
+    /// new record. Without it, `rev` stays: the phones keep the old hints until the next change. False when the row moved.
     fn set_hints(
         &mut self,
         id: &str,
         expected_rev: i64,
         hints: &Sealed,
         now: i64,
+        bump: bool,
     ) -> impl Future<Output = Result<bool, DbError>>;
     /// The agents of a key that count against `max_per_key`: `new`, `known` and `blocked`, never the bucket.
     fn count_agents(&mut self, key_id: &str) -> impl Future<Output = Result<i64, DbError>>;
@@ -512,8 +514,12 @@ pub async fn write_hints<T: ItemTx>(
     events: &[&'static str],
 ) -> Result<Done<bool>, DbError> {
     let mut fx = Effects::default();
+    // A change of the client, of the User-Agent or of the address range without an event is volatile: a caller that flips
+    // it at each call would make one `rev`, one alert row and one frame for each call. The record is kept, but the phones
+    // hear of it only with the next real change. The pages of the web read the record itself, so they stay current.
+    let bump = !events.is_empty();
     if !tx
-        .set_hints(&agent.agent_id, agent.rev, hints, cx.now)
+        .set_hints(&agent.agent_id, agent.rev, hints, cx.now, bump)
         .await?
     {
         return ops::done(tx, cx, false, fx).await;
@@ -521,6 +527,9 @@ pub async fn write_hints<T: ItemTx>(
     for event in events {
         tx.insert_agent_event(&agent.agent_id, cx.now, event, "agent", None)
             .await?;
+    }
+    if !bump {
+        return ops::done(tx, cx, true, fx).await;
     }
     // `set_hints` raised `rev` by one.
     let mut now = agent.clone();

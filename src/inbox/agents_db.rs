@@ -87,15 +87,23 @@ impl AgentTx for SqliteTx<'_, '_> {
         expected_rev: i64,
         hints: &Sealed,
         now: i64,
+        bump: bool,
     ) -> Result<bool, DbError> {
         let n = self
             .0
             .prepare_cached(
-                "UPDATE agents SET hints_kid = ?3, hints_ct = ?4, rev = rev + 1,
+                "UPDATE agents SET hints_kid = ?3, hints_ct = ?4, rev = rev + ?6,
                  last_seen_at = CASE WHEN last_seen_at < ?5 THEN ?5 ELSE last_seen_at END
              WHERE agent_id = ?1 AND rev = ?2",
             )?
-            .execute(params![id, expected_rev, hints.kid, hints.ct, now])?;
+            .execute(params![
+                id,
+                expected_rev,
+                hints.kid,
+                hints.ct,
+                now,
+                i64::from(bump)
+            ])?;
         Ok(n == 1)
     }
 
