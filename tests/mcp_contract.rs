@@ -816,7 +816,7 @@ fn the_agent_cases_a01_to_a10() {
             tool["inputSchema"]["properties"]
                 .get("agent_label")
                 .is_some(),
-            name == "approval_intent",
+            matches!(name, "approval_intent" | "ask" | "supersede"),
             "A02 {name}"
         );
     }

@@ -1001,9 +1001,9 @@ mod tests {
             assert!(script.contains(needle), "{needle}");
         }
         // The only direct writes to the map of the grants are the load, the one function, the
-        // budget of the portal, the "give access" link and the undo of "Access off".
+        // budgets of the alerts and of the questions, the "give access" link and the undo of "Access off".
         let writes = script.matches("ticked.set(").count();
-        assert_eq!(writes, 7, "a new write must go through setGrant");
+        assert_eq!(writes, 8, "a new write must go through setGrant");
     }
 
     /// An external service is a link: the editor offers its switch and no other action, no node and no source.
