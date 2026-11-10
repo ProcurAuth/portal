@@ -96,7 +96,7 @@ pub(crate) mod page_items {
     /// The check of the answer of a question: the phone and the web page share it. `Items::answer` calls it, so a page
     /// that answers a question needs no check of its own.
     #[allow(unused_imports)]
-    pub(crate) use super::questions::{check_answer, input_of, AnswerFault};
+    pub(crate) use super::questions::{check_answer, input_of, AnswerFault, MAX_FREE_TEXT_CHARS};
 }
 /// What the tests of the portal take from the inbox.
 #[cfg(test)]

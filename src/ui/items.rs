@@ -26,6 +26,8 @@ use crate::util::{html_escape, time_tag};
 pub const ITEMS: &str = "/auth/settings/inbox/items";
 pub const ANSWER: &str = "/auth/settings/inbox/items/answer";
 pub const REPLY: &str = "/auth/settings/inbox/items/reply";
+/// The form that answers or declines a question (lot L14).
+pub const QUESTION: &str = "/auth/settings/inbox/items/question";
 pub const CANCEL: &str = "/auth/settings/inbox/items/cancel";
 pub const LIMITS: &str = "/auth/settings/inbox/limits";
 /// The explanation folds after this many characters.
@@ -71,6 +73,40 @@ pub fn notice_for(code: &str) -> Option<Notice> {
         "gone" => ("That request does not exist.", false),
         "phone_only" => ("This server takes answers on the phone only.", false),
         "failed" => ("The inbox could not do this. Try again.", false),
+        "q_answered" => ("Your answer is sent to the agent.", true),
+        "q_declined" => ("You declined to answer. The agent is told.", true),
+        "q_locked" => (
+            "Send is locked until you allow this agent. You can decline or ask the agent now.",
+            false,
+        ),
+        "q_invalid" => (
+            "The answer does not fit the question. Read the marks below and try again.",
+            false,
+        ),
+        "q_no_body" => (
+            "The content is not available, so you cannot answer it here. You can decline.",
+            false,
+        ),
+        "q_closed" => (
+            "The question is closed. The agent did not get your answer.",
+            false,
+        ),
+        "q_abandoned" => (
+            "Too late: the agent no longer answers. Your answer was not used.",
+            false,
+        ),
+        "q_expired" => (
+            "Too late: this question expired. Your answer was not used.",
+            false,
+        ),
+        "q_taken" => (
+            "Another answer came first. Your answer was not used.",
+            false,
+        ),
+        "q_no_custom" => (
+            "The agent does not take another answer here. Choose one of the options.",
+            false,
+        ),
         _ => return super::agents::notice_for(code),
     };
     Some(Notice { text, ok })
@@ -125,6 +161,14 @@ fn word(state: ItemState, action: Option<Action>) -> &'static str {
     }
 }
 
+/// The word of the state of an item: a question that the owner answered is "Answered", an approval is "Approved".
+pub(super) fn word_of(l: &Loaded) -> &'static str {
+    match (l.item.kind, l.item.state, l.item.answer_action) {
+        (Kind::Question, ItemState::Answered, Some(Action::Accept)) => "Answered",
+        (_, state, action) => word(state, action),
+    }
+}
+
 fn state_icon(l: &Loaded) -> String {
     let (class, name) = match (l.item.state, l.item.answer_action) {
         (ItemState::Answered, Some(Action::Accept)) => ("st--ok", "circle-check"),
@@ -135,7 +179,7 @@ fn state_icon(l: &Loaded) -> String {
         (ItemState::Cancelled, _) => ("st--off", "ban"),
         _ => ("st--warn", "clock"),
     };
-    let label = word(l.item.state, l.item.answer_action);
+    let label = word_of(l);
     format!(
         r#"<span class="st {class}" role="img" aria-label="{label}" title="{label}">{}</span>"#,
         icon(name)
@@ -154,7 +198,7 @@ fn answered_by(l: &Loaded) -> String {
 }
 
 /// What happened to a request that is final, in one sentence. The text of the owner is not here.
-fn outcome(l: &Loaded, now: i64) -> String {
+pub(super) fn outcome(l: &Loaded, now: i64) -> String {
     let i = &l.item;
     let mut out = match i.state {
         ItemState::Answered => {
@@ -162,11 +206,7 @@ fn outcome(l: &Loaded, now: i64) -> String {
                 .answered_at
                 .map(|at| format!(", after {}", span(at - i.created_at)))
                 .unwrap_or_default();
-            format!(
-                "{} by {}{after}",
-                word(i.state, i.answer_action),
-                answered_by(l)
-            )
+            format!("{} by {}{after}", word_of(l), answered_by(l))
         }
         ItemState::Abandoned => format!(
             "Abandoned: the agent no longer answers. Last sign {} ago.",
@@ -223,11 +263,16 @@ pub struct Line<'a> {
     pub key_name: String,
     /// The agent of the request, for the History. The panel shows it in the header of the group.
     pub agent: Option<AgentTag>,
+    /// A question: the words of the server about the kind of answer and the discussion ("3 choices", "Your turn").
+    pub note: Option<String>,
 }
 
-fn kind_chip(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Approval => r#"<span class="kind kind--approval">Approval</span>"#,
+fn kind_chip(l: &Loaded) -> &'static str {
+    match (l.item.kind, l.item.interaction) {
+        (Kind::Approval, _) => r#"<span class="kind kind--approval">Approval</span>"#,
+        (_, inbox_core::proto::Interaction::OneShot) => {
+            r#"<span class="kind kind--auto">Automatic system</span>"#
+        }
         _ => r#"<span class="kind">Question</span>"#,
     }
 }
@@ -449,6 +494,11 @@ fn open_row(line: &Line, p: &OpenItems, locked: bool) -> String {
         }
         _ => {}
     }
+    let note = line
+        .note
+        .as_ref()
+        .map(|n| format!(r#"<span class="dot lease">{}</span>"#, html_escape(n)))
+        .unwrap_or_default();
     let cmd = line
         .first_line
         .as_ref()
@@ -459,16 +509,30 @@ fn open_row(line: &Line, p: &OpenItems, locked: bool) -> String {
             )
         })
         .unwrap_or_default();
-    let lock = if locked && i.kind == Kind::Approval {
+    let lock = if locked {
         format!(
-            r#"<div class="lockline">{}<span>Approve is locked until you allow this agent. You can decline now.</span></div>"#,
-            icon("lock")
+            r#"<div class="lockline">{}<span>{} is locked until you allow this agent. You can decline now.</span></div>"#,
+            icon("lock"),
+            if i.kind == Kind::Approval {
+                "Approve"
+            } else {
+                "Send"
+            }
         )
     } else {
         String::new()
     };
-    let (pill, action) = match i.state {
-        ItemState::Replied => (r#"<span class="pill">Question sent</span>"#, "Open"),
+    let question = i.kind == Kind::Question;
+    let (pill, action) = match (i.state, question) {
+        (ItemState::Replied, true) => (r#"<span class="pill">Agent is writing</span>"#, "Open"),
+        (ItemState::Replied, false) => (r#"<span class="pill">Question sent</span>"#, "Open"),
+        (_, true) if i.last_agent_turn_at.is_some() => {
+            (r#"<span class="pill pill--wait">Your turn</span>"#, "Open")
+        }
+        (_, true) => (
+            r#"<span class="pill pill--wait">Waiting for you</span>"#,
+            "Answer",
+        ),
         _ => (
             r#"<span class="pill pill--wait">Waiting for you</span>"#,
             "Review",
@@ -480,9 +544,9 @@ fn open_row(line: &Line, p: &OpenItems, locked: bool) -> String {
         ""
     };
     format!(
-        r#"<li class="oi"><span class="oi__icon">{}</span><div class="oi__line1">{}<span class="code">{}</span><a class="oi__title" href="{}">{}</a></div><div class="oi__who">{who}</div><div class="oi__meta">{meta}</div>{cmd}{lock}<div class="oi__side">{old}{pill}<a class="button button--small" href="{}">{action}</a></div></li>"#,
+        r#"<li class="oi"><span class="oi__icon">{}</span><div class="oi__line1">{}<span class="code">{}</span><a class="oi__title" href="{}">{}</a></div><div class="oi__who">{who}</div><div class="oi__meta">{meta}{note}</div>{cmd}{lock}<div class="oi__side">{old}{pill}<a class="button button--small" href="{}">{action}</a></div></li>"#,
         icon(icon_name),
-        kind_chip(i.kind),
+        kind_chip(l),
         html_escape(&code),
         html_escape(&detail_href(l)),
         title_html(&line.title, &code),
@@ -496,6 +560,8 @@ fn open_row(line: &Line, p: &OpenItems, locked: bool) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StateFilter {
     Approved,
+    /// A question that the owner answered.
+    Answered,
     Declined,
     Abandoned,
     Replaced,
@@ -504,8 +570,9 @@ pub enum StateFilter {
 }
 
 impl StateFilter {
-    pub const ALL: [StateFilter; 6] = [
+    pub const ALL: [StateFilter; 7] = [
         StateFilter::Approved,
+        StateFilter::Answered,
         StateFilter::Declined,
         StateFilter::Abandoned,
         StateFilter::Replaced,
@@ -516,6 +583,7 @@ impl StateFilter {
     pub fn name(self) -> &'static str {
         match self {
             StateFilter::Approved => "approved",
+            StateFilter::Answered => "answered",
             StateFilter::Declined => "declined",
             StateFilter::Abandoned => "abandoned",
             StateFilter::Replaced => "replaced",
@@ -531,6 +599,7 @@ impl StateFilter {
     pub fn label(self) -> &'static str {
         match self {
             StateFilter::Approved => "Approved",
+            StateFilter::Answered => "Answered",
             StateFilter::Declined => "Declined",
             StateFilter::Abandoned => "Abandoned",
             StateFilter::Replaced => "Replaced",
@@ -541,6 +610,9 @@ impl StateFilter {
 
     pub fn of(l: &Loaded) -> Option<StateFilter> {
         Some(match (l.item.state, l.item.answer_action) {
+            (ItemState::Answered, Some(Action::Accept)) if l.item.kind == Kind::Question => {
+                StateFilter::Answered
+            }
             (ItemState::Answered, Some(Action::Accept)) => StateFilter::Approved,
             (ItemState::Answered, _) => StateFilter::Declined,
             (ItemState::Abandoned, _) => StateFilter::Abandoned,
@@ -893,13 +965,13 @@ pub struct Detail<'a> {
     pub full: bool,
 }
 
-fn zone_head(title: &str, id: &str, trust: &str, note: &str, extra: &str) -> String {
+pub(super) fn zone_head(title: &str, id: &str, trust: &str, note: &str, extra: &str) -> String {
     format!(
         r#"<div class="sec2__head"><h2 class="title" id="{id}">{title}</h2>{trust}<span class="sec2__note">{note}</span><span class="grow"></span>{extra}</div>"#
     )
 }
 
-fn marks_banner(m: &html::Marks) -> String {
+pub(super) fn marks_banner(m: &html::Marks, verb: &str) -> String {
     if m.marked == 0 {
         return String::new();
     }
@@ -927,7 +999,7 @@ fn marks_banner(m: &html::Marks) -> String {
         ));
     }
     format!(
-        r#"<div class="banner banner--bad" role="alert">{}<p><b>This command has hidden or look-alike characters.</b> {} marked: {}. Look at each mark before you approve.</p></div>"#,
+        r#"<div class="banner banner--bad" role="alert">{}<p><b>This command has hidden or look-alike characters.</b> {} marked: {}. Look at each mark before you {verb}.</p></div>"#,
         icon("alert-triangle"),
         m.marked,
         parts.join(" and ")
@@ -1010,7 +1082,7 @@ fn command_zone(d: &Detail, t: &Text) -> String {
         .unwrap_or_default();
     format!(
         r#"{}<section class="sec2 sec2--cmd" aria-labelledby="cmd-t">{}<dl class="sec2__facts">{facts}</dl><div class="cmdscroll" tabindex="0" role="region" aria-label="{}">{}</div><div class="sec2__foot"><span>{lines} line{} · {} byte{} · {ascii}{attention}</span>{effect}<span>Asked {}</span></div></section>"#,
-        marks_banner(&m),
+        marks_banner(&m, "approve"),
         zone_head(
             "Command",
             "cmd-t",
@@ -1039,6 +1111,22 @@ fn short_effect(effect: &str) -> String {
 }
 
 fn explanation_zone(d: &Detail, t: &Text) -> String {
+    explanation_block(
+        t.explanation.as_deref(),
+        t.format,
+        d.full,
+        &detail_href(d.loaded),
+    )
+}
+
+/// The zone of the explanation of an agent: the label "Not checked", the fold after 400 characters, and the fixed
+/// sentence. `href` is the page that shows the whole text.
+pub(super) fn explanation_block(
+    text: Option<&str>,
+    format: ExplanationFormat,
+    full: bool,
+    href: &str,
+) -> String {
     let head = |tag: &str, note: &str| {
         zone_head(
             "Agent explanation",
@@ -1052,26 +1140,26 @@ fn explanation_zone(d: &Detail, t: &Text) -> String {
         )
     };
     let fixed = r#"<p class="exp__fixed">This text does not change what will run. It is not part of the effect.</p>"#;
-    let Some(text) = &t.explanation else {
+    let Some(text) = text else {
         return format!(
             r#"<section class="sec2 sec2--exp" aria-labelledby="exp-t">{}<p class="exp__none">No explanation given by the agent.</p></section>"#,
             head("", "Text of the agent, not verified.")
         );
     };
-    let markdown = t.format == ExplanationFormat::Markdown;
+    let markdown = format == ExplanationFormat::Markdown;
     let long = text.chars().count() > FOLD_CHARS;
-    let (shown, more) = if long && !d.full {
+    let (shown, more) = if long && !full {
         let cut: String = text.chars().take(FOLD_CHARS).collect();
         (
             cut,
             format!(
                 r#"<p class="exp__more"><a href="{}?full=1#exp-t">Show all ({} characters)</a></p>"#,
-                html_escape(&detail_href(d.loaded)),
+                html_escape(href),
                 text.chars().count()
             ),
         )
     } else {
-        (text.clone(), String::new())
+        (text.to_string(), String::new())
     };
     let tag = if markdown {
         r#"<span class="kind kind--auto">Markdown</span>"#
@@ -1093,7 +1181,7 @@ fn explanation_zone(d: &Detail, t: &Text) -> String {
                 "Text of the agent, not verified."
             }
         ),
-        html::explanation(&shown, t.format)
+        html::explanation(&shown, format)
     )
 }
 
@@ -1185,8 +1273,17 @@ fn thread(d: &Detail) -> String {
     if d.turns.is_empty() {
         return String::new();
     }
+    format!(
+        r#"<section class="sec2" aria-labelledby="th-t"><div class="sec2__head"><h2 class="title" id="th-t">Thread</h2></div><div class="thread">{}</div></section>"#,
+        turns_html(&d.turns)
+    )
+}
+
+/// The turns of a thread, as the bubbles of the page. The text of an agent has a dashed edge and the label "Agent text,
+/// not checked".
+pub(super) fn turns_html(turns: &[Turn]) -> String {
     let mut items = String::new();
-    for t in &d.turns {
+    for t in turns {
         let who = if t.agent { "Agent" } else { "You" };
         let via = t
             .via
@@ -1228,9 +1325,7 @@ fn thread(d: &Detail) -> String {
             when(t.at),
         );
     }
-    format!(
-        r#"<section class="sec2" aria-labelledby="th-t"><div class="sec2__head"><h2 class="title" id="th-t">Thread</h2></div><div class="thread">{items}</div></section>"#
-    )
+    items
 }
 
 fn side(d: &Detail) -> String {
@@ -1271,7 +1366,7 @@ fn side(d: &Detail) -> String {
         tl.push_str(&line(
             "is-now",
             at,
-            &format!("Answer: {}", word(i.state, i.answer_action).to_lowercase()),
+            &format!("Answer: {}", word_of(l).to_lowercase()),
         ));
     }
     if let Some(at) = i.abandoned_at {
@@ -1315,7 +1410,7 @@ pub fn detail_page(frame: &Frame, d: &Detail, notice: Option<Notice>) -> String 
         }
         ItemState::Pending => r#"<span class="pill pill--wait">Waiting for you</span>"#.to_string(),
         ItemState::Replied => r#"<span class="pill">Question sent</span>"#.to_string(),
-        s => format!(r#"<span class="pill">{}</span>"#, word(s, i.answer_action)),
+        _ => format!(r#"<span class="pill">{}</span>"#, word_of(l)),
     };
     let old = if stale {
         format!(
@@ -1340,7 +1435,7 @@ pub fn detail_page(frame: &Frame, d: &Detail, notice: Option<Notice>) -> String 
     };
     let head = format!(
         r#"<div class="head"><div class="chipStack">{}<span class="code">{}</span>{old}{state_pill}</div><h2>{title}</h2><div class="head__row"><span class="lease">Asked {}</span><span class="lease">Agent active {}</span>{lease}</div></div>{}"#,
-        kind_chip(i.kind),
+        kind_chip(l),
         html_escape(&code),
         b(&ago(d.now_ms, i.created_at)),
         b(&ago(d.now_ms, i.agent_seen_at)),
@@ -1603,6 +1698,7 @@ mod tests {
             first_line: Some("DELETE FROM t".into()),
             key_name: "ops-agent".into(),
             agent: None,
+            note: None,
         }
     }
 
