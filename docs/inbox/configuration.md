@@ -158,7 +158,7 @@ The block `inbox.approvals` sets how the PDP gates an action that a grant marks 
 - `mute_for` is the length of the mute. The range is `1m` to `7d`. The default is `1h`.
 - `web_approval` is `true` by default. With `false`, the web page lists the requests and does not decide them, so an owner with no phone gets `409 no_device`.
 
-The block `pdp_client` has no key for the approvals. A service gets them from its document of actions: an action with `"approval": "optional"`. A service without this declaration, or without a known document, gets a plain `false` for an action with `confirm`. The approval API gives it `403`. A file that still has `approvals` in a block `pdp_client` stops at start. See the README, "The approval gate" and "The approval API for a service".
+The block `pdp_client` has no key for the approvals. Each action of each service can ask for an approval, and a service must handle `approval_required` for all its actions. Without the block `inbox.approvals`, the PDP gives a plain `false` for an action with `confirm`, and the approval API gives `403`. A file that still has `approvals` in a block `pdp_client` stops at start. See the README, "The approval gate" and "The approval API for a service".
 
 ## Agents
 

@@ -1,12 +1,11 @@
 // Checks the approval controls of the grant editor and the key form in a real browser: the lock
-// button on a ticked permission whose action has "approval": "optional", the lock that the owner side
+// button on a ticked permission of a service (every action has one, but `access`), the lock that the owner side
 // imposes, the chip `confirm` of the list of the keys, and the choice of the interaction of a key.
 // Run it with: UI_CHECK_SCRIPT=ui-check-confirm.js tools/dev/ui-check.sh
 //
 // The check WRITES to the portal (it saves a grant of the account `alice` and makes a key). Run it
 // against a portal that is yours, never against the shared demo. The portal needs the service
-// ClickHouse Dash of the demo (its action `query.run.write` has "approval": "optional" and
-// `query.run.read` has not), and the account alice with: access, query.run.read and query.run.write on
+// ClickHouse Dash of the demo, and the account alice with: access, query.run.read and query.run.write on
 // ClickHouse Dash, and the rights to read, edit, make and use the MCP keys and to read the keys.
 //
 // Environment:
@@ -115,9 +114,10 @@ async function setApproval(browser) {
   await node(page, "");
   await tick(page, "query.run.read");
   await tick(page, "query.run.write");
-  check("account page: no lock on an action without approval", (await lockState(page, "query.run.read")) === null, "the row has a lock");
+  const readLock = await lockState(page, "query.run.read");
+  check("account page: every action has a lock, and it starts open", readLock && readLock.pressed === "false", JSON.stringify(readLock));
   let s = await lockState(page, "query.run.write");
-  check("account page: a ticked action with approval has a lock", s !== null, "no lock");
+  check("account page: a ticked action has a lock", s !== null, "no lock");
   check("account page: the lock starts open", s && s.pressed === "false" && s.icon === "#i-lock-open", JSON.stringify(s));
   check("account page: the tooltip says Asks for an approval", s && s.title === "Asks for an approval", JSON.stringify(s));
   check("account page: the lock is a flat icon button of 24 px", s && s.width === 24, JSON.stringify(s));
@@ -142,7 +142,8 @@ async function setApproval(browser) {
   await node(page, "");
   s = await lockState(page, "query.run.write");
   check("account page: the lock stays closed after Save", s && s.pressed === "true", JSON.stringify(s));
-  check("account page: the other action still has no lock", (await lockState(page, "query.run.read")) === null, "lock");
+  const readAfter = await lockState(page, "query.run.read");
+  check("account page: the other action keeps its open lock", readAfter && readAfter.pressed === "false", JSON.stringify(readAfter));
   await context.close();
 }
 
@@ -174,7 +175,7 @@ async function keyForm(browser, width, height, scheme) {
   await tick(page, "query.run.write");
   const read = await lockState(page, "query.run.read");
   const write = await lockState(page, "query.run.write");
-  check(`${label} key form: no lock on an action without approval`, read === null, JSON.stringify(read));
+  check(`${label} key form: an action that the owner does not ask for has an open lock`, read && read.pressed === "false" && !read.disabled, JSON.stringify(read));
   check(
     `${label} key form: the lock is closed and locked when the owner asks`,
     write && write.pressed === "true" && write.disabled && write.icon === "#i-lock",

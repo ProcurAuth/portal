@@ -223,9 +223,9 @@ portal has no groups of users. Each user has their own grants.
 
 A grant can ask for the approval of a person before each use of its action. The grant then has the property `confirm`. The PDP uses the property: see "The approval gate" in the section "AuthZEN PDP".
 
-- A service marks the actions that can ask. The document of the service has `"approval": "optional"` on the action. This is the only value of the member. Any other value, or a member of another type, makes the whole document bad.
-- This declaration is the only one. The file of the portal has no flag for it. A service with one such action or more can use the approval API. The PDP asks for an approval only for an action with the declaration. Else the PDP gives a plain `false`, and the approval API gives `403`. A request with an `evaluation_id` for an action that the document no longer declares gets `422` with `invalid_evaluation`.
-- The grant editor shows a lock button on the row of a ticked permission whose action has `"approval": "optional"`. The tooltip says "Asks for an approval". An open lock means no approval. A closed lock means that the permission asks for an approval. A grant of another action has no lock.
+- Each action of each service can ask. A service must handle `approval_required` for all its actions. The document of the service has no member for this, and the file of the portal has no flag for it. The portal ignores a member `approval` in an action.
+- The PDP asks for an approval when the file has the block `inbox.approvals`. Else the PDP gives a plain `false`, and the approval API gives `403`. Any token of a block `pdp_client` can use the approval API. The sealed `evaluation_id` limits it: a request must have the exact service, subject, action, resource and effect of the answer `approval_required`.
+- The grant editor shows a lock button on the row of each ticked permission of a service. The tooltip says "Asks for an approval". An open lock means no approval. A closed lock means that the permission asks for an approval. The action `access` and the actions of the service `portal` have no lock.
 - The server refuses `confirm` on a grant of the service `portal` and on the action `access`. A form that asks for it gets a bad grant. A file that asks for it stops at start.
 - The decision for a person asks for an approval when a grant that covers the action has `confirm`. The decision for a key asks when a grant of the key has `confirm`. It also asks when a grant of the owner has `confirm`. The two sides combine with OR, as the limits do. When the owner is the superadmin, only the grants of the key count.
 - A key shows the chip `confirm` in the list of the keys. The editor of a key shows the lock closed and locked when a grant of the owner asks for the approval. The person cannot open it, because the key cannot go beyond its owner.
@@ -377,7 +377,7 @@ A request about a database of the host `local`:
 
 #### The approval gate
 
-A grant with `confirm` makes an action need the approval of a person (see "Approval of an action"). The block `inbox.approvals` starts the gate. It needs `inbox.items`, `inbox.at_rest`, `pdp` and `keys.mcp = true`. The service declares `"approval": "optional"` on an action in its document of actions, and the file has no flag for it (see "Approval of an action"). A grant with `confirm` is possible only on such an action, else the PDP gives a plain `{"decision": false}`.
+A grant with `confirm` makes an action need the approval of a person (see "Approval of an action"). The block `inbox.approvals` starts the gate. It needs `inbox.items`, `inbox.at_rest`, `pdp` and `keys.mcp = true`. The service has no flag for it. Each action of each service can ask, and a service must handle `approval_required` for all its actions (see "Approval of an action"). Without the block `inbox.approvals`, a grant with `confirm` gives a plain `{"decision": false}`.
 
 ```hcl
 inbox {
@@ -447,7 +447,7 @@ The metric `portal_pdp_approval_total{reason}` counts the outcomes of the gate: 
 
 #### The approval API for a service
 
-A service that gets `approval_required` or `approval_pending` submits its request to the portal. The API has three routes on the listener of the PDP, and it uses the bearer token of the block `pdp_client`. It needs the block `inbox.approvals` and a known document of the service with at least one action that has `"approval": "optional"`. A token of a service without these gets `403`, and a request without a valid token gets `401`. The API has no TLS, like the rest of the listener. The command goes in clear text on the pod network, so limit the network of the listener (see `deploy/k3s/network-policy.yaml`).
+A service that gets `approval_required` or `approval_pending` submits its request to the portal. The API has three routes on the listener of the PDP, and it uses the bearer token of the block `pdp_client`. It needs the block `inbox.approvals`. Without it, a token gets `403`, and a request without a valid token gets `401`. The API has no TLS, like the rest of the listener. The command goes in clear text on the pod network, so limit the network of the listener (see `deploy/k3s/network-policy.yaml`).
 
 | Request | Answer |
 |---|---|
@@ -529,7 +529,7 @@ portal reads the actions of each service at `/.well-known/procurauth/actions`. T
 - For an https URL, portal verifies the certificate and the host name with the embedded Mozilla roots. A read that fails this check gives no document. For a service with a private CA, use an http URL on the internal network.
 - When the PDP gives `invalid_resource` to a service, portal reads the document of this service again at once. The service can have a new tree that portal does not know yet. portal does this at most once in each `access.actions_refresh` interval for each service. The early read has the same timeout, size limit and number of concurrent reads as the other reads. The log has one line `actions_read_early` with the service.
 - The field `server` of the document must be the id of the service. Set `portal.id` to the name of the server.
-- An action can have the member `approval`. Its only value is `"optional"`: a grant of this action can have `confirm`. The member is optional. Any other value makes the document bad. See "Approval of an action".
+- A grant of any action can have `confirm`. The document has no member for it, and portal ignores a member `approval`. See "Approval of an action".
 - The top-level list `resource_types` declares the tree of types (protocol 5.2). Each item has `name`, `parent` and `description`. A name starts with `a-z`, then has `a-z`, `0-9` and `_`, 1 to 32 characters. It is not `service`. The parent is `service` or another declared type. The tree has no cycle and at most 4 levels below `service`. The list has at most 16 types.
 - When the document has this list, each type in the list of an action is `service` or a declared type. A type occurs one time in the list of an action.
 - The document can have an optional list `resources`. This list names the nodes of the tree that the service knows, for example its hosts. Each item has `path` (the text form of a grant, for example `host:prod`), an optional `label`, and an optional list `actions`. A path follows the declared types. A path occurs one time. Each action of an item lists the type of the node. Without `actions`, the item takes each action that lists its type. The settings pages show each named resource apart, with the actions that apply on it only. The list has 256 items at most. The list is not part of AuthZEN: a service that does not give it works as before, and the superadmin types the ids.
@@ -825,7 +825,7 @@ A service can have hundreds of actions and hundreds of resources. A box for each
 
 At the left is the tree of the resources of a service, with a search field and the number of ticked grants of each node. A list of the services shows when the editor has more than one. At the right are the actions of the chosen node, in groups by the first part of the name. Each action has one line. A list of more than 60 actions starts with its groups closed. A filter and the button **Ticked** narrow the list. The box of a group ticks the actions that the list shows. An action that a grant above the node covers shows ticked, with the words "via the whole service" or "via" and the node. An action shows on the whole service only when its document lists the type `service`.
 
-A ticked action whose document has `"approval": "optional"` shows a lock button at the end of its row. The button is flat and has no text. It has two states: an open lock for no approval, and a closed lock for "asks for an approval". On the form of a key, the lock is closed and disabled when a grant of the owner asks for an approval. The key must then ask too. A permission of the file shows a closed lock that cannot change. The server reads the state from the field `confirm<n>`, which has the value `1` when the lock is closed.
+A ticked action of a service shows a lock button at the end of its row. The button is flat and has no text. It has two states: an open lock for no approval, and a closed lock for "asks for an approval". On the form of a key, the lock is closed and disabled when a grant of the owner asks for an approval. The key must then ask too. A permission of the file shows a closed lock that cannot change. The server reads the state from the field `confirm<n>`, which has the value `1` when the lock is closed.
 
 A ticked action shows its limit fields on its own line, with the largest value of the document as a hint. Each service has a row with a switch for the grant `access` and a count of its permissions. The list of the actions has no row `access`, because the switch is this grant. The limits of `access` show on the line of the source, at the right. On a form of a key, the button **Same as mine** ticks all the permissions that the owner holds on that service.
 
@@ -2341,11 +2341,13 @@ Version 5.1.0 adds the agents of a key. Read these points before you upgrade fro
 - The Android app of 5.1.0 and the server of 5.1.0 go together. The app keeps its portals when it updates from an earlier build, and it drops its local items: they come back from the server at the next connection. A phone of an earlier build cannot read the new frames of the agents. Update the app and the server in one step.
 
 
-Version 5.3.0 removes the key `approvals` of the block `pdp_client`. The document of actions of the service now gives this permission. Read these points before you upgrade from 5.2.x:
+Version 5.3.0 makes the approval a duty of each service. It removes the key `approvals` of the block `pdp_client` and the member `approval` of the document of actions. Read these points before you upgrade from 5.2.x:
 
 - The key `approvals` does not exist any more. A file that still has it stops at start with an unknown key error that names `pdp_client.<name>.approvals`. Delete the key from each block `pdp_client`. There is no alias.
-- A service that declares an action with `"approval": "optional"` is allowed by itself. It can use the approval API, and the PDP answers `approval_required` for a grant of that action with `confirm`. The block `inbox.approvals` must still exist.
-- A service without this declaration gets a plain `false` from the PDP and `403` from the approval API. It gets the same answers when its document is not known. A grant with `confirm` on an action that the document no longer declares gets a plain `false`.
+- The member `approval` of an action in the document of a service is not used. The portal ignores it with any value, as it ignores each member that it does not know. A document that has it stays good. Remove it when you can.
+- Each grant of a service other than `portal` can have `confirm`, for any action but `access`. The grant editor shows the lock on each such row. The service `portal` and the action `access` still refuse `confirm`.
+- The PDP answers `approval_required` for a grant with `confirm` on any action of any service with a known document. The block `inbox.approvals` must exist. Any token of a block `pdp_client` can use the approval API.
+- A service must handle `approval_required` for all its actions. A service that cannot do it is not conformant. Give no grant with `confirm` on an action of a service that does not handle it.
 - A configuration without the key, for example the homelab one, needs no change.
 - The database, the protocol and the Android app have no change.
 

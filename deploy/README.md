@@ -85,7 +85,7 @@ Create the Secret `portal-secret` in the namespace `edge` before the pods start.
 
 Add a key `pdp_token_<name>` for each block `pdp_client` that you add to the configuration.
 
-The PDP listener has no TLS. With the block `inbox.approvals`, the same listener serves the approval API of the services (`/approval/v1/requests`). The commands of the requests go in clear text on the pod network. Admit only the pods with the label `portal-pdp-client: "true"` to the port 4182, as `deploy/k3s/network-policy.yaml` does. Give this label only to a service that declares `"approval": "optional"` on an action in its document of actions.
+The PDP listener has no TLS. With the block `inbox.approvals`, the same listener serves the approval API of the services (`/approval/v1/requests`). The commands of the requests go in clear text on the pod network. Admit only the pods with the label `portal-pdp-client: "true"` to the port 4182, as `deploy/k3s/network-policy.yaml` does. Give this label only to a service that handles `approval_required` for all its actions.
 
 ```sh
 kubectl -n edge create secret generic portal-secret \

@@ -30,8 +30,8 @@ pub struct EditorAction {
     /// The actions that this action needs (portal 6.3): it counts only when the account holds
     /// them. Only the actions of the service `portal` have any.
     pub needs: Vec<String>,
-    /// The document has `"approval": "optional"` for the action: the row of a ticked grant has a
-    /// lock that sets `confirm`.
+    /// The row of a ticked grant has a lock that sets `confirm`. It is true for each action of a
+    /// service other than `portal`, except `access`.
     pub approval: bool,
 }
 
@@ -417,7 +417,7 @@ fn editor_service(service: &ServiceActions) -> EditorService {
             } else {
                 Vec::new()
             },
-            approval: found.is_some_and(crate::actions::Action::approval_optional),
+            approval: !portal,
         });
     }
     for node in &service.document.resources {
@@ -1112,14 +1112,14 @@ mod tests {
     }
 
     #[test]
-    fn only_an_action_of_the_document_with_approval_optional_gets_the_lock() {
+    fn each_action_of_a_service_gets_the_lock_but_access_and_the_portal_do_not() {
         let text = r#"{"server":"db","resource_types":[],"actions":[
-            {"name":"query.run.write","resource_types":["service"],"description":"Write.","approval":"optional"},
+            {"name":"query.run.write","resource_types":["service"],"description":"Write."},
             {"name":"query.run.read","resource_types":["service"],"description":"Read."}]}"#;
         let document = crate::actions::parse("db", text.as_bytes()).unwrap();
-        let service = ServiceActions {
+        let service = |id: &str, document: crate::actions::Document| ServiceActions {
             external: false,
-            id: "db".into(),
+            id: id.into(),
             name: "Data".into(),
             actions: document
                 .actions
@@ -1132,7 +1132,7 @@ mod tests {
             critical: Vec::new(),
             source: Source::Fresh(std::time::Duration::from_secs(1)),
         };
-        let editor = editor_service(&service);
+        let editor = editor_service(&service("db", document));
         let approval = |name: &str| {
             editor
                 .actions
@@ -1142,8 +1142,19 @@ mod tests {
                 .approval
         };
         assert!(approval("query.run.write"));
-        assert!(!approval("query.run.read"));
+        assert!(approval("query.run.read"));
         // The action `access` never asks for an approval.
         assert!(!approval("access"));
+        // No action of the service `portal` asks for an approval.
+        let own = editor_service(&service(
+            crate::portal_actions::SERVICE,
+            (*crate::portal_actions::document(&crate::portal_actions::Features {
+                inbox_groups: Some(Vec::new()),
+                kinds: vec![crate::keys::KeyKind::Mcp],
+            }))
+            .clone(),
+        ));
+        assert!(!own.actions.is_empty());
+        assert!(own.actions.iter().all(|a| !a.approval));
     }
 }

@@ -80,8 +80,7 @@ pub(super) struct Ask<'a> {
     pub usage: bool,
     /// `context.approval.effect`.
     pub effect: Option<&'a str>,
-    /// The approval is possible for this question: the block `inbox.approvals` is there, and the document of the
-    /// service declares `"approval": "optional"` for the action (see [`enabled_for`]).
+    /// The approval is possible: the file has the block `inbox.approvals` (see [`configured`]).
     pub enabled: bool,
     /// The subject of the question, as the request gives it. The approval is bound to it.
     pub subject: &'a str,
@@ -99,28 +98,15 @@ impl Ask<'_> {
     }
 }
 
-/// Whether the approval is possible for a question of the action `action`. The block `inbox.approvals` must exist,
-/// and the document of the service must be known and declare `"approval": "optional"` for this action. Else the
-/// answer is a plain `false`: fail closed.
-pub(super) fn enabled_for(state: &AppState, document: Option<&crate::actions::Document>, action: &str) -> bool {
-    inbox_has_approvals(state) && document.is_some_and(|d| d.approval_for(action))
-}
-
-/// Whether the service may use the approval API: the block `inbox.approvals` exists, and the document of the service
-/// is known and declares `"approval": "optional"` for at least one action.
-pub(in crate::http) fn may_use_api(state: &AppState, service: &str) -> bool {
-    inbox_has_approvals(state)
-        && state
-            .actions
-            .declared(service)
-            .is_some_and(|d| d.any_approval())
-}
-
-fn inbox_has_approvals(state: &AppState) -> bool {
+/// Whether the file has the block `inbox.approvals`. Without it the approval is not possible for any service: the PDP
+/// gives a plain `false` for a grant with `confirm`, and the approval API gives `403`. With it, each action of each
+/// service can ask: a service does not declare it.
+pub(in crate::http) fn configured(state: &AppState) -> bool {
     state
+        .config
         .inbox
-        .app()
-        .is_some_and(|app| app.config.approvals.is_some())
+        .as_ref()
+        .is_some_and(|inbox| inbox.approvals.is_some())
 }
 
 /// An approval that the gate consumed. `release` gives it back.
@@ -211,7 +197,7 @@ pub(super) fn gate(
     if !ask.enabled {
         state.pdp_stats.approval(NOT_ENABLED);
         return Err(Outcome::deny(
-            "the service does not declare the approval for this action: fail closed",
+            "the portal has no approvals: fail closed",
             None,
         ));
     }

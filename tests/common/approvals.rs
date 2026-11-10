@@ -31,7 +31,7 @@ const DOCUMENT: &str = r#"{"server":"db",
   "actions":[
     {"name":"data.read","resource_types":["host","database"],"description":"Read.","limits":["requests"]},
     {"name":"data.write","resource_types":["host","database"],"description":"Write.",
-     "limits":["requests"],"approval":"optional"}],
+     "limits":["requests"]}],
   "limits":[
     {"name":"requests","label":"Requests","description":"d","unit":"request","kind":"budget"}]}"#;
 

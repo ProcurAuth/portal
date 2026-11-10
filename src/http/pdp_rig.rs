@@ -43,6 +43,15 @@ impl InboxRig {
 
     /// `approvals` is the text inside the block `inbox.approvals`.
     pub(super) fn with_approvals(backend: &Backend, approvals: &str) -> Option<InboxRig> {
+        Self::build(backend, Some(approvals))
+    }
+
+    /// The same inbox, without the block `inbox.approvals`.
+    pub(super) fn without_approvals(backend: &Backend) -> Option<InboxRig> {
+        Self::build(backend, None)
+    }
+
+    fn build(backend: &Backend, approvals: Option<&str>) -> Option<InboxRig> {
         let dir = std::env::temp_dir().join(format!(
             "portal-pdp-rig-{}-{}",
             std::process::id(),
@@ -82,6 +91,7 @@ impl InboxRig {
         if let Some(pg) = &pg {
             env.push(("TEST_PG_PASSWORD".to_string(), pg.password()));
         }
+        let approvals = approvals.map_or(String::new(), |text| format!("approvals {{ {text} }}"));
         let config = format!(
             r#"{storage}
             inbox {{
@@ -107,7 +117,7 @@ impl InboxRig {
                 active_key = "k1"
                 key "k1" {{ secret_env = "TEST_CONTENT_KEY" }}
               }}
-              approvals {{ {approvals} }}
+              {approvals}
               group "infra" {{ name = "Infra" }}
             }}"#
         );

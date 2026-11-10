@@ -302,7 +302,7 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ),
     (
         "inbox.approvals",
-        "This block is optional and is inside the block `inbox`. Its presence starts the approval of an action: the PDP answers `approval_required` for a grant with `confirm`, and it consumes an approval once. The block needs the blocks `inbox.items` and `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. A server gets approvals only when its document of actions has an action with `\"approval\": \"optional\"`.",
+        "This block is optional and is inside the block `inbox`. Its presence starts the approval of an action: the PDP answers `approval_required` for a grant with `confirm`, and it consumes an approval once. The block needs the blocks `inbox.items` and `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. Every service that asks the PDP can use it: the service has no flag and no declaration for it.",
     ),
 ];
 

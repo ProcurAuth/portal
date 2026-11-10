@@ -45,7 +45,7 @@ The tests of the agents are in two places. The file `src/inbox/agents_tests.rs` 
 
 The tests of the agent channel are in `src/http/agent_who_tests.rs`. They run on both databases with the rig of `src/http/agent_channel_tests.rs`. They test the token, the header, the label, the hints, the text that holds a token, the flood and the codes of the agents. The black-box cases A01 to A10 are in `tests/mcp_contract.rs`.
 
-The tests of the approval API of the services are in `src/http/approval_api_tests.rs`. They have a recorder that keeps each answer that the service gets. Add a new answer to the check of `check_what_the_service_learned`, not a new way to read it. The tests of the approval gate of the PDP are in `src/http/pdp/approval_tests.rs`. The file `src/http/pdp_rig.rs` starts the Inbox for them and for the cases with approvals. It also writes approvals in any state.
+The tests of the approval API of the services are in `src/http/approval_api_tests.rs`. They have a recorder that keeps each answer that the service gets. Add a new answer to the check of `check_what_the_service_learned`, not a new way to read it. The tests of the approval gate of the PDP are in `src/http/pdp/approval_tests.rs`. The file `src/http/pdp_rig.rs` starts the Inbox for them and for the cases with approvals, and it writes approvals in any state. A test service needs no declaration: each action can ask.
 
 ## End-to-end check with the real PEP
 

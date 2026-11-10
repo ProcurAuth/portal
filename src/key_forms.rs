@@ -416,10 +416,6 @@ fn check_grants_apart(
             if grant.path.is_empty() && !action.resource_types.iter().any(|t| t == "service") {
                 return Err(BAD_GRANT);
             }
-            // A grant can ask for an approval only when the document says that the action can.
-            if confirm && !action.approval_optional() {
-                return Err(BAD_GRANT);
-            }
             document.check_grant(&grant).map_err(|_| BAD_GRANT)?;
             // The nodes of the service `portal` are the groups of the inbox and the kinds of key.
             if grant.service == portal_actions::SERVICE
@@ -518,8 +514,7 @@ mod tests {
                   "actions":[{"name":"data.read","resource_types":["host","database"],"description":"r",
                               "limits":["requests","max_rows"]},
                              {"name":"data.admin","resource_types":["service"],"description":"a"},
-                             {"name":"data.purge","resource_types":["host","database"],"description":"w",
-                              "approval":"optional"}],
+                             {"name":"data.purge","resource_types":["host","database"],"description":"w"}],
                   "limits":[{"name":"requests","label":"R","description":"d","unit":"request","kind":"budget"},
                             {"name":"max_rows","label":"M","description":"d","unit":"row","kind":"ceiling","min":1,"max":100000}]}"#,
             )
@@ -1278,7 +1273,8 @@ mod tests {
     }
 
     #[test]
-    fn a_grant_of_a_form_asks_for_an_approval_only_when_its_action_allows_it() {
+    fn a_grant_of_a_form_asks_for_an_approval_on_any_action_of_a_service_but_not_on_access_or_portal(
+    ) {
         let owner = grants(&[
             "access on service:datastore",
             "data.purge on service:datastore",
@@ -1305,8 +1301,16 @@ mod tests {
             .map(|g| g.action.as_str())
             .collect();
         assert_eq!(asking, ["data.purge"]);
-        // An action that the document does not mark with approval optional cannot ask.
-        assert_eq!(form(&[("confirm2", "1")]), Err(BAD_GRANT));
+        // Every action of a service can ask: the document has no member for it.
+        let done = form(&[("confirm1", "1"), ("confirm2", "1")]).unwrap();
+        let mut asking: Vec<&str> = done
+            .grants
+            .iter()
+            .filter(|g| g.confirm)
+            .map(|g| g.action.as_str())
+            .collect();
+        asking.sort();
+        assert_eq!(asking, ["data.purge", "data.read"]);
         // The action `access` cannot ask, and a blank grant has no confirm.
         assert_eq!(form(&[("confirm0", "1")]), Err(BAD_GRANT));
         assert_eq!(form(&[("confirm5", "1")]), Err(BAD_GRANT));
@@ -1391,8 +1395,7 @@ mod tests {
     }
 
     #[test]
-    fn an_account_keeps_a_held_confirm_that_the_document_no_longer_names_and_can_remove_it() {
-        // The account holds `data.read` with confirm. The document does not mark the action now.
+    fn an_account_keeps_a_held_confirm_and_can_remove_it_and_set_it_on_another_grant() {
         let held = vec![Grant::parse("data.read on service:datastore/host:prod")
             .unwrap()
             .with_confirm(true)];
@@ -1426,10 +1429,10 @@ mod tests {
         // The form without the field removes the property.
         let removed = check_form(&base).unwrap();
         assert!(removed.iter().all(|g| !g.confirm));
-        // A new confirm on this action is refused: the document does not allow it.
+        // A new confirm on another grant of any action is accepted.
         let mut other = base.to_vec();
         other[1] = ("grant1", "data.read on service:datastore/host:test");
         other.push(("confirm1", "1"));
-        assert_eq!(check_form(&other), Err(BAD_GRANT));
+        assert!(check_form(&other).unwrap().iter().any(|g| g.confirm));
     }
 }

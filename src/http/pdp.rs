@@ -63,7 +63,7 @@ mod approval;
 #[cfg(test)]
 mod approval_tests;
 
-pub(super) use self::approval::{may_use_api as may_use_approval_api, open_evaluation_id};
+pub(super) use self::approval::{configured as approvals_configured, open_evaluation_id};
 use self::approval::{Ask, Held};
 use super::*;
 use crate::counting::{Outcome as CountOutcome, Unavailable};
@@ -906,7 +906,7 @@ fn decide(
     let ask = Ask {
         usage,
         effect,
-        enabled: approval::enabled_for(state, document.as_deref(), action),
+        enabled: approval::configured(state),
         subject: &subject.id,
     };
     match SubjectId::parse(&subject.id) {

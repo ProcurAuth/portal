@@ -4332,8 +4332,7 @@ fn a_contradiction_of_the_approvals_stops_the_start_with_the_key_the_range_and_t
 
 #[test]
 fn the_keys_of_the_approval_api_have_the_documented_defaults_and_the_set_values_apply() {
-    let rest =
-        format!("{PDP_PARTS}\n pdp_client \"db\" {{ token_env = \"PDP_DB\" }}");
+    let rest = format!("{PDP_PARTS}\n pdp_client \"db\" {{ token_env = \"PDP_DB\" }}");
     let config = approvals_ok(APPROVALS, &rest);
     let a = config.inbox.as_ref().unwrap().approvals.as_ref().unwrap();
     assert_eq!(a.max_command_bytes, 16 * 1024);

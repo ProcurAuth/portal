@@ -16,25 +16,16 @@ use crate::http::cluster_tests::*;
 use crate::http::pdp_rig::{app_of, seed, InboxRig, Seed};
 use crate::store::testing::{backends, Backend};
 
-/// The service `db`: `data.write` can need an approval and counts the budget `requests`.
+/// The service `db`: `data.write` counts the budget `requests`.
 const DOCUMENT: &str = r#"{"server":"db",
   "resource_types":[{"name":"host","parent":"service","description":"A host."},
                     {"name":"database","parent":"host","description":"A database."}],
   "actions":[
     {"name":"data.read","resource_types":["host","database"],"description":"Read.","limits":["requests"]},
     {"name":"data.write","resource_types":["host","database"],"description":"Write.",
-     "limits":["requests"],"approval":"optional"}],
+     "limits":["requests"]}],
   "limits":[
     {"name":"requests","label":"Requests","description":"d","unit":"request","kind":"budget"}]}"#;
-
-/// The document of `db`. `declared` false: no action has `"approval": "optional"`.
-fn document(declared: bool) -> String {
-    if declared {
-        DOCUMENT.to_string()
-    } else {
-        DOCUMENT.replace(r#","approval":"optional""#, "")
-    }
-}
 
 /// The owner that every seeded answer names. No answer of the PDP may hold it.
 const CANARY_OWNER: &str = "canary-owner-5521";
@@ -48,10 +39,14 @@ struct Fixture {
     _rig: InboxRig,
 }
 
-/// A server with the inbox and the service `db`. `declared`: the document of `db` declares `"approval": "optional"` on `data.write`. The owner `alice`
+/// A server with the inbox and the service `db`. `approvals`: the file has the block `inbox.approvals`. The owner `alice`
 /// has `access` and `data.write` on the host `prod`.
-fn fixture(backend: &Backend, declared: bool) -> Option<Fixture> {
-    let rig = InboxRig::new(backend, "5m")?;
+fn fixture(backend: &Backend, approvals: bool) -> Option<Fixture> {
+    let rig = if approvals {
+        InboxRig::new(backend, "5m")?
+    } else {
+        InboxRig::without_approvals(backend)?
+    };
     let port = free_port();
     let mut env = rig.env.clone();
     env.push(("TEST_PDP_DB".into(), PDP_DB_TOKEN.into()));
@@ -75,7 +70,7 @@ fn fixture(backend: &Backend, declared: bool) -> Option<Fixture> {
     publish_catalog(&node, &[]);
     node.state.actions.set_document(
         "db",
-        crate::actions::parse("db", document(declared).as_bytes()).unwrap(),
+        crate::actions::parse("db", DOCUMENT.as_bytes()).unwrap(),
     );
     wait_until(std::time::Duration::from_secs(10), || {
         std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
@@ -110,9 +105,9 @@ fn fixture(backend: &Backend, declared: bool) -> Option<Fixture> {
 }
 
 /// Runs `test` on each backend that can run it.
-fn each_fixture(declared: bool, test: impl Fn(&Fixture, &str)) {
+fn each_fixture(approvals: bool, test: impl Fn(&Fixture, &str)) {
     for backend in backends() {
-        let Some(f) = fixture(&backend, declared) else {
+        let Some(f) = fixture(&backend, approvals) else {
             eprintln!("INBOX_TEST_PG is not set: skipped on PostgreSQL");
             continue;
         };
@@ -563,7 +558,7 @@ fn abandoned_or_lapsed_reads_as_approval_expired() {
 }
 
 #[test]
-fn confirm_on_an_action_without_approval_declaration_plain_false() {
+fn confirm_without_the_block_approvals_plain_false() {
     each_fixture(false, |f, name| {
         let key = f.key("9b1c04e2aa71f0c3", 1, None);
         let e = effect(1);
@@ -579,7 +574,7 @@ fn confirm_on_an_action_without_approval_declaration_plain_false() {
         let no_effect = f.post(&f.body(&key, "analytics", None, false)).json();
         assert_eq!(no_effect, json!({"decision": false}), "[{name}]");
         assert_eq!(f.metric("not_enabled"), 3, "[{name}]");
-        // The approval stays: no consumption without the declaration.
+        // The approval stays: no consumption without the block.
         assert_eq!(f.metric("consumed"), 0, "[{name}]");
     });
 }
