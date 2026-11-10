@@ -13,6 +13,10 @@
 //   UI_CHECK_ADMIN       an account with approval.read and approval.cancel (default ann)
 //   UI_CHECK_IDS         the JSON object `ids` of demo.json
 //   UI_CHECK_SHOTS       a directory for the screenshots (optional)
+//
+// The questions (lot L14): when UI_CHECK_IDS holds the key `both`, the script checks the web pages of the questions
+// instead. Start the server with the test `questions_demo_for_the_eyes` of tests/questions_web_e2e.rs (it writes
+// demo-questions.json). The pages are checked at 390 and 1440 px, dark and light, with JavaScript off.
 const { chromium } = require("playwright");
 
 const BASE = process.env.UI_CHECK_BASE;
@@ -66,10 +70,168 @@ const noSideways = (page) =>
     return [document.documentElement.scrollWidth - document.documentElement.clientWidth, main ? main.scrollWidth - main.clientWidth : 0];
   });
 
+// The pages of the questions (lot L14).
+async function questions(browser, owner, root) {
+  const Q = INBOX + "/items/";
+  const pages = [
+    ["inbox", INBOX],
+    ["history", INBOX + "/items"],
+    ["q-both", Q + IDS.both],
+    ["q-old", Q + IDS.old],
+    ["q-closed", Q + IDS.closed],
+    ["q-multiple", Q + IDS.multiple],
+    ["q-text", Q + IDS.text],
+    ["q-confirm", Q + IDS.confirm],
+    ["q-none", Q + IDS.none],
+    ["q-discussion", Q + IDS.discussion],
+    ["q-form", Q + IDS.form],
+    ["q-form-done", Q + IDS.form_done],
+    ["q-automatic", Q + IDS.jev],
+    ["q-marks", Q + IDS.marks],
+    ["q-answered", Q + IDS.answered],
+    ["q-declined", Q + IDS.declined],
+    ["q-cancelled", Q + IDS.cancelled],
+  ];
+  for (const scheme of ["dark", "light"]) {
+    for (const width of [390, 1440]) {
+      const tag = " (" + width + ", " + scheme + ")";
+      const { context, page } = await open(browser, owner, { viewport: { width, height: 900 }, colorScheme: scheme, javaScriptEnabled: false });
+      for (const [name, path] of pages) {
+        const response = await page.goto(BASE + path);
+        check(name + " loads" + tag, response.status() === 200, response.status());
+        const [doc, mainWidth] = await noSideways(page);
+        check(name + " has no sideways scroll" + tag, doc <= 0 && mainWidth <= 0, JSON.stringify([doc, mainWidth]));
+        check(name + " has Cache-Control no-store" + tag, (response.headers()["cache-control"] || "").includes("no-store"), response.headers()["cache-control"]);
+        await shot(page, name + "." + width + "." + scheme);
+      }
+      // The panel: question rows, grouped by agent, with the alerts above.
+      await page.goto(BASE + INBOX);
+      check("the panel lists the questions" + tag, (await page.locator(".oi .kind").count()) >= 8, await page.locator(".oi .kind").count());
+      check("the panel has one group for each agent" + tag, (await page.locator("details.agrp").count()) >= 1, "");
+      // The rows under the options follow the flags.
+      await page.goto(BASE + Q + IDS.both);
+      check("both rows show" + tag, (await page.locator(".opt.is-other").count()) === 1 && (await page.locator("textarea[form=qask]").count()) === 1, "");
+      await page.goto(BASE + Q + IDS.closed);
+      check("a closed question has no row" + tag, (await page.locator(".opt.is-other").count()) === 0 && (await page.locator("textarea").count()) === 0, "");
+      await page.goto(BASE + Q + IDS.jev);
+      check("an automatic system has no chat control" + tag, (await page.locator("textarea, form#qask, form[action$='/items/reply']").count()) === 0 && (await page.content()).includes("Automatic system (no conversation)"), "");
+      const hint = await top(page, ".auto");
+      const first = await top(page, ".opt");
+      check("the hint is above the options" + tag, hint !== null && first !== null && hint < first, JSON.stringify([hint, first]));
+      check("no option is ticked" + tag, (await page.locator("input:checked").count()) === 0, "");
+      await page.goto(BASE + Q + IDS.none);
+      check("a message with no answer has no Send" + tag, (await page.locator("button[value=accept]").count()) === 0 && (await page.locator("button[value=decline]").count()) === 1, "");
+      await page.goto(BASE + Q + IDS.form);
+      check("a form has a block for each question" + tag, (await page.locator(".q").count()) === 3, await page.locator(".q").count());
+      await page.goto(BASE + Q + IDS.marks);
+      check("the marks are visible and the banner shows" + tag, (await page.locator(".vis, .md-ctl").count()) >= 2 && (await page.locator(".banner--bad").count()) === 1, "");
+      await page.goto(BASE + Q + IDS.old);
+      check("the old question has the banner and no box" + tag, (await page.locator(".banner--warn").count()) >= 1 && (await page.locator("input[type=checkbox][name=stale_ack]").count()) === 0, "");
+      await context.close();
+    }
+  }
+
+  // ---- the copy button, with JavaScript on
+  {
+    const context = await browser.newContext({ storageState: owner, viewport: { width: 1440, height: 900 }, permissions: ["clipboard-read", "clipboard-write"] });
+    const page = await context.newPage();
+    await page.goto(BASE + INBOX + "/items/" + IDS.both);
+    const button = page.locator("[data-copy-text]").first();
+    check("the copy button shows with script", await button.isVisible(), "");
+    await button.click();
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    check("the copied command is the exact text", copied === "kubectl -n prod set image deploy/api \\\n  api=registry.local/api:v5.1", JSON.stringify(copied));
+    await context.close();
+  }
+
+  // ---- the forms, with JavaScript off
+  {
+    const { context, page } = await open(browser, owner, { viewport: { width: 390, height: 900 }, javaScriptEnabled: false });
+    const fresh = (id) => page.goto(BASE + INBOX + "/items/" + id);
+    // Ask the agent: the button of the second form sends its text, the question stays open.
+    await fresh(IDS.both);
+    await page.fill("textarea[form=qask]", "How long does it take?");
+    await Promise.all([page.waitForNavigation(), page.click("button[form=qask]")]);
+    check("a question to the agent makes a turn", (await page.content()).includes("How long does it take?") && page.url().includes("s=replied") && (await page.locator("button[value=accept]").count()) === 1, page.url());
+    check("the field is closed while the agent writes", (await page.locator("textarea[form=qask][disabled]").count()) === 1, "");
+    await shot(page, "q-asked.390.dark");
+    // A choice with no tick: the page shows the mistake.
+    await fresh(IDS.closed);
+    await Promise.all([page.waitForNavigation(), page.click("button[value=accept]")]);
+    check("an answer with no tick is refused with a mistake", (await page.locator(".miss").count()) === 1 && (await page.content()).includes("Choose one."), "");
+    await shot(page, "q-mistake.390.dark");
+    await page.check("input[value='o:wait']");
+    await Promise.all([page.waitForNavigation(), page.click("button[value=accept]")]);
+    check("a choice goes through", page.url().includes("s=q_answered") && (await page.content()).includes("Your answer is sent to the agent."), page.url());
+    check("the answered page shows the choice and no form", (await page.locator("button[value=accept]").count()) === 0 && (await page.locator(".ans__list li").count()) === 1, "");
+    await shot(page, "q-answered-web.390.dark");
+    // A text over the limit: the error shows and the typed text stays.
+    await fresh(IDS.text);
+    const long = "x".repeat(2100);
+    await page.fill("textarea[name=b0t]", long);
+    await Promise.all([page.waitForNavigation(), page.click("button[value=accept]")]);
+    check("a text over 2000 characters is refused and kept", (await page.content()).includes("The text has 2100 characters. The limit is 2000.") && (await page.inputValue("textarea[name=b0t]")) === long, "");
+    await page.fill("textarea[name=b0t]", "Every night, 02:00 to 05:00.");
+    await Promise.all([page.waitForNavigation(), page.click("button[value=accept]")]);
+    check("a text answer goes through", (await page.content()).includes("Every night, 02:00 to 05:00."), page.url());
+    // A multiple choice with the row Other.
+    await fresh(IDS.multiple);
+    await page.check("input[name=b0o_go]");
+    await page.check("input[name=b0o_stage]");
+    await page.fill("textarea[name=b0t]", "mine");
+    await Promise.all([page.waitForNavigation(), page.click("button[value=accept]")]);
+    check("the ticks and a text together are refused", (await page.content()).includes("replaces the choices") && (await page.inputValue("textarea[name=b0t]")) === "mine" && (await page.locator("input[name=b0o_go]:checked").count()) === 1, "");
+    await shot(page, "q-exclusive.390.dark");
+    await page.uncheck("input[name=b0o_go]");
+    await page.uncheck("input[name=b0o_stage]");
+    await Promise.all([page.waitForNavigation(), page.click("button[value=accept]")]);
+    check("the text alone is the free answer", (await page.content()).includes("Your own answer (Other)."), page.url());
+    // A form: the blocks without an answer are named, then it goes through.
+    await fresh(IDS.form);
+    await page.check("input[name=b0o_ev]");
+    await Promise.all([page.waitForNavigation(), page.click("button[value=accept]")]);
+    check("an incomplete form names the blocks", (await page.locator(".miss").count()) >= 2 && (await page.locator("input[name=b0o_ev]:checked").count()) === 1, await page.locator(".miss").count());
+    await shot(page, "q-form-mistake.390.dark");
+    await page.check("input[name=b1][value='o:d90']");
+    await page.fill("textarea[name=b2t]", "Every night");
+    await Promise.all([page.waitForNavigation(), page.click("button[value=accept]")]);
+    check("a form goes through", (await page.locator(".ans").count()) === 3, await page.locator(".ans").count());
+    await shot(page, "q-form-answered.390.dark");
+    // A decline and a message with no answer.
+    await fresh(IDS.confirm);
+    await Promise.all([page.waitForNavigation(), page.click("button[value=decline]")]);
+    check("a decline ends the question", (await page.content()).includes("You declined to answer."), page.url());
+    await fresh(IDS.none);
+    await Promise.all([page.waitForNavigation(), page.click("button[value=decline]")]);
+    check("a message with no answer is closed with Decline", (await page.locator("button[value=decline]").count()) === 0, page.url());
+    // The automatic system: choices only.
+    await fresh(IDS.jev);
+    await page.check("input[value='o:billing']");
+    await Promise.all([page.waitForNavigation(), page.click("button[value=accept]")]);
+    check("an automatic decision goes through", (await page.content()).includes("billing") && page.url().includes("s=q_answered"), page.url());
+    await context.close();
+  }
+
+  // ---- the superadmin reads the content behind the switch of the file
+  {
+    const su = await open(browser, root, { viewport: { width: 1440, height: 900 }, javaScriptEnabled: false });
+    await su.page.goto(BASE + INBOX + "/items/" + IDS.old + "/body");
+    check("the superadmin reads the content of a question", (await su.page.content()).includes("You read this content as the administrator"), su.page.url());
+    await shot(su.page, "q-admin-body.1440.dark");
+    await su.context.close();
+  }
+}
+
 async function main() {
   const browser = await chromium.launch();
   const owner = await signIn(browser, OWNER, PW);
   const root = await signIn(browser, "root", ROOT_PW);
+  if (IDS.both) {
+    await questions(browser, owner, root);
+    await browser.close();
+    console.log(failures === 0 ? "all checks passed" : failures + " checks failed");
+    process.exit(failures === 0 ? 0 : 1);
+  }
   const admin = await signIn(browser, ADMIN, "e2e-account-password-0123");
 
   // ---- the pages at each size and in each theme, with JavaScript off
