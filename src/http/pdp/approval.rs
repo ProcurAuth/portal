@@ -80,7 +80,7 @@ pub(super) struct Ask<'a> {
     pub usage: bool,
     /// `context.approval.effect`.
     pub effect: Option<&'a str>,
-    /// The server that asks has `approvals = true`.
+    /// The approval is possible: the file has the block `inbox.approvals` (see [`configured`]).
     pub enabled: bool,
     /// The subject of the question, as the request gives it. The approval is bound to it.
     pub subject: &'a str,
@@ -96,6 +96,17 @@ impl Ask<'_> {
             subject: "",
         }
     }
+}
+
+/// Whether the file has the block `inbox.approvals`. Without it the approval is not possible for any service: the PDP
+/// gives a plain `false` for a grant with `confirm`, and the approval API gives `403`. With it, each action of each
+/// service can ask: a service does not declare it.
+pub(in crate::http) fn configured(state: &AppState) -> bool {
+    state
+        .config
+        .inbox
+        .as_ref()
+        .is_some_and(|inbox| inbox.approvals.is_some())
 }
 
 /// An approval that the gate consumed. `release` gives it back.
@@ -186,7 +197,7 @@ pub(super) fn gate(
     if !ask.enabled {
         state.pdp_stats.approval(NOT_ENABLED);
         return Err(Outcome::deny(
-            "the server has no approvals: fail closed",
+            "the portal has no approvals: fail closed",
             None,
         ));
     }

@@ -1353,6 +1353,25 @@ fn the_pdp_block_and_its_clients() {
 }
 
 #[test]
+fn the_removed_key_approvals_of_a_pdp_client_stops_the_start_with_its_name() {
+    let pdp =
+        r#"pdp { listen_address = "0.0.0.0:4182" url = "http://pdp:4182" plain_http = true }"#;
+    for value in ["true", "false"] {
+        let message = err(&with(&format!(
+            r#"{pdp} pdp_client "db" {{ token_env = "PDP_DB" approvals = {value} }}"#
+        )));
+        assert!(
+            message.contains("unknown configuration key: pdp_client.db.approvals"),
+            "approvals = {value}: {message}"
+        );
+    }
+    // A block without the key needs no change.
+    ok(&with(&format!(
+        r#"{pdp} pdp_client "db" {{ token_env = "PDP_DB" }}"#
+    )));
+}
+
+#[test]
 fn a_bad_pdp_configuration_stops_the_start() {
     let pdp =
         r#"pdp { listen_address = "0.0.0.0:4182" url = "http://pdp:4182" plain_http = true }"#;
@@ -4239,21 +4258,15 @@ const APPROVALS: &str = r#"
 "#;
 
 #[test]
-fn the_block_approvals_gives_typed_values_with_documented_defaults_and_the_flag_of_a_client() {
+fn the_block_approvals_gives_typed_values_with_documented_defaults() {
     let rest = format!(
-        "{PDP_PARTS}\n pdp_client \"db\" {{ token_env = \"PDP_DB\" approvals = true }}\n pdp_client \"chat\" {{ token_env = \"PDP_CHAT\" }}"
+        "{PDP_PARTS}\n pdp_client \"db\" {{ token_env = \"PDP_DB\" }}\n pdp_client \"chat\" {{ token_env = \"PDP_CHAT\" }}"
     );
     let config = approvals_ok(APPROVALS, &rest);
     let approvals = config.inbox.as_ref().unwrap().approvals.as_ref().unwrap();
     assert_eq!(approvals.consume_within, Duration::from_secs(300));
     assert_eq!(approvals.evaluation_ttl, Duration::from_secs(300));
     assert_eq!(approvals.deny_cooldown, Duration::from_secs(300));
-    assert_eq!(
-        config.pdp_approvals.iter().collect::<Vec<_>>(),
-        ["db"],
-        "only the server with approvals = true"
-    );
-    assert_eq!(line(&config, "pdp_client.chat.approvals").value, "false");
     assert_eq!(
         line(&config, "inbox.approvals.evaluation_ttl").value,
         "\"5m\""
@@ -4272,7 +4285,7 @@ fn the_block_approvals_gives_typed_values_with_documented_defaults_and_the_flag_
 
 #[test]
 fn a_contradiction_of_the_approvals_stops_the_start_with_the_key_the_range_and_the_value() {
-    let client = "pdp_client \"db\" { token_env = \"PDP_DB\" approvals = true }";
+    let client = "pdp_client \"db\" { token_env = \"PDP_DB\" }";
     let with_parts = format!("{PDP_PARTS}\n{client}");
     for (approvals, rest, mcp, expected) in [
         // consume_within is mandatory, in its range, and at most max_lifetime.
@@ -4309,13 +4322,6 @@ fn a_contradiction_of_the_approvals_stops_the_start_with_the_key_the_range_and_t
         // The block needs the PDP and the keys of the kind mcp.
         (APPROVALS, "", false, "inbox.approvals needs the block pdp"),
         (APPROVALS, PDP_PARTS, false, "keys.mcp = true"),
-        // A server with approvals needs the block.
-        (
-            "",
-            with_parts.as_str(),
-            true,
-            "pdp_client.db.approvals is true",
-        ),
     ] {
         let message = approvals_err(approvals, rest, mcp);
         assert!(message.contains(expected), "{approvals} {rest}: {message}");
@@ -4326,8 +4332,7 @@ fn a_contradiction_of_the_approvals_stops_the_start_with_the_key_the_range_and_t
 
 #[test]
 fn the_keys_of_the_approval_api_have_the_documented_defaults_and_the_set_values_apply() {
-    let rest =
-        format!("{PDP_PARTS}\n pdp_client \"db\" {{ token_env = \"PDP_DB\" approvals = true }}");
+    let rest = format!("{PDP_PARTS}\n pdp_client \"db\" {{ token_env = \"PDP_DB\" }}");
     let config = approvals_ok(APPROVALS, &rest);
     let a = config.inbox.as_ref().unwrap().approvals.as_ref().unwrap();
     assert_eq!(a.max_command_bytes, 16 * 1024);
@@ -4377,7 +4382,7 @@ fn the_keys_of_the_approval_api_have_the_documented_defaults_and_the_set_values_
 #[test]
 fn a_bad_key_of_the_approval_api_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value(
 ) {
-    let client = "pdp_client \"db\" { token_env = \"PDP_DB\" approvals = true }";
+    let client = "pdp_client \"db\" { token_env = \"PDP_DB\" }";
     let rest = format!("{PDP_PARTS}\n{client}");
     for (keys, expected) in [
         (r#"max_command_bytes = "512""#, "inbox.approvals.max_command_bytes"),

@@ -82,9 +82,6 @@ pub struct Action {
     pub description: String,
     /// The names of the limits (see [`crate::limits`]) that a grant of this action can give.
     pub limits: Vec<String>,
-    /// The document has `"approval": "optional"` for this action: a grant of the action can
-    /// carry `confirm`, so that each use needs the approval of a person. The member has one value.
-    pub approval: bool,
 }
 
 /// One resource type below the root `service`.
@@ -607,6 +604,12 @@ impl Registry {
         );
     }
 
+    /// Removes what the registry knows of the service: its document is then unknown.
+    #[cfg(test)]
+    pub fn forget(&self, service: &str) {
+        self.write().remove(service);
+    }
+
     /// A good document of one level, read from the URL that `fail` uses.
     #[cfg(test)]
     pub fn set(&self, service: &str, actions: Vec<Action>) {
@@ -680,18 +683,11 @@ struct RawAction {
     /// The names of the limits that apply to the action.
     #[serde(default)]
     limits: Vec<String>,
-    /// The member `approval`. Its only value is `"optional"`: any other value, or another type,
-    /// refuses the document.
-    #[serde(default)]
-    approval: Option<String>,
+    // The member `approval` of an earlier version is not read. The parser ignores it, as it
+    // ignores each member that it does not know.
 }
 
 impl Action {
-    /// Whether a grant of this action can carry `confirm`: the document has `approval: "optional"`.
-    pub fn approval_optional(&self) -> bool {
-        self.approval
-    }
-
     /// The resource types of the action that a grant below the service can name: the listed
     /// types without `service`.
     pub fn sub_resource_types(&self) -> impl Iterator<Item = &str> {
@@ -850,22 +846,11 @@ pub fn parse_within(service: &str, body: &[u8], bounds: &Bounds) -> Result<Docum
                 ));
             }
         }
-        let approval = match raw.approval.as_deref() {
-            None => false,
-            Some("optional") => true,
-            Some(other) => {
-                return Err(format!(
-                    "the action {:?} has the approval {other:?}: the only value is \"optional\"",
-                    raw.name
-                ));
-            }
-        };
         out.push(Action {
             name: raw.name,
             resource_types: raw.resource_types,
             description: raw.description,
             limits: raw.limits,
-            approval,
         });
     }
     let mut document = match declared {
@@ -1342,37 +1327,23 @@ mod tests {
     }
 
     #[test]
-    fn action_document_approval_member_only_optional() {
+    fn the_member_approval_of_an_action_is_ignored_with_any_value() {
         let one = |member: &str| {
             format!(
                 r#"{{"server":"db","resource_types":[],"actions":[{{"name":"query.run.write","resource_types":["service"],"description":"d"{member}}}]}}"#
             )
             .into_bytes()
         };
-        // No member: the action never asks for an approval.
         let plain = parse("db", &one("")).unwrap();
-        assert!(!plain.actions[0].approval_optional());
-        // The single value "optional": a grant of the action can carry confirm.
-        let optional = parse("db", &one(r#","approval":"optional""#)).unwrap();
-        assert!(optional.actions[0].approval_optional());
-        // Any other value, or another type, refuses the whole document.
-        for bad in [
+        for member in [
+            r#","approval":"optional""#,
             r#","approval":"required""#,
-            r#","approval":"Optional""#,
-            r#","approval":"always""#,
-            r#","approval":"""#,
             r#","approval":true"#,
-            r#","approval":1"#,
-            r#","approval":["optional"]"#,
             r#","approval":{"mode":"optional"}"#,
         ] {
-            assert!(parse("db", &one(bad)).is_err(), "{bad}");
+            let document = parse("db", &one(member)).expect(member);
+            assert_eq!(document, plain, "{member}: the member changes nothing");
         }
-        let message = parse("db", &one(r#","approval":"required""#)).unwrap_err();
-        assert!(
-            message.contains("query.run.write") && message.contains("optional"),
-            "{message}"
-        );
     }
 
     #[test]
@@ -1777,7 +1748,6 @@ mod tests {
             resource_types: vec!["database".into()],
             description: String::new(),
             limits: Vec::new(),
-            approval: false,
         };
         let document = Document::one_level(vec![read]);
         registry.record("a", "http://a/x", Outcome::Document(document.clone()), now);
@@ -1874,7 +1844,6 @@ mod tests {
             resource_types: vec!["database".into()],
             description: String::new(),
             limits: Vec::new(),
-            approval: false,
         }]);
         assert!(registry
             .record("a", url, Outcome::Failed("down".into()), now)
@@ -1918,7 +1887,6 @@ mod tests {
                 resource_types: kinds.iter().map(|k| k.to_string()).collect(),
                 description: String::new(),
                 limits: Vec::new(),
-                approval: false,
             }])
         };
         assert!(!applies(), "never read");

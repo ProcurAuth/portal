@@ -24,7 +24,7 @@ const DOCUMENT: &str = r#"{"server":"db",
   "actions":[
     {"name":"data.read","resource_types":["host","database"],"description":"Read.","limits":["requests"]},
     {"name":"data.write","resource_types":["host","database"],"description":"Write.",
-     "limits":["requests"],"approval":"optional"}],
+     "limits":["requests"]}],
   "limits":[
     {"name":"requests","label":"Requests","description":"d","unit":"request","kind":"budget"}]}"#;
 
@@ -62,10 +62,14 @@ struct Rig {
     _rig: InboxRig,
 }
 
-/// A server with the inbox and the service `db`. `approvals` is the flag of the block `pdp_client`. `extra` holds
+/// A server with the inbox and the service `db`. `approvals`: the file has the block `inbox.approvals`. `extra` holds
 /// more keys of the block `inbox.approvals`.
 fn rig(backend: &Backend, approvals: bool, extra: &str) -> Option<Rig> {
-    let inbox = InboxRig::with_approvals(backend, &format!("consume_within = \"5m\" {extra}"))?;
+    let inbox = if approvals {
+        InboxRig::with_approvals(backend, &format!("consume_within = \"5m\" {extra}"))?
+    } else {
+        InboxRig::without_approvals(backend)?
+    };
     let port = free_port();
     let mut env = inbox.env.clone();
     env.push(("TEST_PDP_DB".into(), PDP_DB_TOKEN.into()));
@@ -81,7 +85,7 @@ fn rig(backend: &Backend, approvals: bool, extra: &str) -> Option<Rig> {
             r#"identity {{ issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" }}
             pdp {{ listen_address = "127.0.0.1:{port}" url = "http://pdp.test:{port}" plain_http = true max_evaluations = 8 }}
             keys {{}}
-            pdp_client "db" {{ token_env = "TEST_PDP_DB" approvals = {approvals} }}
+            pdp_client "db" {{ token_env = "TEST_PDP_DB" }}
             {}"#,
             inbox.config
         ),
@@ -97,6 +101,7 @@ fn rig(backend: &Backend, approvals: bool, extra: &str) -> Option<Rig> {
     let mut grants: Vec<Grant> = [
         "access on service:db",
         "data.write on service:db/host:prod",
+        "data.read on service:db/host:prod",
         "keys.own.use on service:portal/key_kind:mcp",
     ]
     .iter()
@@ -221,8 +226,13 @@ impl Rig {
 
     /// A key of the owner that can use `data.write` on analytics with `confirm`.
     fn key(&self, id: &str, interaction: crate::keys::Interaction) -> String {
+        self.key_for(id, interaction, "data.write")
+    }
+
+    /// A key of the owner that can use `action` on analytics with `confirm`.
+    fn key_for(&self, id: &str, interaction: crate::keys::Interaction, action: &str) -> String {
         let access = Grant::new("access", "db").unwrap();
-        let write = Grant::from_path_text("data.write", "db", ANALYTICS)
+        let write = Grant::from_path_text(action, "db", ANALYTICS)
             .unwrap()
             .with_confirm(true);
         let mut grants = vec![access, write];
@@ -282,6 +292,10 @@ impl Rig {
     }
 
     fn pdp_body(&self, subject: &str, effect: &str, usage: bool) -> String {
+        self.pdp_body_for("data.write", subject, effect, usage)
+    }
+
+    fn pdp_body_for(&self, action: &str, subject: &str, effect: &str, usage: bool) -> String {
         let mut context = serde_json::Map::new();
         if usage {
             context.insert("usage".into(), json!({"units": 1}));
@@ -289,7 +303,7 @@ impl Rig {
         context.insert("approval".into(), json!({"effect": effect}));
         json!({
             "subject": {"type": "user", "id": subject},
-            "action": {"name": "data.write"},
+            "action": {"name": action},
             "resource": {"type": "database", "id": "analytics", "properties": {"ancestors": [
                 {"type": "service", "id": "db"}, {"type": "host", "id": "prod"}]}},
             "context": context
@@ -843,7 +857,7 @@ fn a01_429_after_cap() {
 }
 
 #[test]
-fn a01_service_without_approvals_flag_403() {
+fn a01_without_the_block_approvals_the_api_gives_403() {
     each_rig(false, "", |r, name| {
         let key = r.key_a();
         let c = command(1);
@@ -865,6 +879,137 @@ fn a01_service_without_approvals_flag_403() {
             "",
         );
         assert_eq!(reply.status, 401, "[{name}]");
+    });
+}
+
+/// A POST with a valid shape. Only the door and the `evaluation_id` can refuse it.
+fn probe_body(evaluation_id: &str) -> Value {
+    let c = command(1);
+    json!({"evaluation_id": evaluation_id, "effect": c.effect, "op": c.op, "view": c.view, "lease_s": 900})
+}
+
+#[test]
+fn a01_a_service_with_an_unknown_or_bad_document_gets_a_plain_false() {
+    each_rig(true, "", |r, name| {
+        let key = r.key_a();
+        let c = command(1);
+        let asked = r.ask(&key, &c.effect, false);
+        assert_eq!(asked["context"]["reason"], "approval_required", "[{name}]");
+        let closed = |when: &str| {
+            for usage in [false, true] {
+                let answer = r.ask(&key, &c.effect, usage);
+                assert_eq!(answer, json!({"decision": false}), "[{name}] {when}");
+            }
+        };
+        // Never read.
+        r.node.state.actions.forget("db");
+        closed("unknown");
+        // A first read that failed.
+        r.node.state.actions.fail("db");
+        closed("bad");
+        // The good document opens the way again.
+        r.node.state.actions.set_document(
+            "db",
+            crate::actions::parse("db", DOCUMENT.as_bytes()).unwrap(),
+        );
+        let answer = r.ask(&key, &c.effect, false);
+        assert_eq!(answer["context"]["reason"], "approval_required", "[{name}]");
+    });
+}
+
+#[test]
+fn a01_every_action_of_a_service_can_ask_for_an_approval() {
+    each_rig(true, "", |r, name| {
+        // `data.read` has no member of approval in its document, and a grant with `confirm` asks as `data.write` does.
+        let key = r.key_for(
+            "4d1e6a0b93c57f28",
+            crate::keys::Interaction::Conversational,
+            "data.read",
+        );
+        let op = json!({"tool": "run_read_query", "host": "prod", "database": "analytics", "sql": "SELECT 1"});
+        let view = json!({"title": "Read from ClickHouse", "fields": [["Host", "/host"]], "body": "/sql", "body_label": "SQL"});
+        let effect = effect_hash("db", "data.read", ANALYTICS, &op).unwrap();
+        let body = r.pdp_body_for("data.read", &key, &effect, false);
+        let reply = r.call("evaluation", || {
+            pdp(
+                r.port,
+                "/access/v1/evaluation",
+                Some(PDP_DB_TOKEN),
+                &body,
+                None,
+            )
+        });
+        let answer = reply.json();
+        assert_eq!(
+            answer["context"]["reason"], "approval_required",
+            "[{name}] {answer}"
+        );
+        let id = answer["context"]["evaluation_id"]
+            .as_str()
+            .expect("an evaluation_id");
+        let posted = r.post(
+            &json!({"evaluation_id": id, "effect": effect, "op": op, "view": view, "lease_s": 900}),
+        );
+        assert_eq!(posted.status, 201, "[{name}] {}", posted.body);
+        assert_eq!(
+            r.loaded(&posted.id()).approval.unwrap().effect,
+            effect,
+            "[{name}]"
+        );
+    });
+}
+
+#[test]
+fn a01_the_evaluation_id_opens_only_the_request_that_the_pdp_asked_for() {
+    each_rig(true, "", |r, name| {
+        let key = r.key_a();
+        let c = command(1);
+        let id = r.evaluation_id(&key, &c.effect);
+        let refused = |body: Value, what: &str| {
+            assert_eq!(
+                r.post(&body).error(),
+                (422, "invalid_evaluation".to_string()),
+                "[{name}] {what}"
+            );
+        };
+        // Another operation, another action or another resource has another effect: the sealed id does not fit.
+        let other_op = command(2);
+        refused(
+            json!({"evaluation_id": id, "effect": other_op.effect, "op": other_op.op, "view": other_op.view, "lease_s": 900}),
+            "another operation",
+        );
+        let read = effect_hash("db", "data.read", ANALYTICS, &c.op).unwrap();
+        refused(
+            json!({"evaluation_id": id, "effect": read, "op": c.op, "view": c.view, "lease_s": 900}),
+            "another action",
+        );
+        let elsewhere = effect_hash("db", "data.write", "host:prod/database:other", &c.op).unwrap();
+        refused(
+            json!({"evaluation_id": id, "effect": elsewhere, "op": c.op, "view": c.view, "lease_s": 900}),
+            "another resource",
+        );
+        // A made-up id.
+        refused(
+            json!({"evaluation_id": "x", "effect": c.effect, "op": c.op, "view": c.view, "lease_s": 900}),
+            "a made-up id",
+        );
+        // The body has no member to name an action or a resource.
+        let mut named = probe_body(&id);
+        named["action"] = json!("data.read");
+        assert_eq!(
+            r.post(&named).error(),
+            (422, "invalid_argument".to_string()),
+            "[{name}]"
+        );
+        assert_eq!(r.count("SELECT COUNT(*) FROM approvals"), 0, "[{name}]");
+        // The exact request that the PDP asked for opens the request, for the action and the effect of the answer.
+        let done = r.post(&probe_body(&id));
+        assert_eq!(done.status, 201, "[{name}] {}", done.body);
+        assert_eq!(
+            r.loaded(&done.id()).approval.unwrap().effect,
+            c.effect,
+            "[{name}]"
+        );
     });
 }
 

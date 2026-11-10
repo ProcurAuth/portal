@@ -39,7 +39,7 @@ fn agent_rig_full(backend: &Backend, approvals: &str, blocks: &str, mcp: &str) -
             r#"identity {{ issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" }}
             pdp {{ listen_address = "127.0.0.1:{port}" url = "http://pdp.test:{port}" plain_http = true max_evaluations = 8 }}
             keys {{ api = true }}
-            pdp_client "db" {{ token_env = "TEST_PDP_DB" approvals = true }}
+            pdp_client "db" {{ token_env = "TEST_PDP_DB" }}
             {}"#,
             inbox.config
         ),
