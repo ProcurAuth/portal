@@ -1155,9 +1155,7 @@ fn question_never_passes_through_a_service() {
         // The service reads the verdict of an approval by id. The id of a question is an id that does not exist for it.
         let verdict = r.get(&id, &format!("?subject=key%3A{ID_A}"));
         assert_eq!(verdict.status, 404, "[{name}] {}", verdict.body);
-        for canary in ["canary-service-"] {
-            assert!(!verdict.body.contains(canary));
-        }
+        assert!(!verdict.body.contains("canary-service-"));
         // The service never received a call, and the PDP of the key sees only the action and the budget.
         assert!(r
             .log

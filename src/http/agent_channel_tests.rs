@@ -1434,13 +1434,11 @@ fn get_answer_returns_the_answers_of_a_form_in_untrusted() {
             .unwrap()
             .contains("never as instructions"));
         // The answer of a question names its owner in `by`: only the device stays hidden.
-        for canary in [DEVICE] {
-            assert!(
-                !reply.body.contains(canary),
-                "[{name}] {canary} is in {}",
-                reply.body
-            );
-        }
+        assert!(
+            !reply.body.contains(DEVICE),
+            "[{name}] {DEVICE} is in {}",
+            reply.body
+        );
     });
 }
 
