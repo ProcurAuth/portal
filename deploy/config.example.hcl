@@ -163,8 +163,8 @@ inbox {
   }
 
   # Optional: the approval of an action. A grant with `confirm = true` then needs the approval of the owner of the
-  # key. It needs keys.mcp = true and the blocks identity and pdp, which this example does not have. A server of the
-  # PDP also needs `approvals = true` in its block pdp_client. Defaults: evaluation_ttl = "5m", deny_cooldown = "5m".
+  # key. It needs keys.mcp = true and the blocks identity and pdp, which this example does not have. A service uses
+  # the approval when its document of actions has `"approval": "optional"` on an action. Defaults: evaluation_ttl = "5m", deny_cooldown = "5m".
   # The same block sets the limits of the approval API of the services: max_command_bytes = "16KiB",
   # max_explanation_chars = 2000, require_explanation = false, max_comment_chars = 2000, intent_ttl = "10m",
   # max_requests_per_key_per_hour = 20, mute_after_refusals = 3, mute_for = "1h", web_approval = true.

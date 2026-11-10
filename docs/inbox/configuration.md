@@ -37,7 +37,7 @@ Two keys that contradict each other stop the program at start. The message names
 - `inbox.cluster` needs the block `postgres`. Its `listen` must not use the port of `server.listen_address` or of `pdp.listen_address`.
 - `inbox.watch.group` must be the label of a block `group`. The block must send at least one kind of alert.
 - `inbox.items` needs `inbox.at_rest`, and `inbox.at_rest` needs `inbox.items`. See "Items" and "Content keys".
-- `inbox.approvals` needs `inbox.items`, `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. A block `pdp_client` with `approvals = true` needs the block `inbox.approvals`. See "Approvals".
+- `inbox.approvals` needs `inbox.items`, `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. See "Approvals".
 - `inbox.agents` needs `inbox.items` and `inbox.at_rest`. Its `idle_after` is at most its `purge_after`. See "Agents".
 - `inbox.questions` needs `inbox.items` and `inbox.at_rest`. See "Questions".
 - `inbox.mcp` needs `inbox.items` and `keys.mcp = true`. Its `max_wait` is at most `inbox.items.wait_max`. Its `path` is not `metrics.path`. See "The MCP endpoint".
@@ -158,7 +158,7 @@ The block `inbox.approvals` sets how the PDP gates an action that a grant marks 
 - `mute_for` is the length of the mute. The range is `1m` to `7d`. The default is `1h`.
 - `web_approval` is `true` by default. With `false`, the web page lists the requests and does not decide them, so an owner with no phone gets `409 no_device`.
 
-A block `pdp_client` has the key `approvals`. The default is `false`. A server without the flag gets a plain `false` for an action with `confirm`. See the README, "The approval gate" and "The approval API for a service".
+The block `pdp_client` has no key for the approvals. A service gets them from its document of actions: an action with `"approval": "optional"`. A service without this declaration, or without a known document, gets a plain `false` for an action with `confirm`. The approval API gives it `403`. A file that still has `approvals` in a block `pdp_client` stops at start. See the README, "The approval gate" and "The approval API for a service".
 
 ## Agents
 

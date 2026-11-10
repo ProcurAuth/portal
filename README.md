@@ -224,6 +224,7 @@ portal has no groups of users. Each user has their own grants.
 A grant can ask for the approval of a person before each use of its action. The grant then has the property `confirm`. The PDP uses the property: see "The approval gate" in the section "AuthZEN PDP".
 
 - A service marks the actions that can ask. The document of the service has `"approval": "optional"` on the action. This is the only value of the member. Any other value, or a member of another type, makes the whole document bad.
+- This declaration is the only one. The file of the portal has no flag for it. A service with one such action or more can use the approval API. The PDP asks for an approval only for an action with the declaration. Else the PDP gives a plain `false`, and the approval API gives `403`. A request with an `evaluation_id` for an action that the document no longer declares gets `422` with `invalid_evaluation`.
 - The grant editor shows a lock button on the row of a ticked permission whose action has `"approval": "optional"`. The tooltip says "Asks for an approval". An open lock means no approval. A closed lock means that the permission asks for an approval. A grant of another action has no lock.
 - The server refuses `confirm` on a grant of the service `portal` and on the action `access`. A form that asks for it gets a bad grant. A file that asks for it stops at start.
 - The decision for a person asks for an approval when a grant that covers the action has `confirm`. The decision for a key asks when a grant of the key has `confirm`. It also asks when a grant of the owner has `confirm`. The two sides combine with OR, as the limits do. When the owner is the superadmin, only the grants of the key count.
@@ -376,7 +377,7 @@ A request about a database of the host `local`:
 
 #### The approval gate
 
-A grant with `confirm` makes an action need the approval of a person (see "Approval of an action"). The block `inbox.approvals` starts the gate. It needs `inbox.items`, `inbox.at_rest`, `pdp` and `keys.mcp = true`. A server also needs `approvals = true` in its block `pdp_client`. Without this flag, a grant with `confirm` gives the server a plain `{"decision": false}`.
+A grant with `confirm` makes an action need the approval of a person (see "Approval of an action"). The block `inbox.approvals` starts the gate. It needs `inbox.items`, `inbox.at_rest`, `pdp` and `keys.mcp = true`. The service declares `"approval": "optional"` on an action in its document of actions, and the file has no flag for it (see "Approval of an action"). A grant with `confirm` is possible only on such an action, else the PDP gives a plain `{"decision": false}`.
 
 ```hcl
 inbox {
@@ -387,7 +388,6 @@ inbox {
 
 pdp_client "db" {
   token_file = "/run/secrets/portal_pdp_token_db"
-  approvals  = true
 }
 ```
 
@@ -447,7 +447,7 @@ The metric `portal_pdp_approval_total{reason}` counts the outcomes of the gate: 
 
 #### The approval API for a service
 
-A server with `approvals = true` that gets `approval_required` or `approval_pending` submits its request to the portal. The API has three routes on the listener of the PDP. It uses the bearer token of the block `pdp_client`. A token of a server without `approvals = true` gets `403`, and a request without a valid token gets `401`. The API has no TLS, like the rest of the listener. The command goes in clear text on the pod network, so limit the network of the listener (see `deploy/k3s/network-policy.yaml`).
+A service that gets `approval_required` or `approval_pending` submits its request to the portal. The API has three routes on the listener of the PDP, and it uses the bearer token of the block `pdp_client`. It needs the block `inbox.approvals` and a known document of the service with at least one action that has `"approval": "optional"`. A token of a service without these gets `403`, and a request without a valid token gets `401`. The API has no TLS, like the rest of the listener. The command goes in clear text on the pod network, so limit the network of the listener (see `deploy/k3s/network-policy.yaml`).
 
 | Request | Answer |
 |---|---|
@@ -474,7 +474,7 @@ An approval that the server did not consume before `consume_before` is `void`. A
 
 | Status | `error` | Cause |
 |---|---|---|
-| 401, 403 | | no valid token, or the server has no `approvals = true` |
+| 401, 403 | | no valid token, or the service declares no approval |
 | 404 | `not_found` | an unknown request, a request of another server, or of another subject |
 | 405, 415 | | a wrong method, or a body that is not `application/json` |
 | 409 | `no_device` | the owner has no phone, and `web_approval` is false |
@@ -1992,7 +1992,7 @@ This block is optional and is inside the block `inbox`. Its presence starts the 
 
 #### Block `inbox.approvals`
 
-This block is optional and is inside the block `inbox`. Its presence starts the approval of an action: the PDP answers `approval_required` for a grant with `confirm`, and it consumes an approval once. The block needs the blocks `inbox.items` and `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. A server gets approvals only with `approvals = true` in its block `pdp_client`.
+This block is optional and is inside the block `inbox`. Its presence starts the approval of an action: the PDP answers `approval_required` for a grant with `confirm`, and it consumes an approval once. The block needs the blocks `inbox.items` and `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. A server gets approvals only when its document of actions has an action with `"approval": "optional"`.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -2059,7 +2059,6 @@ This block has a label and can occur more than one time. One server that asks th
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `token` | secret: give `token_env` (a variable name) or `token_file` (an absolute path), not both | required | The bearer token of the server. It has at least 32 bytes. Two servers must not have the same token. |
-| `approvals` | `true` or `false` | `false` | `true`: the server can ask for the approval of an action, with `context.approval.effect`, and it can use the approval API. It needs the block `inbox.approvals`. `false`: a grant with `confirm` gives this server a plain `false` without a reason. |
 
 #### Block `inbox.at_rest.key "<id>"`
 
@@ -2341,6 +2340,14 @@ Version 5.1.0 adds the agents of a key. Read these points before you upgrade fro
 - The metrics `portal_agents_created_total`, `portal_agent_refused_total` and `portal_agent_actions_total` are new.
 - The Android app of 5.1.0 and the server of 5.1.0 go together. The app keeps its portals when it updates from an earlier build, and it drops its local items: they come back from the server at the next connection. A phone of an earlier build cannot read the new frames of the agents. Update the app and the server in one step.
 
+
+Version 5.3.0 removes the key `approvals` of the block `pdp_client`. The document of actions of the service now gives this permission. Read these points before you upgrade from 5.2.x:
+
+- The key `approvals` does not exist any more. A file that still has it stops at start with an unknown key error that names `pdp_client.<name>.approvals`. Delete the key from each block `pdp_client`. There is no alias.
+- A service that declares an action with `"approval": "optional"` is allowed by itself. It can use the approval API, and the PDP answers `approval_required` for a grant of that action with `confirm`. The block `inbox.approvals` must still exist.
+- A service without this declaration gets a plain `false` from the PDP and `403` from the approval API. It gets the same answers when its document is not known. A grant with `confirm` on an action that the document no longer declares gets a plain `false`.
+- A configuration without the key, for example the homelab one, needs no change.
+- The database, the protocol and the Android app have no change.
 
 Version 5.2.1 changes only the Android app. It has no change of the server, of the protocol or of the database. Read this point before you upgrade from 5.2.0:
 

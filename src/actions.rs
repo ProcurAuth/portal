@@ -621,6 +621,12 @@ impl Registry {
         );
     }
 
+    /// Removes what the registry knows of the service: its document is then unknown.
+    #[cfg(test)]
+    pub fn forget(&self, service: &str) {
+        self.write().remove(service);
+    }
+
     /// A good document of one level, read from the URL that `fail` uses.
     #[cfg(test)]
     pub fn set(&self, service: &str, actions: Vec<Action>) {
@@ -1961,5 +1967,21 @@ mod tests {
         registry.record("a", url, Outcome::Document(typed(&["database"])), now);
         registry.record("a", url, Outcome::Absent, now);
         assert!(applies(), "a 404 is a failed read: the last document stays");
+    }
+
+    #[test]
+    fn a_document_declares_the_approval_for_an_action_only_with_approval_optional() {
+        let parse_actions = |actions: &str| parse("a", &doc("a", actions)).unwrap();
+        let plain = parse_actions(r#"{"name":"data.read"},{"name":"data.write"}"#);
+        assert!(!plain.any_approval(), "no action declares the approval");
+        assert!(!plain.approval_for("data.write"));
+        let mixed = parse_actions(
+            r#"{"name":"data.read"},{"name":"data.write","approval":"optional"}"#,
+        );
+        assert!(mixed.any_approval());
+        assert!(mixed.approval_for("data.write"));
+        assert!(!mixed.approval_for("data.read"), "only the marked action");
+        assert!(!mixed.approval_for("data.other"), "an unknown action");
+        assert!(!Document::default().any_approval(), "an empty document");
     }
 }

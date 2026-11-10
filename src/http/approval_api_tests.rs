@@ -877,6 +877,95 @@ fn a01_service_without_approval_declaration_403() {
     });
 }
 
+/// A POST with a valid shape. Only the door and the `evaluation_id` can refuse it.
+fn probe_body(evaluation_id: &str) -> Value {
+    let c = command(1);
+    json!({"evaluation_id": evaluation_id, "effect": c.effect, "op": c.op, "view": c.view, "lease_s": 900})
+}
+
+#[test]
+fn a01_service_with_an_unknown_or_bad_document_gets_a_plain_false_and_403() {
+    each_rig(true, "", |r, name| {
+        let key = r.key_a();
+        let c = command(1);
+        let id = r.evaluation_id(&key, &c.effect);
+        let closed = |when: &str| {
+            for usage in [false, true] {
+                let answer = r.ask(&key, &c.effect, usage);
+                assert_eq!(answer, json!({"decision": false}), "[{name}] {when}");
+            }
+            assert_eq!(r.post(&probe_body(&id)).status, 403, "[{name}] {when}");
+            let reply = r.get("abc", &format!("?subject={}", key.replace(':', "%3A")));
+            assert_eq!(reply.status, 403, "[{name}] {when}");
+            assert_eq!(
+                r.keepalive("abc", r#"{"subject":"key:x"}"#).status,
+                403,
+                "[{name}] {when}"
+            );
+        };
+        // Never read.
+        r.node.state.actions.forget("db");
+        closed("unknown");
+        // A first read that failed.
+        r.node.state.actions.fail("db");
+        closed("bad");
+        // The good document opens the way again.
+        r.node.state.actions.set_document(
+            "db",
+            crate::actions::parse("db", document(true).as_bytes()).unwrap(),
+        );
+        let answer = r.ask(&key, &c.effect, false);
+        assert_eq!(answer["context"]["reason"], "approval_required", "[{name}]");
+        assert_eq!(r.submit(&key, 1).status, 201, "[{name}]");
+    });
+}
+
+#[test]
+fn a01_service_that_declares_the_approval_for_one_action_only_gets_it_for_that_action() {
+    each_rig(true, "", |r, name| {
+        let key = r.key_a();
+        let c = command(1);
+        let id = r.evaluation_id(&key, &c.effect);
+        // The document now declares the approval for `data.read` and no longer for `data.write`. The service keeps the
+        // door of the API, because one action is declared.
+        let moved = document(false).replace(
+            r#""description":"Read.","limits":["requests"]}"#,
+            r#""description":"Read.","limits":["requests"],"approval":"optional"}"#,
+        );
+        r.node
+            .state
+            .actions
+            .set_document("db", crate::actions::parse("db", moved.as_bytes()).unwrap());
+        // The question about `data.write`: a plain false, the grant with `confirm` does not ask.
+        assert_eq!(
+            r.ask(&key, &c.effect, false),
+            json!({"decision": false}),
+            "[{name}]"
+        );
+        // The sealed `evaluation_id` is bound to `data.write`: it opens no request, in the old and the new document.
+        assert_eq!(
+            r.post(&probe_body(&id)).error(),
+            (422, "invalid_evaluation".to_string()),
+            "[{name}]"
+        );
+        // The door is open for a made-up id, and it refuses it with its own error: not 403.
+        assert_eq!(
+            r.post(&probe_body("x")).error(),
+            (422, "invalid_evaluation".to_string()),
+            "[{name}]"
+        );
+        // The body has no member to name another action.
+        let mut named = probe_body(&id);
+        named["action"] = json!("data.read");
+        assert_eq!(
+            r.post(&named).error(),
+            (422, "invalid_argument".to_string()),
+            "[{name}]"
+        );
+        assert_eq!(r.count("SELECT COUNT(*) FROM approvals"), 0, "[{name}]");
+    });
+}
+
 #[test]
 fn a01_evaluation_id_required_other_subject_422() {
     each_rig(true, "", |r, name| {
