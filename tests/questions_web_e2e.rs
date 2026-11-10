@@ -607,7 +607,7 @@ fn a_form_has_blocks_a_counter_per_question_and_an_answered_view() {
     );
     assert_eq!(st, 303, "{body}");
     let got = answer_of(&pep, &id);
-    let answers = got["answer"]["answers"]
+    let answers = got["answer"]["untrusted"]["answers"]
         .as_array()
         .unwrap_or_else(|| panic!("{got}"));
     assert_eq!(answers.len(), 3, "{got}");
