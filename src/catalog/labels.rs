@@ -103,6 +103,7 @@ pub fn parse(origin: &str, labels: &BTreeMap<String, String>) -> Result<Option<S
         name,
         description,
         icon: field(labels, "icon").map(str::to_string),
+        own_icon: None,
         href: href.to_string(),
         weight,
         health_url,

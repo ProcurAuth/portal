@@ -1002,6 +1002,7 @@ mod tests {
             name,
             href: "https://example.org/".into(),
             created_at: 1,
+            ..Default::default()
         }
     }
 

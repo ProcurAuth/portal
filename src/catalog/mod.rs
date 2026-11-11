@@ -8,6 +8,7 @@
 //! [`Catalog::build`] takes services and returns ordered groups. Everything else is plain data.
 
 pub mod external;
+pub mod image;
 mod labels;
 
 use std::collections::HashMap;
@@ -47,6 +48,9 @@ pub struct Service {
     pub description: String,
     /// Icon reference as declared (`notes`, `docker.png`, ...). The icon library resolves it.
     pub icon: Option<String>,
+    /// The path of the own icon of an external service (see [`external::icon_path`]). The portal stores and serves
+    /// this image itself. It comes before `icon` and before the icon of the library.
+    pub own_icon: Option<String>,
     /// A path on this host (`/grafana/`) or an absolute http(s) URL. The parser validates it.
     pub href: String,
     pub weight: i32,
@@ -425,6 +429,7 @@ mod tests {
             name: name.into(),
             description: String::new(),
             icon: None,
+            own_icon: None,
             href: "/".into(),
             weight,
             health_url: None,
@@ -699,6 +704,7 @@ mod tests {
             name,
             href: href.into(),
             created_at: 1,
+            ..Default::default()
         }
     }
 
