@@ -113,6 +113,14 @@ impl LabeledValues {
         }
     }
 
+    /// The value of a key `Kind::Text` that the file may leave out. `None`: the file did not give it.
+    pub fn optional_text(&self, name: &str) -> Option<String> {
+        match self.values.get(name) {
+            Some(Val::Text(value)) => Some(value.clone()),
+            _ => None,
+        }
+    }
+
     /// The value of a key `Kind::Bool`.
     pub fn bool(&self, name: &str) -> Result<bool, String> {
         match self.values.get(name) {
@@ -364,6 +372,14 @@ pub fn resolve(document: &Document, env: Env<'_>) -> Result<Resolved, String> {
 
 /// The value of a key as the effective configuration shows it.
 fn shown_value(key: &Key, literal: &Lit) -> String {
+    // The data URI of an icon is up to 44 KB: the effective configuration shows its type and its size.
+    if let (("external_service", "icon"), Lit::Str(text)) = ((key.block, key.name), literal) {
+        let kind = text
+            .strip_prefix("data:")
+            .and_then(|rest| rest.split_once(';'))
+            .map_or("?", |(mime, _)| mime);
+        return format!("\"<data URI of {kind}, {} characters>\"", text.len());
+    }
     match (&key.kind, literal) {
         (_, Lit::List(_) | Lit::Items(_) | Lit::Object(_)) => literal.shown(),
         (
@@ -439,7 +455,8 @@ fn resolve_labeled(
         let literal = match (block.values.get(key.name), &key.presence) {
             (Some(lit), _) => lit.clone(),
             (None, Presence::Default(text)) => default_literal(key, text),
-            (None, _) => {
+            (None, Presence::Optional) => continue,
+            (None, Presence::Required) => {
                 return Err(format!(
                     "missing required configuration key: {key_path} (expected {})",
                     key.expected()

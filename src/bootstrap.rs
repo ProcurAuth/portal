@@ -107,17 +107,18 @@ pub fn check_user_grants(config: &Config, snapshot: &DirectorySnapshot) -> Resul
     }
 }
 
-/// Refuses a file that gives a right on an external service that the database holds. An external service is a
-/// link: an account of the file may hold `access` on it, and nothing else. A key of the file never holds a right on
-/// it. A name of a block `pdp_client` is a service that asks the PDP: it is never an external service. Each error
-/// names the block, the attribute and the grant. A grant on an id that the database does not hold is not checked: the
+/// Refuses a file that gives a right on an external service. An external service is a link: an account of the file
+/// may hold `access` on it, and nothing else. A key of the file never holds a right on it. A name of a block
+/// `pdp_client` is a service that asks the PDP: it is never an external service. Each error names the block, the
+/// attribute and the grant. `ids` are the ids of the external services that apply: the blocks `external_service`
+/// of the file, then the rows of the database. A grant on an id that no external service has is not checked: the
 /// start cannot know that the id will name an external service.
 pub fn check_externals(
     config: &Config,
-    snapshot: &DirectorySnapshot,
+    ids: &[String],
     pdp_names: &[String],
 ) -> Result<(), String> {
-    let external = |service: &str| snapshot.externals.iter().any(|e| e.id == service);
+    let external = |service: &str| ids.iter().any(|id| id == service);
     for (login, account) in &config.access.accounts {
         if let Some(grant) = account
             .grants
@@ -142,6 +143,22 @@ pub fn check_externals(
         return Err(format!(
             "pdp_client {name:?}: the name is the id of an external service, and an external service is never a client of the PDP: delete the external service or rename the block"
         ));
+    }
+    Ok(())
+}
+
+/// Refuses a row of the database that does not follow the rules of the external services: the name and its id, the
+/// link, the description and the icon. A row that the form of the Settings page made follows them. A row that an
+/// older version or a hand made it can break them: the start stops, and the error names the row. The row stays in
+/// the database: delete or fix it, then start again.
+pub fn check_external_rows(snapshot: &DirectorySnapshot) -> Result<(), String> {
+    for row in &snapshot.externals {
+        crate::catalog::external::check_entry(row).map_err(|reason| {
+            format!(
+                "the database holds an external service that the rules refuse: the row {:?} of the table external_services: {reason}; fix or delete the row, then start again",
+                row.id
+            )
+        })?;
     }
     Ok(())
 }

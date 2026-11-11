@@ -70,6 +70,21 @@ user "grafana" {
   ]
 }
 
+# An external service: a tile of the launcher that opens a link. The server never requests the link and does not protect
+# it. The label is the display name, and the id is `ext-` and its slug: "Team wiki" gives `ext-team-wiki`. An account sees
+# the tile when it holds `access on service:ext-team-wiki`: give it in a block `user`, or in the settings pages.
+# href is mandatory: an absolute http or https URL, with a DNS name, an IPv4 address or an IPv6 address in square brackets as
+# its host. A link that does not follow this rule stops the start. description is optional (200 characters at most).
+# The own icon is optional. Give at most one of `icon` (a data URI) and `icon_path` (the path of a PNG, JPEG, WebP, GIF or
+# SVG file of 32 KiB at most, which the server reads at start). The server serves the image itself, to a signed-in session.
+# A service of the file wins over a service of the database with the same id, and the settings pages cannot change it.
+external_service "Team wiki" {
+  href        = "https://wiki.example.org/"
+  description = "The wiki of the team"
+  # icon_path = "/run/secrets/wiki_icon.svg"
+  # icon      = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4="
+}
+
 # SQLite. Instead of this block, the block `postgres` below lets several active instances share one database.
 storage {
   database = "/var/lib/portal/portal.db"

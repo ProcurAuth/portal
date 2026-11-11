@@ -11,6 +11,10 @@ const VARS: &[(&str, &str)] = &[
     ("PDP_DB", "a token of the server db, at least 32 bytes"),
     ("PDP_CHAT", "a token of the server chat, at least 32 bytes"),
     ("SHORT", "too short"),
+    (
+        "KEY_SHA",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    ),
     ("PORTAL_TOTP_KEY", TOTP_KEY),
     (
         "IDENTITY_KEY",
@@ -4731,6 +4735,379 @@ fn agents_block_needs_items_and_at_rest() {
     let message = items_err(&format!("{ITEMS} agents {{ }}"), "");
     assert!(
         message.contains("inbox.items needs the block inbox.at_rest"),
+        "{message}"
+    );
+}
+
+// External services of the file: the blocks `external_service`.
+
+/// A small SVG, as a data URI. The tests use it as a good icon.
+const SVG_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><rect width="8" height="8" fill="#336"/></svg>"##;
+
+/// A PNG header of 29 bytes: enough for the magic numbers.
+const PNG_ICON: &[u8] =
+    b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0\x1f\x15\xc4\x89";
+
+fn data_uri(mime: &str, bytes: &[u8]) -> String {
+    use base64ct::{Base64, Encoding};
+    format!("data:{mime};base64,{}", Base64::encode_string(bytes))
+}
+
+#[test]
+fn an_external_service_block_has_typed_values_defaults_and_an_effective_configuration() {
+    let (cfg, _) = ok(&with(
+        r#"external_service "Team wiki" { href = "https://wiki.example.org/start?a=1#top" }
+        external_service "Grafana public" {
+          href        = "http://10.0.0.5:3000/"
+          description = "Dashboards for the team"
+          icon        = "ICON"
+        }"#
+        .replace("ICON", &data_uri("image/svg+xml", SVG_ICON))
+        .as_str(),
+    ));
+    let services = &cfg.access.external_services;
+    assert_eq!(services.len(), 2);
+    let wiki = &services[0];
+    assert_eq!(
+        (wiki.id.as_str(), wiki.name.as_str(), wiki.href.as_str()),
+        (
+            "ext-team-wiki",
+            "Team wiki",
+            "https://wiki.example.org/start?a=1#top"
+        )
+    );
+    assert!(wiki.from_file && wiki.description.is_empty() && wiki.icon.is_none());
+    let grafana = &services[1];
+    assert_eq!(grafana.id, "ext-grafana-public");
+    assert_eq!(grafana.description, "Dashboards for the team");
+    assert_eq!(grafana.icon.as_ref().unwrap().bytes(), SVG_ICON);
+    // The effective configuration shows the defaults and the source, and never the whole data URI.
+    assert_eq!(
+        line(&cfg, r#"external_service.Team wiki.description"#).source,
+        "default"
+    );
+    assert_eq!(
+        line(&cfg, "external_service.Grafana public.href").value,
+        r#""http://10.0.0.5:3000/""#
+    );
+    let icon = line(&cfg, "external_service.Grafana public.icon");
+    assert_eq!(icon.source, "file");
+    assert!(icon.value.contains("image/svg+xml") && !icon.value.contains("PHN2Zy"));
+    assert!(!cfg.render_effective().contains("Team wiki.icon"));
+    // The block works in each mode, also without the database accounts.
+    ok(&with(
+        r#"access { grants_mode = "static" } users { allow_creation = false }
+        external_service "Wiki" { href = "https://wiki.example.org/" }"#,
+    ));
+    // No block: no service.
+    assert!(ok(MINIMAL).0.access.external_services.is_empty());
+}
+
+#[test]
+fn the_schema_of_an_external_service_block_is_closed() {
+    let wiki = |attributes: &str| {
+        with(&format!(
+            r#"external_service "Wiki" {{ href = "https://wiki.example.org/" {attributes} }}"#
+        ))
+    };
+    let message = err(&wiki(r#"colour = "red""#));
+    assert!(
+        message.contains("unknown configuration key: external_service.Wiki.colour"),
+        "{message}"
+    );
+    // A duplicate attribute and a duplicate block.
+    let message = err(&wiki(r#"description = "a" description = "b""#));
+    assert!(message.contains("duplicate"), "{message}");
+    let message = err(&with(
+        r#"external_service "Wiki" { href = "https://a.example.org/" }
+        external_service "Wiki" { href = "https://b.example.org/" }"#,
+    ));
+    assert!(
+        message.contains("duplicate configuration block: external_service \"Wiki\""),
+        "{message}"
+    );
+    // A block inside the block is unknown, and so is a block without the label.
+    let message = err(&wiki(r#"extra { a = 1 }"#));
+    assert!(message.contains("extra"), "{message}");
+    assert!(err(&with(
+        r#"external_service { href = "https://a.example.org/" }"#
+    ))
+    .contains("external_service"));
+    // The `_env` and `_file` forms are for a secret only.
+    for attribute in [
+        r#"href_env = "PORTAL_LOGIN""#,
+        r#"description_file = "/etc/hostname""#,
+        r#"icon_env = "PORTAL_LOGIN""#,
+        r#"icon_file = "/etc/hostname""#,
+    ] {
+        let message = err(&wiki(attribute));
+        assert!(
+            message.contains("external_service.Wiki."),
+            "{attribute}: {message}"
+        );
+    }
+    // The link is mandatory.
+    let message = err(&with(r#"external_service "Wiki" { description = "a" }"#));
+    assert!(
+        message.contains("missing required configuration key: external_service.Wiki.href"),
+        "{message}"
+    );
+    // A text value has the text form: a number is a type error that names the key.
+    let message = err(&wiki("description = 12"));
+    assert!(
+        message.contains("invalid external_service.Wiki.description") && message.contains("12"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_bad_link_in_the_file_stops_the_start_with_the_block_the_key_and_the_value() {
+    for (href, reason) in [
+        ("ftp://example.org/", "scheme"),
+        ("/relative", "scheme"),
+        ("https://", "host"),
+        ("http://1.2.3/", "IPv4"),
+        ("http://256.0.0.1/", "IPv4"),
+        ("https://exa mple.org/", "space"),
+        ("https://user:pw@example.org/", "user information"),
+        ("https://example.org:0/", "port"),
+        ("https://example.org:65536/", "port"),
+        ("https://caf\u{e9}.example/", "ASCII"),
+        ("https://-bad.example/", "hyphen"),
+        ("https://[::1/", "bracket"),
+        (" https://example.org/", "space"),
+        ("https://example.org/\\x", "backslash"),
+    ] {
+        let message = err(&with(&format!(
+            r#"external_service "Wiki" {{ href = "{}" }}"#,
+            href.replace('\\', "\\\\")
+        )));
+        assert!(
+            message.contains(
+                "invalid external_service.Wiki.href: expected an absolute http or https URL"
+            ),
+            "{href}: {message}"
+        );
+        assert!(message.contains(reason), "{href}: {message}");
+        assert!(message.contains("got"), "{href}: {message}");
+    }
+    // A link of more than 2048 bytes.
+    let long = format!("https://example.org/{}", "a".repeat(2048));
+    let message = err(&with(&format!(
+        r#"external_service "Wiki" {{ href = "{long}" }}"#
+    )));
+    assert!(message.contains("external_service.Wiki.href"), "{message}");
+    // The value in the file is the value that applies: a good link is kept as it is.
+    let (cfg, _) = ok(&with(
+        r#"external_service "Wiki" { href = "https://Wiki.Example.org/A?B=C" }"#,
+    ));
+    assert_eq!(
+        cfg.access.external_services[0].href,
+        "https://Wiki.Example.org/A?B=C"
+    );
+}
+
+#[test]
+fn the_name_the_description_and_the_ids_of_the_blocks_are_checked() {
+    let block = |label: &str| {
+        with(&format!(
+            r#"external_service "{label}" {{ href = "https://wiki.example.org/" }}"#
+        ))
+    };
+    for bad in ["", "---", " Wiki", "Wiki ", &"a".repeat(33)] {
+        let message = err(&block(bad));
+        assert!(message.contains("external_service"), "{bad:?}: {message}");
+    }
+    ok(&block(&"a".repeat(32)));
+    // Two labels with one slug make one id: the start stops and names both blocks.
+    let message = err(&with(
+        r#"external_service "My App" { href = "https://a.example.org/" }
+        external_service "my-app" { href = "https://b.example.org/" }"#,
+    ));
+    assert!(
+        message.contains("My App") && message.contains("my-app") && message.contains("ext-my-app"),
+        "{message}"
+    );
+    // The description has 200 characters at most and no control character.
+    ok(&with(&format!(
+        r#"external_service "Wiki" {{ href = "https://a.example.org/" description = "{}" }}"#,
+        "\u{e9}".repeat(200)
+    )));
+    for bad in [
+        "\u{e9}".repeat(201),
+        "a\\nb".to_string(),
+        "a\\tb".to_string(),
+    ] {
+        let message = err(&with(&format!(
+            r#"external_service "Wiki" {{ href = "https://a.example.org/" description = "{bad}" }}"#
+        )));
+        assert!(
+            message.contains("invalid external_service.Wiki.description"),
+            "{message}"
+        );
+    }
+    // More than 256 blocks.
+    let many: String = (0..257)
+        .map(|n| format!(r#"external_service "S{n}" {{ href = "https://a.example.org/" }}"#))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let message = err(&with(&many));
+    assert!(message.contains("256"), "{message}");
+}
+
+#[test]
+fn the_icon_of_a_block_is_a_data_uri_or_a_file_never_both() {
+    let wiki = |attributes: &str| {
+        with(&format!(
+            r#"external_service "Wiki" {{ href = "https://wiki.example.org/" {attributes} }}"#
+        ))
+    };
+    // The data URI: each type.
+    let png = data_uri("image/png", PNG_ICON);
+    let (cfg, _) = ok(&wiki(&format!(r#"icon = "{png}""#)));
+    assert_eq!(
+        cfg.access.external_services[0]
+            .icon
+            .as_ref()
+            .unwrap()
+            .mime(),
+        "image/png"
+    );
+    // The file: the bytes are exact. The last byte is a line end, and it stays.
+    let mut with_line_end = PNG_ICON.to_vec();
+    with_line_end.push(b'\n');
+    let file = temp_file(&with_line_end);
+    let (cfg, _) = ok(&wiki(&format!(r#"icon_path = "{}""#, file.display())));
+    let icon = cfg.access.external_services[0].icon.clone().unwrap();
+    assert_eq!(icon.bytes(), with_line_end.as_slice());
+    assert_eq!(line(&cfg, "external_service.Wiki.icon_path").source, "file");
+    // Both forms stop the start.
+    let message = err(&wiki(&format!(
+        r#"icon = "{png}" icon_path = "{}""#,
+        file.display()
+    )));
+    assert!(
+        message.contains("external_service.Wiki")
+            && message.contains("at most one of icon and icon_path"),
+        "{message}"
+    );
+    // A declared type that does not match the bytes.
+    let wrong = data_uri("image/jpeg", PNG_ICON);
+    let message = err(&wiki(&format!(r#"icon = "{wrong}""#)));
+    assert!(
+        message.contains("invalid external_service.Wiki.icon") && message.contains("declared type"),
+        "{message}"
+    );
+    // Not a data URI, not Base64, a type that is not an image type, and a larger image than 32 KiB.
+    for bad in [
+        "https://example.org/icon.png".to_string(),
+        "data:image/png;base64,@@@@".to_string(),
+        data_uri("image/x-icon", PNG_ICON),
+        data_uri("text/html", b"<html></html>"),
+        data_uri("image/png", &[0u8; 8]),
+        data_uri("image/png", &{
+            let mut big = PNG_ICON.to_vec();
+            big.resize(32 * 1024 + 1, 0);
+            big
+        }),
+    ] {
+        let message = err(&wiki(&format!(r#"icon = "{bad}""#)));
+        assert!(message.contains("external_service.Wiki.icon"), "{message}");
+    }
+    // An SVG with a script, an event attribute, a foreignObject or an external reference.
+    for svg in [
+        r#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" onload="x()"/>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg"><foreignObject/></svg>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg"><image href="https://evil.example/a.png"/></svg>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg"><rect fill="url(https://evil.example/a)"/></svg>"#,
+    ] {
+        let uri = data_uri("image/svg+xml", svg.as_bytes());
+        let message = err(&wiki(&format!(r#"icon = "{uri}""#)));
+        assert!(
+            message.contains("external_service.Wiki.icon"),
+            "{svg}: {message}"
+        );
+        // The same bytes in a file stop the start too.
+        let file = temp_file(svg.as_bytes());
+        let message = err(&wiki(&format!(r#"icon_path = "{}""#, file.display())));
+        assert!(
+            message.contains("external_service.Wiki.icon_path"),
+            "{svg}: {message}"
+        );
+    }
+    // The path: absolute, no `..`, a file that exists, not empty, at most 32 KiB, an image.
+    for (path, reason) in [
+        ("relative.png", "absolute"),
+        ("/tmp/../etc/hostname", ".."),
+        ("/nonexistent/icon.png", "cannot open"),
+    ] {
+        let message = err(&wiki(&format!(r#"icon_path = "{path}""#)));
+        assert!(
+            message.contains("external_service.Wiki.icon_path"),
+            "{message}"
+        );
+        assert!(message.contains(reason), "{path}: {message}");
+    }
+    let empty = temp_file(b"");
+    assert!(err(&wiki(&format!(r#"icon_path = "{}""#, empty.display()))).contains("empty"));
+    let mut big = PNG_ICON.to_vec();
+    big.resize(32 * 1024 + 1, 0);
+    let big = temp_file(&big);
+    assert!(err(&wiki(&format!(r#"icon_path = "{}""#, big.display()))).contains("larger"));
+    let text = temp_file(b"not an image");
+    assert!(err(&wiki(&format!(r#"icon_path = "{}""#, text.display()))).contains("not a PNG"));
+    // The largest image is good.
+    let mut largest = PNG_ICON.to_vec();
+    largest.resize(32 * 1024, 0);
+    let largest = temp_file(&largest);
+    ok(&wiki(&format!(r#"icon_path = "{}""#, largest.display())));
+}
+
+#[test]
+fn the_grants_on_an_external_service_of_the_file_follow_the_rules_of_a_link() {
+    let wiki = r#"access { grants_mode = "hybrid" } external_service "Wiki" { href = "https://wiki.example.org/" }"#;
+    // `access` on the whole service is the one right of an account.
+    ok(&with(&format!(
+        r#"{wiki} user "carol" {{ grants = ["access on service:ext-wiki"] }}"#
+    )));
+    // Another action, or a node below the service, stops the start.
+    for grant in [
+        "data.read on service:ext-wiki",
+        "data.read on service:ext-wiki/host:prod",
+    ] {
+        let message = err(&with(&format!(
+            r#"{wiki} user "carol" {{ grants = ["access on service:ext-wiki", "{grant}"] }}"#
+        )));
+        assert!(
+            message.contains("carol")
+                && message.contains("external service")
+                && message.contains(grant),
+            "{message}"
+        );
+    }
+    // A key that names the service stops the start.
+    let message = err(&with(&format!(
+        r#"{wiki} keys {{ mcp = true }}
+        identity {{ issuer = "https://portal.example.org" signing_key_env = "IDENTITY_KEY" }}
+        pdp {{ listen_address = "0.0.0.0:4182" url = "http://pdp:4182" plain_http = true }}
+        user "carol" {{ grants = [] key "agent" {{ key_sha256_env = "KEY_SHA" grants = ["access on service:ext-wiki"] }} }}"#
+    )));
+    assert!(
+        message.contains("carol")
+            && message.contains("agent")
+            && message.contains("no right on an external service"),
+        "{message}"
+    );
+    // A pdp_client with the id of the service stops the start.
+    let message = err(&with(&format!(
+        r#"{wiki} pdp {{ listen_address = "0.0.0.0:4182" url = "http://pdp:4182" plain_http = true }}
+        pdp_client "ext-wiki" {{ token_env = "PDP_DB" }}"#
+    )));
+    assert!(
+        message.contains("pdp_client")
+            && message.contains("ext-wiki")
+            && message.contains("external service"),
         "{message}"
     );
 }

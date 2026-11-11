@@ -1811,6 +1811,11 @@ pub const LABELED_BLOCKS: &[(&str, &str, &str)] = &[
         "One server that asks the PDP for decisions. The label is the name of the server: the id of its service in the catalogue, and the audience of its identity tokens. The PDP answers only for the resources of this server.",
     ),
     (
+        "external_service",
+        "<name>",
+        "One external service: a tile of the launcher that opens a link. The label is the display name: 1 to 32 characters, with no control character and at least one letter or digit. The id of the service is `ext-` and the slug of the label: `Team wiki` gives `ext-team-wiki`. The id is the resource id of the grant `access`, which a block `user` gives. The service needs no container and no route, and the server never requests its link. A block `key` cannot name it, and a block `pdp_client` cannot have its id as its name. Two blocks with the same id stop the start. A service of the file wins over a service of the same id in the database: the server ignores the row and does not delete it. The Settings page shows the service of the file with the badge `file`, and it cannot change or delete it. A discovered service with the same id wins over both. A block of this kind works in each mode of `access.grants_mode`. At most 256 blocks.",
+    ),
+    (
         "inbox.at_rest.key",
         "<id>",
         "One key that seals the contents of the items. The block is inside the block `inbox.at_rest`, which has 1 to 8 of these blocks. The label is the id of the key. A key that is not the `active_key` stays readable and seals nothing.",
@@ -1965,6 +1970,50 @@ pub static LABELED_KEYS: &[Key] = &[
         presence: Presence::Required,
         when: When::LabeledBlock,
         doc: "The bearer token of the server. It has at least 32 bytes. Two servers must not have the same token.",
+    },
+    Key {
+        block: "external_service",
+        name: "href",
+        kind: Kind::Text {
+            expected: "an absolute http or https URL of 1 to 2048 bytes, with a valid host: a DNS name (ASCII labels of RFC 1123), an IPv4 address, or an IPv6 address in square brackets; no user information, no space, no control character and no backslash; a port from 1 to 65535",
+            check: check_external_href,
+        },
+        presence: Presence::Required,
+        when: When::LabeledBlock,
+        doc: "The link that the tile opens. The path, the query and the fragment are free. The server never requests the link. A link that does not follow the rule stops the start. The server removes no space and changes nothing: the value in the file is the value that applies. `ui.services_new_tab` applies to the tile.",
+    },
+    Key {
+        block: "external_service",
+        name: "description",
+        kind: Kind::Text {
+            expected: "at most 200 characters, with no control character",
+            check: check_external_description,
+        },
+        presence: Presence::Default(""),
+        when: When::LabeledBlock,
+        doc: "The text under the name on the tile, and in the panel of the Services page. An empty text shows nothing.",
+    },
+    Key {
+        block: "external_service",
+        name: "icon",
+        kind: Kind::Text {
+            expected: "a data URI in the form data:<type>;base64,<data>, with the type image/png, image/jpeg, image/webp, image/gif or image/svg+xml, and at most 32 KiB after decoding",
+            check: check_external_icon,
+        },
+        presence: Presence::Optional,
+        when: When::LabeledBlock,
+        doc: "The own icon of the service, as a data URI. Give at most one of `icon` and `icon_path`. The server finds the type from the bytes, and it refuses a declared type that does not match. It serves the image itself, to a signed-in session, from its own address. An SVG with a script, an event attribute, a `foreignObject` or an external reference stops the start. Without an icon, the tile uses the icon of the library that has the name of the service, then the first letter of the name.",
+    },
+    Key {
+        block: "external_service",
+        name: "icon_path",
+        kind: Kind::Text {
+            expected: "an absolute path without '..' of a PNG, JPEG, WebP, GIF or SVG file of at most 32 KiB",
+            check: check_absolute_path,
+        },
+        presence: Presence::Optional,
+        when: When::LabeledBlock,
+        doc: "The path of an image file that the server reads at start. The rules of `icon` apply to the bytes. This key is not the `_file` form of `icon`, on purpose: the `_file` form removes the last line end of a text, and the bytes of an image stay exact. A file that cannot be read, or that is empty or too large, stops the start. Give at most one of `icon` and `icon_path`.",
     },
     Key {
         block: "inbox.at_rest.key",
@@ -2241,6 +2290,18 @@ fn check_group_name(value: &str) -> Result<(), String> {
         return Err("not 1 to 128 bytes, or blank, or with a control character".into());
     }
     Ok(())
+}
+
+fn check_external_href(value: &str) -> Result<(), String> {
+    crate::catalog::external::check_link(value).map_err(str::to_string)
+}
+
+fn check_external_description(value: &str) -> Result<(), String> {
+    crate::catalog::external::check_description_text(value).map_err(str::to_string)
+}
+
+fn check_external_icon(value: &str) -> Result<(), String> {
+    crate::catalog::image::Image::from_data_uri(value).map(|_| ())
 }
 
 fn check_group_description(value: &str) -> Result<(), String> {
