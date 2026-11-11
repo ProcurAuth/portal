@@ -233,7 +233,19 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             false,
         ),
         "external-bad-link" => (
-            "The link is an http or https address with a host. It has no user name, no space and no control character. It has 2048 bytes at most.",
+            "The link is an http or https address with a valid host: a domain name, an IPv4 address, or an IPv6 address in square brackets. It has no user name, no space and no control character. It has 2048 bytes at most.",
+            false,
+        ),
+        "external-bad-description" => (
+            "The description has 200 characters at most, with no control character.",
+            false,
+        ),
+        "external-bad-icon" => (
+            "The icon is a PNG, JPEG, WebP, GIF or SVG image of 32 KiB at most. Its type must match its bytes. An SVG has no script and no external link.",
+            false,
+        ),
+        "external-in-file" => (
+            "The configuration file defines a service with this name. Change the block external_service in the file.",
             false,
         ),
         "external-exists" => (
@@ -1216,9 +1228,16 @@ pub struct ServicesView<'a> {
     pub token: &'a str,
     /// The page offers "Add external service": the grants can change.
     pub can_add: bool,
+    /// The ids of the external services that the file defines (the blocks `external_service`). They are read-only.
+    pub from_file: &'a [String],
 }
 
 impl ServicesView<'_> {
+    /// The external service comes from the file: the page shows the badge `file` and offers no change.
+    fn in_file(&self, id: &str) -> bool {
+        self.from_file.iter().any(|f| f == id)
+    }
+
     fn actions_of(&self, id: &str) -> Option<&ServiceActions> {
         self.services.iter().find(|s| s.id == id)
     }
@@ -1261,13 +1280,19 @@ pub const EXTERNAL_DELETE_PATH: &str = "/auth/services/delete";
 /// The words about a service that the portal does not protect. The launcher says the same in a tooltip.
 const EXTERNAL_LINE: &str = "External link. This server does not protect it.";
 
-/// "Add external service": a button that opens a small form with the name and the link.
+/// "Add external service": a button that opens a small form with the name, the link, the description and the icon.
+///
+/// The icon is a text field that holds a data URI: the form works without script. With script, a file input fills the
+/// field from a chosen file (the script of the settings pages, `data-icon-into`). The server checks the field again.
 fn external_add(token: &str) -> String {
     let token = html_escape(token);
     let form = format!(
-        r#"<form class="extForm" method="post" action="{EXTERNAL_ADD_PATH}"><input type="hidden" name="csrf" value="{token}"><div class="field"><label class="field__label" for="ext-name">Name</label><input class="uiInput" id="ext-name" name="name" type="text" required maxlength="{}" autocomplete="off" spellcheck="false" placeholder="Team wiki"></div><div class="field"><label class="field__label" for="ext-href">Link</label><input class="uiInput" id="ext-href" name="href" type="url" required maxlength="{}" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://wiki.example.org/"></div><p class="hint">The tile opens the link. This server does not protect the link: anyone who knows it can open it. An account sees the tile only if it has the permission Open.</p><button class="button button--primary" type="submit">Add</button></form>"#,
+        r#"<form class="extForm" method="post" action="{EXTERNAL_ADD_PATH}"><input type="hidden" name="csrf" value="{token}"><div class="field"><label class="field__label" for="ext-name">Name</label><input class="uiInput" id="ext-name" name="name" type="text" required maxlength="{}" autocomplete="off" spellcheck="false" placeholder="Team wiki"></div><div class="field"><label class="field__label" for="ext-href">Link</label><input class="uiInput" id="ext-href" name="href" type="url" required maxlength="{}" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://wiki.example.org/"></div><div class="field"><label class="field__label" for="ext-desc">Description (optional)</label><input class="uiInput" id="ext-desc" name="description" type="text" maxlength="{}" autocomplete="off" placeholder="The wiki of the team"></div><div class="field"><label class="field__label" for="ext-icon">Icon (optional)</label><input class="uiInput" id="ext-icon" name="icon" type="text" maxlength="{}" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="data:image/png;base64,..."><div class="iconPick"><input type="file" id="ext-icon-file" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" data-icon-into="ext-icon" data-icon-max="{}" aria-label="Choose an icon file"></div><p class="hint" data-icon-msg>A data URI of a PNG, JPEG, WebP, GIF or SVG image, 32 KiB at most.</p></div><p class="hint">The tile opens the link. This server does not protect the link: anyone who knows it can open it. An account sees the tile only if it has the permission Open.</p><button class="button button--primary" type="submit">Add</button></form>"#,
         crate::catalog::external::MAX_NAME_CHARS,
         crate::catalog::external::MAX_HREF_BYTES,
+        crate::catalog::external::MAX_DESCRIPTION_CHARS,
+        crate::catalog::image::MAX_DATA_URI_CHARS,
+        crate::catalog::image::MAX_BYTES,
     );
     popover_with(
         "",
@@ -1416,7 +1441,7 @@ fn service_row(
         html_escape(&service.name),
         // The badge follows the name, so a long id never hides it.
         if service.external {
-            external_badge()
+            external_badge(view.in_file(&service.id))
         } else {
             String::new()
         },
@@ -1476,11 +1501,16 @@ fn service_row(
     out.push_str("</td></tr>");
 }
 
-/// The badge of an external service.
-fn external_badge() -> String {
+/// The badge of an external service, and the badge `file` after it when the configuration file defines the service.
+fn external_badge(in_file: bool) -> String {
     format!(
-        r#" <span class="badge badge--external" title="{EXTERNAL_LINE}">{}external</span>"#,
-        icon("arrow-up-right")
+        r#" <span class="badge badge--external" title="{EXTERNAL_LINE}">{}external</span>{}"#,
+        icon("arrow-up-right"),
+        if in_file {
+            r#" <span class="badge" title="Defined in the configuration file">file</span>"#
+        } else {
+            ""
+        }
     )
 }
 
@@ -1740,8 +1770,11 @@ fn detail_zone(view: &ServicesView, selected: Option<&str>) -> String {
     } else {
         opened_by_body(view, id, name)
     };
+    // A service of the file is read-only: its panel has no trash icon.
     let tools = match view.catalog.service(id) {
-        Some(service) if service.external => external_delete(view, service, opened),
+        Some(service) if service.external && !view.in_file(&service.id) => {
+            external_delete(view, service, opened)
+        }
         _ => String::new(),
     };
     let source = view.actions_of(id).map(|s| s.source);
@@ -1752,11 +1785,24 @@ fn detail_zone(view: &ServicesView, selected: Option<&str>) -> String {
         .map(|(_, text)| text.as_str());
     let external = view.catalog.service(id).is_some_and(|s| s.external);
     let above = match source {
-        _ if external => format!(
-            r#"<div class="srcLine srcLine--none" title="{}">{}<span>{EXTERNAL_LINE}</span></div>"#,
-            html_escape(view.catalog.service(id).map_or("", |s| s.href.as_str())),
-            icon("arrow-up-right")
-        ),
+        _ if external => {
+            let service = view.catalog.service(id);
+            let description = service
+                .map(|s| s.description.as_str())
+                .filter(|text| !text.is_empty())
+                .map(|text| format!(r#"<p class="extDesc">{}</p>"#, html_escape(text)))
+                .unwrap_or_default();
+            let from_file = if view.in_file(id) {
+                r#"<div class="srcLine srcLine--none"><span>Defined in the configuration file (a block external_service). It cannot be changed or deleted here.</span></div>"#
+            } else {
+                ""
+            };
+            format!(
+                r#"{description}<div class="srcLine srcLine--none" title="{}">{}<span>{EXTERNAL_LINE}</span></div>{from_file}"#,
+                html_escape(service.map_or("", |s| s.href.as_str())),
+                icon("arrow-up-right")
+            )
+        }
         Some(source) => source_line(source, problem),
         None => String::new(),
     };
@@ -2921,6 +2967,7 @@ mod tests {
             name: name.clone(),
             href: "https://wiki.example.org/start?a=1&b=2".into(),
             created_at: 1,
+            ..Default::default()
         }]);
         let mut actions = services();
         actions.push(ServiceActions {
@@ -2983,6 +3030,105 @@ mod tests {
         assert!(panel.contains(r#"href="/auth/settings/users/alice?service=ext-team-wiki""#));
         // Never "to check": an external service has no document.
         assert!(!html.contains("Services to check"));
+    }
+
+    #[test]
+    fn the_panel_shows_the_description_and_the_service_of_the_file_is_read_only() {
+        let (name, id) = crate::catalog::external::check_name("Team wiki").unwrap();
+        let cat = catalog().with_externals(&[
+            crate::catalog::external::ExternalEntry {
+                id: id.clone(),
+                name: name.clone(),
+                href: "https://wiki.example.org/".into(),
+                description: "The <i>wiki</i>".into(),
+                from_file: true,
+                ..Default::default()
+            },
+            crate::catalog::external::ExternalEntry {
+                id: "ext-docs".into(),
+                name: "Docs".into(),
+                href: "https://docs.example.org/".into(),
+                ..Default::default()
+            },
+        ]);
+        let actions = services();
+        let files = vec!["ext-team-wiki".to_string()];
+        let mut v = services_view(&cat, &actions, &[]);
+        v.can_add = true;
+        v.from_file = &files;
+        // The service of the file: the badge file, the description, no trash icon.
+        v.selected = Some("ext-team-wiki".into());
+        let html = services_page(&frame(), &v);
+        let row = &html[html.find(">Team wiki</a>").unwrap()..];
+        let row = &row[..row.find("</th>").unwrap()];
+        assert!(
+            row.contains(
+                r#"<span class="badge" title="Defined in the configuration file">file</span>"#
+            ),
+            "{row}"
+        );
+        let panel = &html[html.find(r#"aria-labelledby="detail-title""#).unwrap()..];
+        let panel = &panel[..panel.find("</section>").unwrap()];
+        assert!(
+            panel.contains(r#"<p class="extDesc">The &lt;i&gt;wiki&lt;/i&gt;</p>"#),
+            "{panel}"
+        );
+        assert!(
+            panel.contains("Defined in the configuration file"),
+            "{panel}"
+        );
+        assert!(
+            !panel.contains(r#"action="/auth/services/delete""#),
+            "{panel}"
+        );
+        // The service of the database: no badge file, and the trash icon.
+        v.selected = Some("ext-docs".into());
+        let html = services_page(&frame(), &v);
+        let panel = &html[html.find(r#"aria-labelledby="detail-title""#).unwrap()..];
+        let panel = &panel[..panel.find("</section>").unwrap()];
+        assert!(
+            panel.contains(r#"action="/auth/services/delete""#),
+            "{panel}"
+        );
+        assert!(!panel.contains("Defined in the configuration file") && !panel.contains("extDesc"));
+        assert_eq!(
+            html.matches(r#"title="Defined in the configuration file">file</span>"#)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_form_has_the_description_and_the_icon_with_a_field_that_works_without_script() {
+        let (cat, actions) = with_external();
+        let mut v = services_view(&cat, &actions, &[]);
+        v.can_add = true;
+        let html = services_page(&frame(), &v);
+        assert!(
+            html.contains(r#"name="description" type="text" maxlength="200""#),
+            "{html}"
+        );
+        // The icon: a text field for the data URI, and a file input that the script uses.
+        assert!(
+            html.contains(r#"id="ext-icon" name="icon" type="text" maxlength="43718""#),
+            "{html}"
+        );
+        assert!(html.contains(
+            r#"<input type="file" id="ext-icon-file" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" data-icon-into="ext-icon" data-icon-max="32768""#
+        ));
+        // The file input has no name: the browser never sends the file itself, only the field of the data URI.
+        let file_input = &html[html.find(r#"id="ext-icon-file""#).unwrap()..];
+        let file_input = &file_input[..file_input.find('>').unwrap()];
+        assert!(!file_input.contains("name="), "{file_input}");
+        for code in [
+            "external-bad-description",
+            "external-bad-icon",
+            "external-in-file",
+            "external-bad-link",
+        ] {
+            let (text, ok) = notice_for(code).map(|n| (n.text, n.ok)).expect(code);
+            assert!(!ok && !text.is_empty(), "{code}");
+        }
     }
 
     #[test]

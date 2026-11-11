@@ -367,6 +367,7 @@ pub(super) fn services_view<'a>(
         notice: None,
         token: "demo",
         can_add: false,
+        from_file: &[],
     }
 }
 

@@ -1926,6 +1926,21 @@ input.keyText {
   justify-self: start;
 }
 
+/* The file input fills the text field of the icon. It needs script: without it, the person pastes the data URI. */
+.iconPick {
+  display: none;
+  margin-top: 6px;
+}
+
+.js .iconPick {
+  display: block;
+}
+
+.extDesc {
+  margin: 0 0 6px;
+  color: var(--muted);
+}
+
 .pwRow .uiInput {
   width: 17rem;
 }

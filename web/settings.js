@@ -12,7 +12,10 @@
       CSPRNG (rejection sampling, so every character is equally likely), shown in clear so it can be
       handed over. It never leaves the page until the form is submitted.
 
-   5. The editor of grants, at the end of the file. */
+   5. The editor of grants, at the end of the file.
+
+   6. The form "Add external service": a file input fills the field of the icon with a data URI. The server
+      checks the type and the bytes again: the check here only saves a trip for a file that is too large. */
 (function () {
   "use strict";
   var ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
@@ -135,6 +138,45 @@
       });
     });
   }
+
+  // A file input with data-icon-into fills the text field that it names with the data URI of the chosen file.
+  // data-icon-max is the largest size, in bytes. The message line (data-icon-msg) says what happened.
+  function iconPicker(input) {
+    var target = document.getElementById(input.getAttribute("data-icon-into"));
+    var message = input.closest(".field") && input.closest(".field").querySelector("[data-icon-msg]");
+    var max = parseInt(input.getAttribute("data-icon-max"), 10);
+    if (!target || !window.FileReader) return;
+    var original = message ? message.textContent : "";
+    function say(text, bad) {
+      if (!message) return;
+      message.textContent = text;
+      message.classList.toggle("field__error", bad);
+    }
+    input.addEventListener("change", function () {
+      var file = input.files && input.files[0];
+      if (!file) {
+        say(original, false);
+        return;
+      }
+      if (file.size > max) {
+        input.value = "";
+        target.value = "";
+        say("The file has " + file.size + " bytes. The largest size is " + max + " bytes.", true);
+        return;
+      }
+      var reader = new FileReader();
+      reader.onload = function () {
+        target.value = String(reader.result);
+        target.dispatchEvent(new Event("input", { bubbles: true }));
+        say("Icon chosen: " + file.name + " (" + file.size + " bytes).", false);
+      };
+      reader.onerror = function () {
+        say("The browser cannot read this file.", true);
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+  Array.prototype.forEach.call(document.querySelectorAll("input[type=file][data-icon-into]"), iconPicker);
 
   var gated = document.querySelectorAll("form[data-gate]");
   for (var g = 0; g < gated.length; g += 1) gateForm(gated[g]);
