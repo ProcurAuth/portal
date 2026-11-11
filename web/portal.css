@@ -490,6 +490,11 @@ html[data-theme-mode="light"] .themeNow--light {
   object-fit: contain;
 }
 
+/* The own icon of an external service: the image is as large as the library icons, with soft corners. */
+.tile__img--own {
+  border-radius: 4px;
+}
+
 .tile__img--mono {
   filter: var(--mono-filter);
 }

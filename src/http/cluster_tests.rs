@@ -10818,6 +10818,7 @@ fn the_add_form_refuses_a_bad_value_a_known_id_the_limit_and_a_request_that_is_n
                 name: format!("Bulk {n}"),
                 href: "https://bulk.example.org/".into(),
                 created_at: 1,
+                ..Default::default()
             };
             node.state
                 .store
@@ -11031,6 +11032,633 @@ fn a_node_that_cannot_change_grants_has_no_form_that_adds_an_external_service() 
     assert!(!services.body.contains("Add external service") && !services.body.contains("extForm"));
 }
 
+// External services of the file, the own icon and the form with the description ------------------------
+
+const SVG_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><rect width="8" height="8" fill="#336"/></svg>"##;
+const PNG_BYTES: &[u8] =
+    b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0\x1f\x15\xc4\x89";
+
+fn data_uri(mime: &str, bytes: &[u8]) -> String {
+    use base64ct::{Base64, Encoding};
+    format!("data:{mime};base64,{}", Base64::encode_string(bytes))
+}
+
+fn file_services() -> String {
+    format!(
+        r#"external_service "Team wiki" {{
+          href        = "https://file.example.org/wiki"
+          description = "The wiki of the <team>"
+          icon        = "{}"
+        }}
+        external_service "Plain" {{ href = "http://[::1]:8080/" }}"#,
+        data_uri("image/svg+xml", SVG_ICON.as_bytes())
+    )
+}
+
+fn add_external_full(
+    node: &Node,
+    session: &str,
+    name: &str,
+    href: &str,
+    description: &str,
+    icon: &str,
+) -> Reply {
+    post(
+        node,
+        session,
+        EXTERNAL_ADD_PATH,
+        USERS_TOKEN,
+        &format!(
+            "name={}&href={}&description={}&icon={}",
+            percent_encode_query_component(name),
+            percent_encode_query_component(href),
+            percent_encode_query_component(description),
+            percent_encode_query_component(icon)
+        ),
+    )
+}
+
+#[test]
+fn a_service_of_the_file_has_its_tile_and_wins_over_the_row_of_the_database_that_stays() {
+    each_backend(|backend| {
+        let node = start_with(
+            Arc::new(backend.fresh()),
+            Some(Duration::ZERO),
+            &file_services(),
+        );
+        assert_eq!(node.state.config.access.external_services.len(), 2);
+        let root = sign_in(&node, "root", PASSWORD);
+        // A row of the database with the id of a service of the file, and one with an id of its own.
+        let row = |id: &str, name: &str, href: &str| crate::catalog::external::ExternalEntry {
+            id: id.into(),
+            name: name.into(),
+            href: href.into(),
+            created_at: 1,
+            ..Default::default()
+        };
+        for entry in [
+            row("ext-team-wiki", "Team wiki", "https://row.example.org/"),
+            row("ext-docs", "Docs", "https://docs.example.org/"),
+        ] {
+            node.state.store.insert_external(&entry, 10).unwrap();
+            node.state.users.add_external(entry);
+        }
+        let launcher = page(&node, &root, "/");
+        assert_eq!(launcher.status, 200);
+        // The file wins: its link, its description and its icon. The row of the database is ignored.
+        assert!(
+            launcher
+                .body
+                .contains(r#"href="https://file.example.org/wiki""#),
+            "{}",
+            launcher.body
+        );
+        assert!(!launcher.body.contains("row.example.org"));
+        assert!(launcher
+            .body
+            .contains("The wiki of the &lt;team&gt;</span>"));
+        assert!(!launcher.body.contains("<team>"));
+        assert!(launcher
+            .body
+            .contains(r#"src="/auth/ext-icon/ext-team-wiki""#));
+        // The other services show too, and the tile of the database service has no own icon.
+        assert!(launcher.body.contains(r#"href="http://[::1]:8080/""#));
+        assert!(launcher
+            .body
+            .contains(r#"href="https://docs.example.org/""#));
+        assert!(!launcher.body.contains("/auth/ext-icon/ext-docs"));
+        assert_eq!(
+            launcher
+                .body
+                .matches("External link. This server does not protect it.")
+                .count(),
+            3
+        );
+        // The ignored row is not deleted, and it makes no problem.
+        let rows = node.state.store.load_directory().unwrap().externals;
+        assert!(rows
+            .iter()
+            .any(|e| e.id == "ext-team-wiki" && e.href == "https://row.example.org/"));
+        assert!(current_catalog(&node.state).problems().is_empty());
+
+        // The Services page: the badge `file` on the service of the file, read-only, and the trash icon on the other.
+        let wiki = page(&node, &root, "/auth/settings/services?svc=ext-team-wiki");
+        assert_eq!(wiki.status, 200);
+        assert!(wiki
+            .body
+            .contains(r#"title="Defined in the configuration file">file</span>"#));
+        assert!(wiki
+            .body
+            .contains(r#"<p class="extDesc">The wiki of the &lt;team&gt;</p>"#));
+        assert!(!wiki.body.contains(r#"action="/auth/services/delete""#));
+        let docs = page(&node, &root, "/auth/settings/services?svc=ext-docs");
+        assert!(docs.body.contains(r#"action="/auth/services/delete""#));
+        // The delete of the service of the file is refused, and so is a new name with the same id.
+        let refused = delete_external(&node, &root, "ext-team-wiki");
+        assert_eq!(
+            refused.location(),
+            Some("/auth/settings/services?s=external-in-file")
+        );
+        assert_eq!(
+            add_external(&node, &root, "TEAM WIKI", "https://x.example.org/").location(),
+            Some("/auth/settings/services?s=external-in-file")
+        );
+        assert_eq!(
+            add_external(&node, &root, "Plain", "https://x.example.org/").location(),
+            Some("/auth/settings/services?s=external-in-file")
+        );
+        assert!(node
+            .state
+            .store
+            .load_directory()
+            .unwrap()
+            .externals
+            .iter()
+            .any(|e| e.id == "ext-team-wiki"));
+
+        // The grant `access` on the id of the file shows the tile to an account.
+        insert_account(&node, "alice", "a-long-password-1");
+        let alice = sign_in(&node, "alice", "a-long-password-1");
+        assert!(!page(&node, &alice, "/").body.contains("Team wiki"));
+        assert_eq!(
+            post(
+                &node,
+                &root,
+                USERS_UPDATE_PATH,
+                USERS_TOKEN,
+                "grants=1&login=alice&grant0=access+on+service%3Aext-team-wiki"
+            )
+            .location(),
+            Some("/auth/settings/users/alice?s=user-updated")
+        );
+        let tile = page(&node, &alice, "/");
+        assert!(tile.body.contains("Team wiki") && !tile.body.contains("Plain"));
+        // A grant other than `access` on it is refused, as for a service of the database.
+        assert_eq!(
+            post(
+                &node,
+                &root,
+                USERS_UPDATE_PATH,
+                USERS_TOKEN,
+                "grants=1&login=alice&grant0=access+on+service%3Aext-team-wiki&grant1=query.run.read+on+service%3Aext-team-wiki"
+            )
+            .location(),
+            Some("/auth/settings/users/alice?s=edit-unknown-grant")
+        );
+    });
+}
+
+#[test]
+fn a_service_of_the_file_works_in_the_mode_static_without_the_form() {
+    let node = start_custom(
+        Arc::new(Backend::Sqlite.fresh()),
+        None,
+        Custom {
+            allow_creation: false,
+            ..Custom::default()
+        },
+        &format!(r#"access {{ grants_mode = "static" }} {}"#, file_services()),
+    );
+    let root = sign_in(&node, "root", PASSWORD);
+    let launcher = page(&node, &root, "/");
+    assert!(launcher.body.contains("Team wiki") && launcher.body.contains("Plain"));
+    let services = page(&node, &root, "/auth/settings/services?svc=ext-plain");
+    assert!(services.body.contains(">file</span>"));
+    assert!(!services.body.contains("Add external service"));
+    assert_eq!(
+        delete_external(&node, &root, "ext-plain").location(),
+        Some("/auth/settings/services?s=external-in-file")
+    );
+}
+
+#[test]
+fn the_route_of_the_own_icon_gives_the_image_to_a_session_that_may_open_the_service() {
+    each_backend(|backend| {
+        let node = start_with(
+            Arc::new(backend.fresh()),
+            Some(Duration::ZERO),
+            &file_services(),
+        );
+        // A service of the database with a PNG icon, and one with no icon.
+        let mut png = crate::catalog::external::ExternalEntry {
+            id: "ext-chart".into(),
+            name: "Chart".into(),
+            href: "https://chart.example.org/".into(),
+            created_at: 1,
+            ..Default::default()
+        };
+        png.icon = Some(Arc::new(
+            crate::catalog::image::Image::from_bytes(PNG_BYTES.to_vec(), None).unwrap(),
+        ));
+        let bare = crate::catalog::external::ExternalEntry {
+            id: "ext-bare".into(),
+            name: "Bare".into(),
+            href: "https://bare.example.org/".into(),
+            created_at: 1,
+            ..Default::default()
+        };
+        for entry in [png, bare] {
+            node.state.store.insert_external(&entry, 10).unwrap();
+            node.state.users.add_external(entry);
+        }
+        let root = sign_in(&node, "root", PASSWORD);
+        let get = |session: Option<&str>, path: &str, extra: &[(&str, &str)]| {
+            let cookie = session.map(|s| format!("{}={s}", session_cookie_name(&node)));
+            let mut headers: Vec<(&str, &str)> = extra.to_vec();
+            if let Some(cookie) = &cookie {
+                headers.push(("Cookie", cookie));
+            }
+            send(node.port, "GET", path, &headers, "")
+        };
+
+        // The superadmin gets the SVG as it is stored, with the headers of an inert image.
+        let reply = get(Some(&root), "/auth/ext-icon/ext-team-wiki", &[]);
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        assert_eq!(reply.body, SVG_ICON);
+        assert_eq!(reply.header("content-type"), Some("image/svg+xml"));
+        assert_eq!(reply.header("x-content-type-options"), Some("nosniff"));
+        assert_eq!(
+            reply.header("content-security-policy"),
+            Some("default-src 'none'; style-src 'unsafe-inline'; sandbox")
+        );
+        assert_eq!(
+            reply.header("cross-origin-resource-policy"),
+            Some("same-origin")
+        );
+        assert_eq!(reply.header("cache-control"), Some("private, no-cache"));
+        let etag = reply.header("etag").expect("a validator").to_string();
+        assert!(etag.starts_with('"') && !etag.starts_with("W/"), "{etag}");
+        // A request with the validator gets 304 and no body. A request with another validator gets the image.
+        let same = get(
+            Some(&root),
+            "/auth/ext-icon/ext-team-wiki",
+            &[("If-None-Match", &etag)],
+        );
+        assert_eq!((same.status, same.body.as_str()), (304, ""));
+        assert_eq!(same.header("etag"), Some(etag.as_str()));
+        assert!(same.header("content-security-policy").is_some());
+        let other = get(
+            Some(&root),
+            "/auth/ext-icon/ext-team-wiki",
+            &[("If-None-Match", "\"other\"")],
+        );
+        assert_eq!(other.status, 200);
+        // The image of the database keeps its own type.
+        let chart = get(Some(&root), "/auth/ext-icon/ext-chart", &[]);
+        assert_eq!(chart.status, 200);
+        assert_eq!(chart.header("content-type"), Some("image/png"));
+        assert_ne!(chart.header("etag"), Some(etag.as_str()));
+
+        // No session: the answer of any unknown path. The image never leaves.
+        let visitor = get(None, "/auth/ext-icon/ext-team-wiki", &[]);
+        assert_eq!(visitor.status, 302, "{}", visitor.body);
+        assert!(visitor.location().unwrap().starts_with("/auth/login"));
+        assert!(!visitor.body.contains("<svg"));
+        assert_eq!(
+            get(Some("not-a-session"), "/auth/ext-icon/ext-team-wiki", &[]).status,
+            302
+        );
+        // An account that does not hold `access` gets 404, and gets the image when it holds the grant.
+        insert_account(&node, "alice", "a-long-password-1");
+        let alice = sign_in(&node, "alice", "a-long-password-1");
+        let denied = get(Some(&alice), "/auth/ext-icon/ext-team-wiki", &[]);
+        assert_eq!(denied.status, 404);
+        assert!(!denied.body.contains("<svg xmlns") && denied.header("etag").is_none());
+        assert_eq!(
+            post(
+                &node,
+                &root,
+                USERS_UPDATE_PATH,
+                USERS_TOKEN,
+                "grants=1&login=alice&grant0=access+on+service%3Aext-team-wiki"
+            )
+            .status,
+            303
+        );
+        assert_eq!(
+            get(Some(&alice), "/auth/ext-icon/ext-team-wiki", &[]).status,
+            200
+        );
+        assert_eq!(
+            get(Some(&alice), "/auth/ext-icon/ext-chart", &[]).status,
+            404,
+            "no grant on this one"
+        );
+        // Nothing else answers: no icon, an unknown id, an id that is not external, a bad encoding, a longer path.
+        for path in [
+            "/auth/ext-icon/ext-bare",
+            "/auth/ext-icon/ext-plain",
+            "/auth/ext-icon/ext-nothing",
+            "/auth/ext-icon/",
+            "/auth/ext-icon/portal",
+            "/auth/ext-icon/%zz",
+            "/auth/ext-icon/ext-team-wiki/extra",
+            "/auth/ext-icon/..%2Fsettings",
+            "/auth/ext-icon/ext-team-wiki.svg",
+        ] {
+            let reply = get(Some(&root), path, &[]);
+            assert_eq!(reply.status, 404, "{path}: {}", reply.body);
+            assert!(!reply.body.contains("<svg xmlns"), "{path}");
+        }
+        // Only GET.
+        let cookie = format!("{}={root}", session_cookie_name(&node));
+        let posted = send(
+            node.port,
+            "POST",
+            "/auth/ext-icon/ext-team-wiki",
+            &[("Cookie", &cookie)],
+            "",
+        );
+        assert_ne!(posted.status, 200);
+        // The deleted service has no icon any more.
+        assert_eq!(delete_external(&node, &root, "ext-chart").status, 303);
+        assert_eq!(
+            get(Some(&root), "/auth/ext-icon/ext-chart", &[]).status,
+            404
+        );
+    });
+}
+
+#[test]
+fn the_form_stores_the_description_and_the_icon_and_refuses_what_the_rules_refuse() {
+    each_backend(|backend| {
+        let node = start_with(Arc::new(backend.fresh()), Some(Duration::ZERO), "");
+        let root = sign_in(&node, "root", PASSWORD);
+        let services = |code: &str| Some(format!("/auth/settings/services?s={code}"));
+        let location = |reply: Reply| reply.location().map(str::to_string);
+        let link = "https://wiki.example.org/";
+        let svg = data_uri("image/svg+xml", SVG_ICON.as_bytes());
+        // A good form: the description and the icon are stored, and the tile shows them.
+        let added = add_external_full(
+            &node,
+            &root,
+            "Team wiki",
+            link,
+            "  The wiki  ",
+            &format!("{svg}\n"),
+        );
+        assert_eq!(added.status, 303, "{}", added.body);
+        assert_eq!(
+            added.location(),
+            Some("/auth/settings/services?s=external-added&svc=ext-team-wiki")
+        );
+        let stored = node.state.store.load_directory().unwrap().externals;
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].description, "The wiki");
+        assert_eq!(
+            stored[0].icon.as_ref().unwrap().bytes(),
+            SVG_ICON.as_bytes()
+        );
+        assert_eq!(node.state.users.externals(), stored);
+        let launcher = page(&node, &root, "/");
+        assert!(launcher.body.contains("The wiki</span>"));
+        assert!(launcher
+            .body
+            .contains(r#"src="/auth/ext-icon/ext-team-wiki""#));
+        assert_eq!(
+            page(&node, &root, "/auth/ext-icon/ext-team-wiki").body,
+            SVG_ICON
+        );
+        // The fields are optional.
+        assert_eq!(add_external(&node, &root, "Plain", link).status, 303);
+        let plain = node
+            .state
+            .users
+            .externals()
+            .into_iter()
+            .find(|e| e.id == "ext-plain")
+            .unwrap();
+        assert!(plain.description.is_empty() && plain.icon.is_none());
+
+        // What the rules refuse.
+        let jpeg_as_png = data_uri(
+            "image/png",
+            b"\xff\xd8\xff\xe0\0\x10JFIF\0\x01\x01\0\0\x01\0\x01\0\0",
+        );
+        let script = data_uri(
+            "image/svg+xml",
+            br#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#,
+        );
+        let mut big = PNG_BYTES.to_vec();
+        big.resize(32 * 1024 + 1, 0);
+        for (name, href, description, icon, expected) in [
+            ("A", "http://1.2.3/", "", String::new(), "external-bad-link"),
+            (
+                "A",
+                "https://caf\u{e9}.example/",
+                "",
+                String::new(),
+                "external-bad-link",
+            ),
+            (
+                "A",
+                "https://a.example.org:0/",
+                "",
+                String::new(),
+                "external-bad-link",
+            ),
+            (
+                "A",
+                link,
+                &"x".repeat(201),
+                String::new(),
+                "external-bad-description",
+            ),
+            (
+                "A",
+                link,
+                "two\nlines",
+                String::new(),
+                "external-bad-description",
+            ),
+            (
+                "A",
+                link,
+                "",
+                "https://example.org/icon.png".to_string(),
+                "external-bad-icon",
+            ),
+            ("A", link, "", jpeg_as_png, "external-bad-icon"),
+            ("A", link, "", script, "external-bad-icon"),
+            (
+                "A",
+                link,
+                "",
+                data_uri("image/png", &big),
+                "external-bad-icon",
+            ),
+            (
+                "A",
+                link,
+                "",
+                data_uri("text/html", b"<html>"),
+                "external-bad-icon",
+            ),
+            (
+                "A",
+                link,
+                "",
+                "data:image/png;base64,@@@".to_string(),
+                "external-bad-icon",
+            ),
+        ] {
+            assert_eq!(
+                location(add_external_full(
+                    &node,
+                    &root,
+                    name,
+                    href,
+                    description,
+                    &icon
+                )),
+                services(expected),
+                "{href:?} {description:?} {}",
+                &icon[..icon.len().min(40)]
+            );
+        }
+        assert_eq!(
+            node.state.users.externals().len(),
+            2,
+            "a refused form stores nothing"
+        );
+        // An unknown field is a bad request.
+        let reply = post(
+            &node,
+            &root,
+            EXTERNAL_ADD_PATH,
+            USERS_TOKEN,
+            "name=A&href=https%3A%2F%2Fa.example.org%2F&colour=red",
+        );
+        assert_eq!(reply.status, 400);
+    });
+}
+
+#[test]
+fn the_largest_icon_fits_the_form_for_the_superadmin_only() {
+    let node = start_with(Arc::new(Backend::Sqlite.fresh()), Some(Duration::ZERO), "");
+    let root = sign_in(&node, "root", PASSWORD);
+    insert_account(&node, "alice", "a-long-password-1");
+    let alice = sign_in(&node, "alice", "a-long-password-1");
+    // The largest image, with the Base64 characters that the percent form triples: the body is about 131 KB.
+    let mut bytes = PNG_BYTES.to_vec();
+    while bytes.len() + 3 <= 32 * 1024 {
+        bytes.extend_from_slice(&[0xfb, 0xef, 0xbe]);
+    }
+    bytes.resize(32 * 1024, 0xff);
+    let uri = data_uri("image/png", &bytes);
+    let added = add_external_full(&node, &root, "Big", "https://big.example.org/", "d", &uri);
+    assert_eq!(added.status, 303, "{}", added.body);
+    assert_eq!(
+        added.location(),
+        Some("/auth/settings/services?s=external-added&svc=ext-big")
+    );
+    let stored = node.state.users.externals();
+    assert_eq!(stored[0].icon.as_ref().unwrap().bytes().len(), 32 * 1024);
+    // An account that is not the superadmin gets the limit of the other forms: its body is refused before it is read.
+    let refused = add_external_full(&node, &alice, "Big2", "https://big.example.org/", "d", &uri);
+    assert_eq!(refused.status, 413);
+    assert_eq!(node.state.users.externals().len(), 1);
+    // A body above the addition for the icon is refused for the superadmin too.
+    let huge = add_external_full(
+        &node,
+        &root,
+        "Huge",
+        "https://huge.example.org/",
+        "d",
+        &"A".repeat(200 * 1024),
+    );
+    assert_eq!(huge.status, 413);
+}
+
+#[test]
+fn the_start_refuses_a_row_of_the_database_that_breaks_the_rules_and_names_the_row() {
+    let build = |store: Arc<Store>, extra: &str| {
+        let text = format!(
+            r#"server {{ listen_address = "127.0.0.1:{}" trusted_proxies = [] }}
+            authentication {{ superadmin_login_env = "L" superadmin_password_env = "P" mfa = "off" }}
+            session {{ secret_mode = "provided" secret_env = "S" }}
+            {extra}"#,
+            free_port()
+        );
+        let (config, _) = Config::parse(&text, &|name| match name {
+            "L" => Some("root".into()),
+            "P" => Some(PASSWORD.into()),
+            "S" => Some("0123456789abcdef0123456789abcdef".into()),
+            _ => None,
+        })
+        .unwrap();
+        let superadmin = SuperAdmin {
+            login: "root".into(),
+            password_hash: password_hash(PASSWORD),
+            generation: crate::crypto::superadmin_generation(&SECRET, "root", PASSWORD.as_bytes())
+                .unwrap(),
+        };
+        let tracker = Tracker::start(Arc::clone(&store), Duration::from_millis(200), 90).unwrap();
+        let access = AccessSecrets {
+            identity_key: None,
+            pdp_tokens: Vec::new(),
+            totp_key: None,
+        };
+        AppState::new(config, superadmin, SECRET.to_vec(), store, tracker, access).map(|_| ())
+    };
+    let store = Arc::new(Backend::Sqlite.fresh());
+    store.execute_raw(
+        "INSERT INTO external_services (id, name, href, created_at) VALUES ('ext-wiki', 'Wiki', 'https://wiki.example.org/', 1)",
+    );
+    assert_eq!(build(Arc::clone(&store), ""), Ok(()), "a good row starts");
+    // A bad link, a bad description, and a bad icon each stop the start with the row and the reason.
+    for (sql, words) in [
+        (
+            "INSERT INTO external_services (id, name, href, created_at) VALUES ('ext-bad', 'Bad', 'http://1.2.3/', 1)",
+            vec!["ext-bad", "href", "http://1.2.3/", "IPv4", "fix or delete the row"],
+        ),
+        (
+            "INSERT INTO external_services (id, name, href, created_at) VALUES ('ext-ftp', 'Ftp', 'ftp://example.org/', 1)",
+            vec!["ext-ftp", "href", "ftp://example.org/"],
+        ),
+        (
+            "INSERT INTO external_services (id, name, href, created_at, description) VALUES ('ext-ctl', 'Ctl', 'https://a.example.org/', 1, 'a' || char(10) || 'b')",
+            vec!["ext-ctl", "description", "control character"],
+        ),
+        (
+            "INSERT INTO external_services (id, name, href, created_at, icon_type, icon) VALUES ('ext-img', 'Img', 'https://a.example.org/', 1, 'image/png', X'68656c6c6f')",
+            vec!["ext-img", "icon"],
+        ),
+    ] {
+        let store = Arc::new(Backend::Sqlite.fresh());
+        store.execute_raw(sql);
+        let error = build(store, "").expect_err(sql);
+        for word in words {
+            assert!(error.contains(word), "{word}: {error}");
+        }
+    }
+    // A row that a service of the file hides is checked too.
+    let store = Arc::new(Backend::Sqlite.fresh());
+    store.execute_raw(
+        "INSERT INTO external_services (id, name, href, created_at) VALUES ('ext-wiki', 'Wiki', 'http://1.2.3/', 1)",
+    );
+    let file = r#"access { grants_mode = "hybrid" } external_service "Wiki" { href = "https://wiki.example.org/" }"#;
+    let error = build(store, file).expect_err("the hidden row is still a bad row");
+    assert!(
+        error.contains("ext-wiki") && error.contains("IPv4"),
+        "{error}"
+    );
+    // The grants of the file are checked against the ids of the file and of the database.
+    let store = Arc::new(Backend::Sqlite.fresh());
+    store.execute_raw(
+        "INSERT INTO external_services (id, name, href, created_at) VALUES ('ext-docs', 'Docs', 'https://docs.example.org/', 1)",
+    );
+    let error = build(
+        store,
+        r#"access { grants_mode = "hybrid" } user "carol" { grants = ["data.read on service:ext-docs"] }"#,
+    )
+    .expect_err("a right other than access on a service of the database");
+    assert!(
+        error.contains("carol") && error.contains("ext-docs"),
+        "{error}"
+    );
+}
+
 #[test]
 fn a_key_never_holds_a_right_on_an_external_service() {
     each_backend(|backend| {
@@ -11040,6 +11668,7 @@ fn a_key_never_holds_a_right_on_an_external_service() {
             name: "Wiki".into(),
             href: "https://wiki.example.org/".into(),
             created_at: 1,
+            ..Default::default()
         };
         node.state.store.insert_external(&entry, 10).unwrap();
         node.state.users.add_external(entry);
@@ -11133,23 +11762,24 @@ fn the_start_refuses_a_file_that_gives_a_right_other_than_access_on_an_external_
     let client = config_with("", r#"pdp_client "ext-wiki" { token_env = "PDP_TOKEN" }"#);
     // No external service in the database: the start cannot know the id, and it accepts the files.
     for config in [&access, &data, &path, &key, &client] {
-        assert!(crate::bootstrap::check_externals(
-            config,
-            &snapshot(&store),
-            &["ext-wiki".to_string()]
-        )
-        .is_ok());
+        assert!(crate::bootstrap::check_externals(config, &[], &["ext-wiki".to_string()]).is_ok());
     }
     let entry = crate::catalog::external::ExternalEntry {
         id: "ext-wiki".into(),
         name: "Wiki".into(),
         href: "https://wiki.example.org/".into(),
         created_at: 1,
+        ..Default::default()
     };
     store.insert_external(&entry, 10).unwrap();
     let names: Vec<String> = Vec::new();
+    let ids: Vec<String> = snapshot(&store)
+        .externals
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect();
     // `access` on the whole service is the one right that a file account holds on a link.
-    assert!(crate::bootstrap::check_externals(&access, &snapshot(&store), &names).is_ok());
+    assert!(crate::bootstrap::check_externals(&access, &ids, &names).is_ok());
     for (config, words) in [
         (&data, ["carol", "grants", "data.read on service:ext-wiki"]),
         (
@@ -11158,16 +11788,14 @@ fn the_start_refuses_a_file_that_gives_a_right_other_than_access_on_an_external_
         ),
         (&key, ["carol", "agent", "no right on an external service"]),
     ] {
-        let error =
-            crate::bootstrap::check_externals(config, &snapshot(&store), &names).unwrap_err();
+        let error = crate::bootstrap::check_externals(config, &ids, &names).unwrap_err();
         for word in words {
             assert!(error.contains(word), "{word}: {error}");
         }
         assert!(error.contains("ext-wiki"), "{error}");
     }
     let error =
-        crate::bootstrap::check_externals(&client, &snapshot(&store), &["ext-wiki".to_string()])
-            .unwrap_err();
+        crate::bootstrap::check_externals(&client, &ids, &["ext-wiki".to_string()]).unwrap_err();
     assert!(
         error.contains("pdp_client") && error.contains("ext-wiki"),
         "{error}"

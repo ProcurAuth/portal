@@ -305,7 +305,17 @@ impl AppState {
         crate::bootstrap::check_file_against_database(&config, &snapshot)?;
         crate::bootstrap::check_user_grants(&config, &snapshot)?;
         let pdp_names: Vec<String> = pdp_clients.values().map(|c| c.name.clone()).collect();
-        crate::bootstrap::check_externals(&config, &snapshot, &pdp_names)?;
+        // Every row of the database follows the rules of the external services, also a row that a service of the
+        // file hides. The ids of the file and of the database both take the checks of the grants.
+        crate::bootstrap::check_external_rows(&snapshot)?;
+        let external_ids: Vec<String> = crate::catalog::external::effective(
+            &config.access.external_services,
+            &snapshot.externals,
+        )
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect();
+        crate::bootstrap::check_externals(&config, &external_ids, &pdp_names)?;
         let users = Directory::from_snapshot(snapshot, config.users.max_users)
             .with_file_keys(crate::bootstrap::file_keys(&config))
             .with_file_accounts(
@@ -863,6 +873,8 @@ async fn handle_request(
         static_response("text/css; charset=utf-8", &ui::assets().css)
     } else if method == Method::GET && path.starts_with(ICONS_PREFIX) {
         handle_icon(&state, &path)
+    } else if method == Method::GET && path.starts_with(crate::catalog::external::ICON_PREFIX) {
+        handle_external_icon(&state, &path, &uri, request.headers(), &client)
     } else if method == Method::GET && path == SETTINGS_STYLE_PATH {
         static_response("text/css; charset=utf-8", ui::SETTINGS_CSS)
     } else if method == Method::GET && path == THEME_JS_PATH {
@@ -1270,6 +1282,83 @@ fn handle_favicon(
     response
 }
 
+/// `/auth/ext-icon/<id>`: the own icon of an external service. The portal stores the image and serves it itself,
+/// to a signed-in session that may open the service. Any other request gets the answer of an unknown path, so the
+/// path does not tell that the service exists. The use of the icon does not renew the idle timer.
+///
+/// The icon is data. The response gives the type that the bytes have, `nosniff`, and a policy that allows no
+/// source, no script and no embedding: an SVG that a browser opens by itself is inert. The page shows the icon in an
+/// `img` element, never inline. The validator is strong: the first 16 bytes of the SHA-256 digest of the image.
+fn handle_external_icon(
+    state: &AppState,
+    path: &str,
+    uri: &str,
+    headers: &HeaderMap,
+    client: &Client,
+) -> HttpResponse {
+    let Some(viewer) = current_viewer_passive(state, headers, client) else {
+        return not_found_response(state, &Method::GET, uri, || false);
+    };
+    let id = path
+        .strip_prefix(crate::catalog::external::ICON_PREFIX)
+        .and_then(|raw| percent_decode_form(raw).ok());
+    let image = id.as_deref().and_then(|id| {
+        if !may_open(viewer.grants.as_deref(), id) {
+            return None;
+        }
+        // The services that apply: the file first, then the database.
+        crate::catalog::external::effective(
+            &state.config.access.external_services,
+            &state.users.externals(),
+        )
+        .into_iter()
+        .find(|entry| entry.id == id)
+        .and_then(|entry| entry.icon)
+    });
+    let Some(image) = image else {
+        return not_found_response(state, &Method::GET, uri, || true);
+    };
+    let etag = image.etag();
+    let matches = headers
+        .get(hyper::header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(',').any(|candidate| {
+                let candidate = candidate.trim();
+                candidate == "*" || candidate.strip_prefix("W/").unwrap_or(candidate) == etag
+            })
+        });
+    let mut response = if matches {
+        response_with_body(StatusCode::NOT_MODIFIED, Bytes::new())
+    } else {
+        let mut ok = response_with_body(StatusCode::OK, Bytes::copy_from_slice(image.bytes()));
+        ok.headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static(image.mime()));
+        ok
+    };
+    apply_secure_headers(&mut response, false);
+    let headers = response.headers_mut();
+    // An SVG that opens on its own can run script. The icons are data, so the policy allows no source at all.
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; sandbox"),
+    );
+    headers.insert(
+        HeaderName::from_static("cross-origin-resource-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+    // The cache is private: a shared cache must not keep a file that needs a session. The browser asks again with
+    // the validator each time, so a deleted or a changed service never shows an old icon for long.
+    headers.insert(
+        HeaderName::from_static("cache-control"),
+        HeaderValue::from_static("private, no-cache"),
+    );
+    if let Ok(value) = HeaderValue::from_str(etag) {
+        headers.insert(hyper::header::ETAG, value);
+    }
+    response
+}
+
 /// The launcher. The portal checks the session itself. The route does not go through ForwardAuth.
 async fn handle_home(state: &Arc<AppState>, headers: &HeaderMap, client: &Client) -> HttpResponse {
     let Some(viewer) = current_viewer(state, headers, client) else {
@@ -1437,6 +1526,7 @@ async fn handle_settings(
                     notice: query_value(uri, "s").and_then(|code| ui::notice_for(&code)),
                     token: &users_token,
                     can_add: external_creation_allowed(state),
+                    from_file: &file_external_ids(state),
                 },
             )
         }
@@ -2104,7 +2194,11 @@ fn current_catalog(state: &AppState) -> Arc<Catalog> {
             }
         }
     }
-    let externals = state.users.externals();
+    // The services of the file win over the rows of the database with the same id.
+    let externals = crate::catalog::external::effective(
+        &state.config.access.external_services,
+        &state.users.externals(),
+    );
     let catalog = if externals.is_empty() {
         Arc::clone(&base)
     } else {
@@ -3337,8 +3431,13 @@ async fn admin_request(
     client: &Client,
     action: &'static str,
 ) -> Result<(Viewer, std::collections::HashMap<String, String>), HttpResponse> {
-    form_request(state, request, client, action, USERS_TOKEN).await
+    form_request(state, request, client, action, USERS_TOKEN, 0).await
 }
+
+/// The most that the form of an external service reads for its icon: a data URI of the largest image (about 44 KB),
+/// with each `+`, `/`, `=`, `:`, `;` and `,` in the percent form, so 3 bytes each. Only the superadmin in its own right
+/// gets this addition to `server.max_body_bytes`: the check of the session comes before the body.
+const EXTERNAL_ICON_FORM_BYTES: usize = 144 * 1024;
 
 /// The same checks for a form whose anti-CSRF token has the purpose `purpose`.
 #[allow(clippy::result_large_err)] // the error is the response, sent as is
@@ -3348,6 +3447,7 @@ async fn form_request(
     client: &Client,
     action: &'static str,
     purpose: &'static str,
+    superadmin_extra_bytes: usize,
 ) -> Result<(Viewer, std::collections::HashMap<String, String>), HttpResponse> {
     if !validate_post_origin(request.headers()) {
         state.metrics.users_origin_failure();
@@ -3373,9 +3473,15 @@ async fn form_request(
     let Some(first) = current_viewer(state, &headers, client) else {
         return Err(redirect_response(StatusCode::SEE_OTHER, LOGIN_PATH));
     };
+    let limit = state.config.server.max_body_bytes
+        + if is_superadmin(&first) {
+            superadmin_extra_bytes
+        } else {
+            0
+        };
     let body = match read_limited_body(
         request.into_body(),
-        state.config.server.max_body_bytes,
+        limit,
         state.config.server.body_read_timeout,
     )
     .await
@@ -3891,6 +3997,17 @@ fn external_creation_allowed(state: &AppState) -> bool {
     state.policy.mode.editable()
 }
 
+/// The ids of the external services that the blocks `external_service` of the file define.
+fn file_external_ids(state: &AppState) -> Vec<String> {
+    state
+        .config
+        .access
+        .external_services
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect()
+}
+
 /// The response returns to the Services page with the outcome of an action. `id` selects a service.
 fn services_redirect(code: &str, id: Option<&str>) -> HttpResponse {
     let select = id.map_or(String::new(), |id| {
@@ -3902,7 +4019,7 @@ fn services_redirect(code: &str, id: Option<&str>) -> HttpResponse {
     )
 }
 
-/// Adds an external service: a name and a link. The portal never requests the link. The page and the route exist
+/// Adds an external service: a name, a link, a description and an icon. The portal never requests the link. The page and the route exist
 /// when the grants can change. Only the superadmin adds one.
 async fn handle_external_add(
     state: &Arc<AppState>,
@@ -3913,7 +4030,16 @@ async fn handle_external_add(
         return text_response(StatusCode::NOT_FOUND, "Not Found\n");
     }
     let headers = request.headers().clone();
-    let (viewer, mut form) = match admin_request(state, request, client, "external_add").await {
+    let (viewer, mut form) = match form_request(
+        state,
+        request,
+        client,
+        "external_add",
+        USERS_TOKEN,
+        EXTERNAL_ICON_FORM_BYTES,
+    )
+    .await
+    {
         Ok(v) => v,
         Err(response) => return response,
     };
@@ -3922,6 +4048,8 @@ async fn handle_external_add(
     }
     let name = form.remove("name").unwrap_or_default();
     let href = form.remove("href").unwrap_or_default();
+    let description = form.remove("description").unwrap_or_default();
+    let icon = form.remove("icon").unwrap_or_default();
     if !form.is_empty() {
         return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
     }
@@ -3935,6 +4063,26 @@ async fn handle_external_add(
     let Ok(href) = crate::catalog::external::check_href(&href) else {
         return rejected("external-bad-link");
     };
+    let Ok(description) = crate::catalog::external::check_description(&description) else {
+        return rejected("external-bad-description");
+    };
+    // The field of the icon is empty, or it holds a data URI. The portal removes the spaces around it, as it does
+    // for the link: a field that the browser fills may end with a line end.
+    let icon = match icon.trim() {
+        "" => None,
+        uri => match crate::catalog::image::Image::from_data_uri(uri) {
+            Ok(image) => Some(Arc::new(image)),
+            Err(reason) => {
+                log(
+                    state,
+                    LogLevel::Info,
+                    "external_icon_refused",
+                    &[("reason", reason)],
+                );
+                return rejected("external-bad-icon");
+            }
+        },
+    };
     // A service that discovery lists with this id wins, and so does a server that asks the PDP under this name.
     // The portal refuses the id at once: the entry would have no tile.
     let discovered = current_catalog(state)
@@ -3944,6 +4092,15 @@ async fn handle_external_add(
     if discovered || pdp_client {
         return rejected("external-taken");
     }
+    if state
+        .config
+        .access
+        .external_services
+        .iter()
+        .any(|e| e.id == id)
+    {
+        return rejected("external-in-file");
+    }
     if state.users.externals().iter().any(|e| e.id == id) {
         return rejected("external-exists");
     }
@@ -3951,7 +4108,10 @@ async fn handle_external_add(
         id: id.clone(),
         name,
         href,
+        description,
+        icon,
         created_at: unix_now(),
+        from_file: false,
     };
     let store = Arc::clone(&state.store);
     let row = entry.clone();
@@ -4010,6 +4170,16 @@ async fn handle_external_delete(
         services_redirect(code, None)
     };
     // The entry can come from another instance a moment ago: with a shared database, the portal reads again first.
+    // A service of the file is read-only: its block is the only place that changes it.
+    if state
+        .config
+        .access
+        .external_services
+        .iter()
+        .any(|e| e.id == id)
+    {
+        return rejected("external-in-file");
+    }
     let known = |state: &AppState| state.users.externals().iter().any(|e| e.id == id);
     if !known(state) && state.store.is_shared() {
         let since = crate::users::Directory::clock_millis();
@@ -4984,6 +5154,7 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
         }
         _ if is_settings_path(path) => "settings",
         _ if path.starts_with(ICONS_PREFIX) => "icons",
+        _ if path.starts_with(crate::catalog::external::ICON_PREFIX) => "icons",
         SUCCESS_PATH => "success",
         LOGIN_PATH => "login",
         ui::mfa::CODE_PATH => "login_code",
@@ -5103,6 +5274,7 @@ mod tests {
             SETTINGS_JS_PATH,
             NOTIFY_JS_PATH,
             ICONS_PREFIX,
+            crate::catalog::external::ICON_PREFIX,
             ui::keys::PATH,
             ui::keys::NEW_PATH,
             ui::keys::CREATE_PATH,

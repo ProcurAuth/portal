@@ -8,6 +8,7 @@
 //! names it (`<name>_env`), and a file only when the file names it (`<name>_file`).
 
 mod accounts;
+mod external;
 mod hcl;
 mod inbox;
 pub mod keys;
@@ -85,6 +86,8 @@ pub struct AccessConfig {
     pub configured_grants: BTreeMap<String, Vec<Grant>>,
     /// The `user` blocks: the accounts of the file, with their keys (portal 3.4a).
     pub accounts: BTreeMap<String, FileAccount>,
+    /// The blocks `external_service`: the external services of the file, in the order of the file.
+    pub external_services: Vec<crate::catalog::external::ExternalEntry>,
     pub actions_timeout: Duration,
     pub actions_refresh: Duration,
     /// The longest time that the last good document of a service stays valid (portal 10.3a).
@@ -713,6 +716,16 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
         crate::portal_actions::check_user_grants(&features, &account.grants)
             .map_err(|e| format!("user {login:?}: {e}"))?;
     }
+    {
+        let file_ids: Vec<String> = config
+            .access
+            .external_services
+            .iter()
+            .map(|e| e.id.clone())
+            .collect();
+        let pdp_names: Vec<String> = secrets.pdp_tokens.iter().map(|(n, _)| n.clone()).collect();
+        crate::bootstrap::check_externals(&config, &file_ids, &pdp_names)?;
+    }
     if let Some(mut inbox) = config.inbox.take() {
         inbox::check_api_keys(&config, &mut inbox, &features)?;
         config.inbox = Some(inbox);
@@ -882,6 +895,7 @@ fn build_access(
         grants_mode,
         configured_grants,
         accounts,
+        external_services: external::build(r)?,
         actions_timeout: r.duration("access", "actions_timeout")?,
         actions_refresh: r.duration("access", "actions_refresh")?,
         actions_max_age: r.duration("access", "actions_max_age")?,

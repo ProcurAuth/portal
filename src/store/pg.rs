@@ -291,8 +291,15 @@ CREATE TABLE external_services (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   href TEXT NOT NULL,
-  created_at BIGINT NOT NULL
+  created_at BIGINT NOT NULL,
+  description TEXT NOT NULL DEFAULT '' CHECK (char_length(description) <= 200),
+  icon_type TEXT CHECK (icon_type IN ('image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml')),
+  icon BYTEA CHECK (icon IS NULL OR (icon_type IS NOT NULL AND octet_length(icon) BETWEEN 1 AND 32768))
 );
+-- The description and the icon of an external service (5.4.0) are part of this version too. description has 200
+-- characters at most. icon holds the bytes of the own icon, 32 KiB at most, and icon_type its media type: both are NULL
+-- when the service has no own icon. A database that the version 8 made before 5.4.0 lacks the three columns: the check
+-- at the end of the migration refuses it. The file homelab-migration/5.3.0-to-5.4.0.sql adds them.
 -- The approvals (5.1.0) are part of this version too. user_grants.confirm and key_grants.confirm hold the property
 -- confirm of a grant. keys.interaction holds conversational or one_shot: a key of kind api that exists before gets
 -- one_shot, the others get conversational. A database that the version 8 made before the approvals lacks the three
@@ -727,6 +734,21 @@ impl Pg {
                     SCHEMA.len()
                 )));
             }
+            let with_icons: bool = tx
+                .query_one(
+                    "SELECT (SELECT COUNT(*) FROM information_schema.columns
+                              WHERE table_schema = current_schema()
+                                AND table_name = 'external_services'
+                                AND column_name IN ('description', 'icon_type', 'icon')) = 3",
+                    &[],
+                )?
+                .get(0);
+            if !with_icons {
+                return Ok(Err(format!(
+                    "the database was made by schema version {} before the description and the icon of the external services (5.4.0), and this portal has no migration for it: apply the migration file 5.3.0-to-5.4.0.sql, or add the columns external_services.description, external_services.icon_type and external_services.icon by hand (see README, Upgrades, version 5.4.0)",
+                    SCHEMA.len()
+                )));
+            }
             tx.commit()?;
             Ok(Ok(()))
         })?
@@ -890,9 +912,18 @@ impl Pg {
                 return Ok(Err(ExternalError::Full));
             }
             let inserted = tx.execute(
-                "INSERT INTO external_services (id, name, href, created_at) VALUES ($1, $2, $3, $4)
+                "INSERT INTO external_services (id, name, href, created_at, description, icon_type, icon)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
                  ON CONFLICT (id) DO NOTHING",
-                &[&entry.id, &entry.name, &entry.href, &entry.created_at],
+                &[
+                    &entry.id,
+                    &entry.name,
+                    &entry.href,
+                    &entry.created_at,
+                    &entry.description,
+                    &entry.icon.as_ref().map(|icon| icon.mime()),
+                    &entry.icon.as_ref().map(|icon| icon.bytes().to_vec()),
+                ],
             )?;
             if inserted == 0 {
                 return Ok(Err(ExternalError::Exists));
@@ -921,17 +952,21 @@ impl Pg {
 
     fn externals_query<C: postgres::GenericClient>(
         c: &mut C,
-    ) -> Result<Vec<ExternalEntry>, postgres::Error> {
+    ) -> Result<Vec<ExternalRow>, postgres::Error> {
         Ok(c.query(
-            "SELECT id, name, href, created_at FROM external_services ORDER BY id COLLATE \"C\"",
+            "SELECT id, name, href, created_at, description, icon_type, icon
+             FROM external_services ORDER BY id COLLATE \"C\"",
             &[],
         )?
         .into_iter()
-        .map(|row| ExternalEntry {
+        .map(|row| ExternalRow {
             id: row.get(0),
             name: row.get(1),
             href: row.get(2),
             created_at: row.get(3),
+            description: row.get(4),
+            icon_type: row.get(5),
+            icon: row.get(6),
         })
         .collect())
     }
@@ -1542,8 +1577,17 @@ impl Pg {
             }
             for entry in &dump.externals {
                 tx.execute(
-                    "INSERT INTO external_services (id, name, href, created_at) VALUES ($1, $2, $3, $4)",
-                    &[&entry.id, &entry.name, &entry.href, &entry.created_at],
+                    "INSERT INTO external_services (id, name, href, created_at, description, icon_type, icon)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    &[
+                        &entry.id,
+                        &entry.name,
+                        &entry.href,
+                        &entry.created_at,
+                        &entry.description,
+                        &entry.icon.as_ref().map(|icon| icon.mime()),
+                        &entry.icon.as_ref().map(|icon| icon.bytes().to_vec()),
+                    ],
                 )?;
             }
             for row in &dump.totp {
@@ -2018,6 +2062,73 @@ mod tests {
                 "{drop_column}: {error}"
             );
         }
+    }
+
+    /// The columns of 5.4.0 changed the base schema in place: a database of version 8 without them is refused, and the
+    /// migration file adds them without a loss. A second run of the file changes nothing.
+    #[test]
+    fn a_database_made_before_the_description_and_the_icon_is_refused_and_the_migration_file_repairs_it(
+    ) {
+        use crate::store::testing::{postgres, Backend};
+        let Some(Backend::Postgres(url)) = postgres() else {
+            return;
+        };
+        let Store::Pg(fresh) = Backend::Postgres(url).fresh() else {
+            unreachable!()
+        };
+        let config = fresh.pool.config.clone();
+        let mut admin = config.connect(NoTls).unwrap();
+        // The table as 5.3.0 made it, with one row.
+        admin
+            .batch_execute(
+                "DROP TABLE external_services;
+                 CREATE TABLE external_services (id TEXT PRIMARY KEY, name TEXT NOT NULL, href TEXT NOT NULL, created_at BIGINT NOT NULL);
+                 INSERT INTO external_services VALUES ('ext-wiki', 'Wiki', 'https://wiki.example.org/', 5);",
+            )
+            .unwrap();
+        drop(fresh);
+        let error = Pg::start(config.clone(), 2, Duration::from_secs(5))
+            .err()
+            .expect("the database is refused");
+        assert!(
+            error.contains("before the description and the icon")
+                && error.contains("external_services.icon_type")
+                && error.contains("5.3.0-to-5.4.0.sql")
+                && error.contains("5.4.0"),
+            "{error}"
+        );
+        let file = include_str!("../../deploy/migrations/5.3.0-to-5.4.0.sql");
+        admin.batch_execute(file).unwrap();
+        // Idempotent: the second run changes nothing and does not fail.
+        admin.batch_execute(file).unwrap();
+        let started =
+            Pg::start(config.clone(), 2, Duration::from_secs(5)).expect("the database starts");
+        let rows = Store::Pg(Box::new(started))
+            .load_directory()
+            .unwrap()
+            .externals;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (
+                rows[0].id.as_str(),
+                rows[0].description.as_str(),
+                rows[0].created_at
+            ),
+            ("ext-wiki", "", 5)
+        );
+        // The migrated table refuses the same bad values as a new one.
+        for bad in [
+            format!("INSERT INTO external_services (id, name, href, created_at, description) VALUES ('ext-a', 'A', 'https://a.example.org/', 1, '{}')", "x".repeat(201)),
+            "INSERT INTO external_services (id, name, href, created_at, icon_type, icon) VALUES ('ext-b', 'B', 'https://b.example.org/', 1, 'text/html', '\\x3c')".to_string(),
+            "INSERT INTO external_services (id, name, href, created_at, icon) VALUES ('ext-c', 'C', 'https://c.example.org/', 1, '\\x3c')".to_string(),
+            "INSERT INTO external_services (id, name, href, created_at, icon_type, icon) VALUES ('ext-d', 'D', 'https://d.example.org/', 1, 'image/png', '\\x')".to_string(),
+            format!("INSERT INTO external_services (id, name, href, created_at, icon_type, icon) VALUES ('ext-e', 'E', 'https://e.example.org/', 1, 'image/png', decode(repeat('00', {}), 'hex'))", 32 * 1024 + 1),
+        ] {
+            assert!(admin.batch_execute(&bad).is_err(), "{bad}");
+        }
+        admin
+            .batch_execute(&format!("INSERT INTO external_services (id, name, href, created_at, description, icon_type, icon) VALUES ('ext-f', 'F', 'https://f.example.org/', 1, '{}', 'image/png', decode(repeat('00', {}), 'hex'))", "x".repeat(200), 32 * 1024))
+            .unwrap();
     }
 
     /// The agents changed the base schema in place: a database of version 8 without `keys.agents` is refused.

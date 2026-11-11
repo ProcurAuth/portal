@@ -550,9 +550,16 @@ fn tile(out: &mut String, service: &Service, icons: &Icons, new_tab: bool) {
     );
 }
 
-/// The tile icon. It uses the declared icon first. If there is none, it uses an icon named like the
+/// The tile icon. It uses the own icon of an external service first, then the declared icon. If there is none, it uses an icon named like the
 /// service. Otherwise, it uses the initial of the service.
 fn icon_html(service: &Service, icons: &Icons) -> String {
+    // The own icon of an external service: the portal serves it from its own address, to a signed-in session.
+    if let Some(path) = &service.own_icon {
+        return format!(
+            r#"<img class="tile__img tile__img--own" src="{}" alt="" width="24" height="24" loading="lazy" decoding="async">"#,
+            html_escape(path)
+        );
+    }
     let declared = service.icon.as_deref();
     let by_name = service.name.as_str();
     match declared
@@ -1233,6 +1240,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                     notice: None,
                     token: "demo",
                     can_add: !panel_only,
+                    from_file: &[],
                 },
             )
         }
@@ -1252,6 +1260,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                     notice: None,
                     token: "demo",
                     can_add: false,
+                    from_file: &[],
                 },
             )
         }
@@ -2007,6 +2016,7 @@ mod tests {
             name,
             href: href.into(),
             created_at: 1,
+            ..Default::default()
         }
     }
 
@@ -2053,6 +2063,70 @@ mod tests {
         );
         let off = home_page(&catalog, &Icons::empty(), &ctx());
         assert!(!off.contains("_blank"));
+    }
+
+    #[test]
+    fn a_tile_of_an_external_service_shows_its_description_and_its_own_icon() {
+        let base = Catalog::build(vec![service("Local", "", "/local/")], Vec::new());
+        let mut entry = external_entry("Caf\u{e9} wiki", "https://wiki.example.org/");
+        entry.description = "The <b>wiki</b> of the team".into();
+        // Without an own icon: the description, and the first letter of the name.
+        let page = home_page(
+            &base.with_externals(std::slice::from_ref(&entry)),
+            &Icons::empty(),
+            &ctx(),
+        );
+        assert!(
+            page.contains(
+                r#"<span class="tile__desc">The &lt;b&gt;wiki&lt;/b&gt; of the team</span>"#
+            ),
+            "{page}"
+        );
+        assert!(page.contains(r#"title="The &lt;b&gt;wiki&lt;/b&gt; of the team""#));
+        assert!(page.contains(r#"<span class="tile__icon" aria-hidden="true">C</span>"#));
+        assert!(!page.contains("/auth/ext-icon/"));
+        // With an own icon: an img element that points to the route of the portal, and nothing inline or external.
+        entry.icon = Some(std::sync::Arc::new(
+            crate::catalog::image::Image::from_bytes(
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec(),
+                None,
+            )
+            .unwrap(),
+        ));
+        let page = home_page(
+            &base.with_externals(std::slice::from_ref(&entry)),
+            &Icons::empty(),
+            &ctx(),
+        );
+        assert!(
+            page.contains(
+                r#"<span class="tile__icon" aria-hidden="true"><img class="tile__img tile__img--own" src="/auth/ext-icon/ext-caf%C3%A9-wiki" alt="" width="24" height="24" loading="lazy" decoding="async"></span>"#
+            ),
+            "{page}"
+        );
+        assert!(
+            !page.contains("data:image")
+                && !page.contains("<svg xmlns=\"http://www.w3.org/2000/svg\"/>")
+        );
+        // The own icon comes before the icon of the library that has the name of the service.
+        let dir = std::env::temp_dir().join(format!("portal-own-icon-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("di")).unwrap();
+        std::fs::write(dir.join("di/caf-wiki.svg"), "<svg/>").unwrap();
+        let mut named = external_entry("Wiki", "https://wiki.example.org/");
+        std::fs::write(dir.join("di/wiki.svg"), "<svg/>").unwrap();
+        let icons = Icons::load(&dir);
+        let by_name = home_page(
+            &base.with_externals(std::slice::from_ref(&named)),
+            &icons,
+            &ctx(),
+        );
+        assert!(by_name.contains("/auth/icons/di/wiki.svg"), "{by_name}");
+        named.icon = entry.icon.clone();
+        let own = home_page(&base.with_externals(&[named]), &icons, &ctx());
+        assert!(
+            own.contains("/auth/ext-icon/ext-wiki") && !own.contains("/auth/icons/di/wiki.svg")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

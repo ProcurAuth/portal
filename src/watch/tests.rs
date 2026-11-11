@@ -41,6 +41,7 @@ fn the_tile_rules_give_the_state_of_a_service() {
         name: "A".into(),
         description: String::new(),
         icon: None,
+        own_icon: None,
         href: "/".into(),
         weight: 0,
         health_url: None,

@@ -424,6 +424,7 @@ mod tests {
                 name,
                 href: href.into(),
                 created_at: 1,
+                ..Default::default()
             }
         }
         let base = catalog();

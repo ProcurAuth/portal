@@ -1113,6 +1113,7 @@ mod tests {
                 name,
                 href: "https://wiki.example.org/".into(),
                 created_at: 1,
+                ..Default::default()
             },
         ]);
         assert_eq!(catalog.service_count(), 2);
