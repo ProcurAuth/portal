@@ -126,6 +126,13 @@ The page of the Inbox is `/auth/settings/inbox` in the portal. ForwardAuth does 
 
 This variant is not in the manifests. Use it only when no PostgreSQL cluster exists. It has one active instance and standby instances. Replace the blocks `postgres` and `inbox.cluster` with a block `storage`. Add `inbox.replica` and a volume that all instances share. See the sections "Inbox" and "Storage" of the README.
 
+## Migrations of the database
+
+The directory `migrations/` has the SQL files that add columns for a new version. Each file is additive and drops nothing. Stop the portal and take a backup before you run a file. See the section "Upgrades" of the README for the order of the steps.
+
+- `migrations/5.3.0-to-5.4.0.sql` is for PostgreSQL. It is idempotent: a second run changes nothing. Run it with `psql -v ON_ERROR_STOP=1 -f FILE`.
+- `migrations/5.3.0-to-5.4.0.sqlite.sql` is for SQLite. Run it one time only, with `sqlite3 -bail portal.db < FILE`.
+
 ## Check the files
 
 - `tools/dev/check-configs.sh` runs `portal check-config` on every configuration in this directory. It uses dummy secrets.

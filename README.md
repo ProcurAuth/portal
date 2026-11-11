@@ -589,6 +589,8 @@ The approvals (5.1.0) change the schema version 8 in place, as the external serv
 
 The agents (5.1.0) change the schema version 8 in place in the same way. They add the column `agents` to `keys`. The values are `key`, `discover` and `enrolled`. A key of kind `api` gets `key`, and the other keys get `discover`.
 
+The description and the icon of an external service (5.4.0) change the schema version 8 in place in the same way. They add three columns to `external_services`: `description`, `icon_type` and `icon`. A database that 5.3.0 made lacks them. The portal stops at start, and the error names the three columns and the migration file `5.3.0-to-5.4.0.sql`. See "Upgrades", version 5.4.0.
+
 ### Paths open without a session (`portal.exclude`)
 
 A caller that cannot sign in (for example, a webhook or a probe) needs a path that portal does not authenticate. The service declares this path with `portal.exclude`. This is an annotation in K3s. Write **one rule per line**. portal ignores blank lines and `#` comments:
@@ -738,24 +740,58 @@ Each row has a head. The head shows the name of the group, the number of service
 
 ### External services
 
-The superadmin can add a service by hand. It has a name and a link. It needs no container and no IngressRoute. It is a tile that opens the link, and nothing more.
+An external service is a tile that opens a link. It has a name, a link, a description and an icon. It needs no container and no IngressRoute. The tile is all that it has.
 
-- **Add.** The button **Add external service** is on the Services page. It opens a form with a name and a link. The button and the route `POST /auth/services/add` exist only when the grants can change: `access.grants_mode` is not `static`. Only the superadmin in its own right adds or deletes a service. The form has the anti-CSRF token and the origin check, as the forms of the accounts have.
-- **Link.** The link is an absolute `http` or `https` URL with a host. It has 1 to 2048 bytes. It has no space, no control character, no backslash and no user information (`user:password@`). A port is a number from 1 to 65535. The portal removes the spaces around the link and changes nothing else.
-- **Name.** The name has 1 to 32 characters, with no control character and at least one letter or digit. The portal removes the spaces around it.
-- **Id.** The id is `ext-` and the slug of the name: "Team wiki" gives `ext-team-wiki`. The id is the resource id of the grant `access` on the service. Two names that have the same slug have the same id, and the portal refuses the second name. It never adds a number to an id.
-- **Tile.** The group is always `External`, and it is the last row of the launcher. The tile has no description, no icon of its own and no state word. It shows the icon of the library that has the name of the service. Without this icon, it shows the first letter of the name. It shows the badge `external`. The tile opens the absolute URL, and `ui.services_new_tab` applies to it as to the other tiles.
-- **Permission.** The only permission is the grant `access`. It shows the tile of the service to its holder. The superadmin sees every tile. A new account sees none. The page of an account and the page "New user" show the service with the badge and the switch **Open**. They show no list of actions. The portal refuses each other grant on an external service, in each form: the page of an account, "New user", and the forms of the keys.
+- **Sources.** The file gives a service with a block `external_service "<name>"`. The superadmin can also add a service on the Services page, and the database then keeps it. The server reads the blocks of the file at start. A change of a block needs a restart.
+- **Add.** The button **Add external service** is on the Services page. It opens a form with the fields Name, Link, Description and Icon. The last two fields are optional.
+- **Who can add.** The button and the route `POST /auth/services/add` exist only when the grants can change: `access.grants_mode` is not `static`. Only the superadmin in its own right adds or deletes a service.
+- **Form checks.** The form has the anti-CSRF token and the origin check, as the forms of the accounts have. It removes the spaces around the name, the link, the description and the icon. It refuses a value that the rules below refuse, and it shows a notice. An unknown field gives `400`.
+- **Link.** The link is arbitrary, but it is always absolute and its host is valid. It is an `http` or `https` URL of 1 to 2048 bytes, with the scheme in lower case. The path, the query and the fragment are free. The link has no user information (`user:password@`), no space, no control character and no backslash. The portal never requests the link.
+- **Host and port.** The host is a DNS name, an IPv4 address, or an IPv6 address in square brackets. A DNS name has ASCII labels of RFC 1123: 1 to 63 letters, digits and hyphens, with no hyphen at the start or at the end. The whole name has 253 characters at most. A name with a non-ASCII letter is refused: write its `xn--` form.
+- **IPv4 and port.** A host of digits and dots must be an IPv4 address of four numbers from 0 to 255, so `1.2.3` is refused. The port is a number from 1 to 65535, with no zero at its start.
+- **One rule.** The rule of the link applies to the file, to the form and to each row of the database. A bad link in a block of the file stops the start. The error names the block, the key and the value. A bad row of the database stops the start, and the error names the id of the row. The portal does not delete the row: fix or delete it, then start again.
+- **No change.** The file and the database keep the link as it is. A space in the link is an error there. The form is the one place that removes the spaces around the link.
+- **Name.** The name has 1 to 32 characters, with no control character and at least one letter or digit. In the file, the name is the label of the block, and it has no space at its start or at its end.
+- **Id.** The id is `ext-` and the slug of the name: "Team wiki" gives `ext-team-wiki`. The id is the resource id of the grant `access` on the service. Two names with the same slug have the same id: two blocks stop the start, and the form refuses the second name. The portal never adds a number to an id.
+- **Description.** The description is optional text of 200 characters at most, with no control character. The tile shows it under the name. The Services page shows it in the panel of the service. An empty description shows nothing.
+- **Icon.** The portal stores the image and serves it itself. It never loads an image from another host. The image is a PNG, a JPEG, a WebP, a GIF or an SVG. It has 32 KiB at most after it is decoded.
+- **Icon type.** The portal finds the type from the bytes (the magic numbers). A declared type that does not match the bytes is refused.
+- **SVG.** The portal refuses an SVG with a `<script`, an event attribute (`on...=`), a `<foreignObject`, a `javascript:` link or an `<!ENTITY`. It also refuses a `<!DOCTYPE` with an internal subset. Each `href`, `xlink:href` and `url(` must start with `#`. An external reference is refused.
+- **Icon in the file.** The file gives the icon as a data URI (`icon = "data:image/png;base64,..."`) or as the path of an image file (`icon_path`). Give at most one of the two. The key `icon_path` is not the `_file` form of `icon`, on purpose. The `_file` form removes the last line end, and the bytes of an image must stay exact.
+- **Icon in the form.** The form has a text field for a data URI. A script on the page adds a file input that fills the field from a chosen file. The page works without the script. The server checks the field again.
+- **Icon route.** The icon comes from `GET /auth/ext-icon/<id>` on the same origin. The route answers a session that may open the service, and nobody else. Any other request gets the answer of an unknown path. The page shows the icon in an `img` element and never inline, so an SVG cannot run a script. The policy `img-src` of the pages does not change.
+- **Icon headers.** The answer has the type of the bytes and `X-Content-Type-Options: nosniff`. It has `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox` and `Cache-Control: private, no-cache`. It has a strong `ETag`. A request with `If-None-Match` gets `304`.
+- **Tile.** The group is always `External`, and it is the last row of the launcher. The tile has no state word. It shows the own icon. Without an own icon, it shows the icon of the library that has the name of the service. Without this icon, it shows the first letter of the name.
+- **Tile badge.** The tile shows the badge `external`. The tile opens the absolute URL. The key `ui.services_new_tab` applies to it as to the other tiles.
+- **File and database.** A service of the file and a row of the database can have the same id. The service of the file wins, and the portal ignores the row. It does not delete the row. The Services page shows the service of the file with the badge `file`. The page has no trash icon for it, and the route of the delete refuses it.
+- **Same id as a discovered service.** A service that discovery lists with the same id wins over both. The external service then has no tile. The Services page and the launcher of the superadmin show a problem. Delete the row, or remove or rename the block.
+- **Permission.** The only permission is the grant `access`. It shows the tile of the service to its holder. The superadmin sees every tile. A new account sees none. A block `user` gives `access` on `service:ext-<slug>` as it does for any service.
+- **Forms of grants.** The page of an account and the page "New user" show the service with the badge and the switch **Open**. They show no list of actions. The portal refuses each other grant on an external service. This applies to each form: the page of an account, "New user", and the forms of the keys.
 - **No protection.** The portal does not authenticate the access to the link. Anyone who knows the address can open it. The grant only shows or hides the tile. The Services page and the badge say so: "External link. This server does not protect it."
 - **Keys.** A key never holds a right on an external service. The forms of the keys do not offer it, and they refuse a grant that names it.
 - **Never a client.** An external service has no actions document, no identity token, no PDP question and no health probe. The portal never requests the link, so it cannot reach a host by this way.
 - **No path.** An external service owns no path of the gate, also when its link points to the host of the portal. It cannot hide, shadow or open the path of another service. The grant `access` on it opens no path.
-- **Same id.** A service that discovery lists with the same id wins. The external service then has no tile. The Services page and the launcher of the superadmin show a problem. Delete the external service.
-- **Delete.** The trash icon in the head of the panel of the selected service deletes the service and each grant that names its id, in one transaction. If an account opens the service, the confirmation asks for the name first.
-- **Limit.** The portal keeps 256 external services at most.
-- **Several instances.** The database keeps the entries. Each instance reads them with the directory, in the next round (a few seconds), and it merges them into its catalogue. A restart is not necessary.
+- **Delete.** The trash icon in the head of the panel deletes the service and each grant that names its id, in one transaction. If an account opens the service, the confirmation asks for the name first. A service of the file has no trash icon.
+- **Limit.** The database keeps 256 external services at most. The file has 256 blocks at most.
+- **Body of the form.** The form that adds a service reads a body of `server.max_body_bytes` plus 144 KiB for the icon. Only the superadmin in its own right gets the addition. The check of the session comes before the body.
+- **Several instances.** The database keeps the rows. Each instance reads them with the directory, in the next round (a few seconds), and it merges them into its catalogue. A restart is not necessary. Each instance reads its own file, so give every instance the same blocks.
 - **History.** An add and a delete write the audit events `external_added` and `external_deleted`. The id of the service is in the field of the account. The tab Activity shows "External service added" and "External service deleted". The metric `portal_user_admin_total` counts the actions `external_add` and `external_delete`.
-- **File.** The start refuses a block `user` that gives an external service any grant other than `access` on the whole service. It refuses a block `key` that names an external service, and a block `pdp_client` that has the id of an external service as its name. The error names the block and the grant. The start checks the external services that the database holds.
+- **File checks.** The start refuses a block `user` that gives an external service any grant other than `access` on the whole service. It refuses a block `key` that names an external service. It refuses a block `pdp_client` that has the id of an external service as its name. The error names the block and the grant.
+- **Checks across sources.** The start applies the file checks to the ids of the file and to the ids of the database. It also checks each row of the database against the rules above, also a row that a service of the file hides.
+
+Example, with the name `Team wiki` and an icon from a file:
+
+```hcl
+external_service "Team wiki" {
+  href        = "https://wiki.example.org/start?lang=en"
+  description = "The wiki of the team"
+  icon_path   = "/run/secrets/wiki_icon.svg"   # or: icon = "data:image/svg+xml;base64,..."
+}
+
+user "carol" {
+  grants = ["access on service:ext-team-wiki"]
+}
+```
 
 ## Settings pages and history
 
@@ -779,7 +815,7 @@ The header stays at the top. The page does not scroll at 1440x900 and at 1280x72
    | `service` | The accounts that open the service. The column **Permissions** shows how many permissions each account has on it. | The keys with a grant on the service. |
 
    A value that names nothing gives an empty list. It never gives an error. A filter on a group and a service together gives no key. The chips of the kinds count the keys that the filters keep. The bar is for the superadmin. The panel-only page has no filter by group.
-3. **Services** (`/auth/settings/services`). One table lists the services by group. Each row shows the name and the id, and the path. It also shows the number of paths open without sign-in and the accounts that have `access`. The last columns give the number of actions, of resource types and of resources. A service whose actions document cannot be read has a warning icon. A click on a row selects it, with a link (`?svc=<id>`). The panel **Opened by** shows the accounts that open the selected service, with their number of grants. It then shows the accounts that do not open it. Each of these has a plus link that gives access. That link is the address `/auth/settings/give?user=<login>&service=<id>`. It redirects to the page of the account, with the service open in the editor and the grant `access` ticked. The page saves nothing until the person clicks **Save**. The chips **All** and **Services to check** filter the table (`?f=check`). They are absent when no service needs a check. The selected service is always a row of the filtered table. Above the panel, a line says where the document of the service comes from and how old the copy is, with the reason of the last failed read. The editor of grants shows the same line. The panel **To check** lists, for the selected service only, the grants that its document does not declare: the account (a link), the grant and the problem. A document that the portal cannot read is one more line. The panel is absent when there is none. The page of one service does not exist: its route answers 404. This page has no filter by user, group or service. The button **Add external service** opens a small form with a name and a link (see "External services"). An external service has the badge `external` and a dash in the columns of the actions, the types and the resources. Its panel has a trash icon and says "External link. This server does not protect it."
+3. **Services** (`/auth/settings/services`). One table lists the services by group. Each row shows the name and the id, and the path. It also shows the number of paths open without sign-in and the accounts that have `access`. The last columns give the number of actions, of resource types and of resources. A service whose actions document cannot be read has a warning icon. A click on a row selects it, with a link (`?svc=<id>`). The panel **Opened by** shows the accounts that open the selected service, with their number of grants. It then shows the accounts that do not open it. Each of these has a plus link that gives access. That link is the address `/auth/settings/give?user=<login>&service=<id>`. It redirects to the page of the account, with the service open in the editor and the grant `access` ticked. The page saves nothing until the person clicks **Save**. The chips **All** and **Services to check** filter the table (`?f=check`). They are absent when no service needs a check. The selected service is always a row of the filtered table. Above the panel, a line says where the document of the service comes from and how old the copy is, with the reason of the last failed read. The editor of grants shows the same line. The panel **To check** lists, for the selected service only, the grants that its document does not declare: the account (a link), the grant and the problem. A document that the portal cannot read is one more line. The panel is absent when there is none. The page of one service does not exist: its route answers 404. This page has no filter by user, group or service. The button **Add external service** opens a small form with a name, a link, a description and an icon (see "External services"). An external service has the badge `external` and a dash in the columns of the actions, the types and the resources. A service of the file also has the badge `file`. Its panel shows the description and says "External link. This server does not protect it." The panel has a trash icon, except for a service of the file.
 4. **Activity** (`/auth/settings/activity`). One list has two views, with the chips **Sign-ins** and **Changes**. The chip **Refused** keeps the refused sign-ins (`?r=failed`). The chip **Changes** shows the audit events (`?v=changes`). Above the list, a graph shows the connections of 30 days. Under it, three marks give the first day, the middle day and today, in UTC. The two views list the same 30 days, and each chip counts the rows of its list. A list holds 1000 rows at most, and a line says when it is cut. Each line of the sign-ins shows the result, the time, the login as typed, the address and the browser. Each line of the changes shows the time, the change, the account and who did it.
 5. **Inbox** (`/auth/settings/inbox`). The tab shows only when the file has the block `inbox` and the account has a permission of the Inbox. See "The tab Inbox" in the section "Inbox".
 
@@ -1509,6 +1545,14 @@ access {
   grants_mode = "dynamic"
 }
 
+# An external service: a tile that opens a link. href is mandatory. The description and the icon are optional.
+# The icon is a data URI (icon) or the path of an image file (icon_path), never both. See "External services".
+external_service "Team wiki" {
+  href        = "https://wiki.example.org/"
+  description = "The wiki of the team"
+  # icon_path = "/run/secrets/wiki_icon.svg"
+}
+
 identity {
   issuer           = "https://portal.home.internal"
   signing_key_file = "/run/secrets/portal_identity_key"
@@ -2060,6 +2104,17 @@ This block has a label and can occur more than one time. One server that asks th
 |---|---|---|---|
 | `token` | secret: give `token_env` (a variable name) or `token_file` (an absolute path), not both | required | The bearer token of the server. It has at least 32 bytes. Two servers must not have the same token. |
 
+#### Block `external_service "<name>"`
+
+This block has a label and can occur more than one time. One external service: a tile of the launcher that opens a link. The label is the display name: 1 to 32 characters, with no control character and at least one letter or digit. The id of the service is `ext-` and the slug of the label: `Team wiki` gives `ext-team-wiki`. The id is the resource id of the grant `access`, which a block `user` gives. The service needs no container and no route, and the server never requests its link. A block `key` cannot name it, and a block `pdp_client` cannot have its id as its name. Two blocks with the same id stop the start. A service of the file wins over a service of the same id in the database: the server ignores the row and does not delete it. The Settings page shows the service of the file with the badge `file`, and it cannot change or delete it. A discovered service with the same id wins over both. A block of this kind works in each mode of `access.grants_mode`. At most 256 blocks.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `href` | text: an absolute http or https URL of 1 to 2048 bytes, with a valid host: a DNS name (ASCII labels of RFC 1123), an IPv4 address, or an IPv6 address in square brackets; no user information, no space, no control character and no backslash; a port from 1 to 65535 | required | The link that the tile opens. The path, the query and the fragment are free. The server never requests the link. A link that does not follow the rule stops the start. The server removes no space and changes nothing: the value in the file is the value that applies. `ui.services_new_tab` applies to the tile. |
+| `description` | text: at most 200 characters, with no control character | `""` | The text under the name on the tile, and in the panel of the Services page. An empty text shows nothing. |
+| `icon` | text: a data URI in the form data:<type>;base64,<data>, with the type image/png, image/jpeg, image/webp, image/gif or image/svg+xml, and at most 32 KiB after decoding | none | The own icon of the service, as a data URI. Give at most one of `icon` and `icon_path`. The server finds the type from the bytes, and it refuses a declared type that does not match. It serves the image itself, to a signed-in session, from its own address. An SVG with a script, an event attribute, a `foreignObject` or an external reference stops the start. Without an icon, the tile uses the icon of the library that has the name of the service, then the first letter of the name. |
+| `icon_path` | text: an absolute path without '..' of a PNG, JPEG, WebP, GIF or SVG file of at most 32 KiB | none | The path of an image file that the server reads at start. The rules of `icon` apply to the bytes. This key is not the `_file` form of `icon`, on purpose: the `_file` form removes the last line end of a text, and the bytes of an image stay exact. A file that cannot be read, or that is empty or too large, stops the start. Give at most one of `icon` and `icon_path`. |
+
 #### Block `inbox.at_rest.key "<id>"`
 
 This block has a label and can occur more than one time. One key that seals the contents of the items. The block is inside the block `inbox.at_rest`, which has 1 to 8 of these blocks. The label is the id of the key. A key that is not the `active_key` stays readable and seals nothing.
@@ -2340,6 +2395,21 @@ Version 5.1.0 adds the agents of a key. Read these points before you upgrade fro
 - The metrics `portal_agents_created_total`, `portal_agent_refused_total` and `portal_agent_actions_total` are new.
 - The Android app of 5.1.0 and the server of 5.1.0 go together. The app keeps its portals when it updates from an earlier build, and it drops its local items: they come back from the server at the next connection. A phone of an earlier build cannot read the new frames of the agents. Update the app and the server in one step.
 
+
+Version 5.4.0 gives an external service a description and an icon of its own. It adds the block `external_service` to the file. It adds three columns to the database, and it makes the rule of the link stricter. Read these points before you upgrade from 5.3.x:
+
+- The block `external_service "<name>"` is new and optional. It has the keys `href` (mandatory), `description`, `icon` and `icon_path`. See "External services" and the reference of the block. Without the block, nothing changes in the file.
+- The configuration is closed, so a 5.3.x portal does not know the block. Add the block only after the upgrade.
+- The table `external_services` has three new columns: `description`, `icon_type` and `icon`. This changed the schema version 8 in place: the schema version did not change. A 5.4.0 portal stops at start on a database without the columns. The error names the columns and the migration file.
+- Apply the migration file before you start 5.4.0. For PostgreSQL, stop the portal, take a `pg_dump`, then run `psql -v ON_ERROR_STOP=1 -f 5.3.0-to-5.4.0.sql`. The file adds the columns, keeps each row, and drops nothing. A second run changes nothing.
+- For SQLite, stop the portal, copy the database file, then run `sqlite3 -bail portal.db < 5.3.0-to-5.4.0.sqlite.sql`. SQLite has no `ADD COLUMN IF NOT EXISTS`, so run this file one time only. A second run stops with `duplicate column name`, and nothing changes.
+- Both files are in `deploy/migrations/`. They are not needed for a new database: it has the columns from its first start.
+- The rule of the link is now one rule for the file, the form and the database. The host must be a valid DNS name, IPv4 address or bracketed IPv6 address. A row that 5.3.x accepted can break it, for example `http://1.2.3/` or a host with an underscore.
+- The start now checks each row of `external_services`. A row that breaks the rules stops the start, and the error names the id of the row and the reason. The row stays in the database. Fix it with SQL or delete it, then start again.
+- A service of the file wins over a row of the database with the same id. The portal ignores the row and does not delete it. The Services page shows the service of the file with the badge `file`, and it cannot change or delete it.
+- The form that adds a service has two new fields: Description and Icon. The route reads a body of `server.max_body_bytes` plus 144 KiB for the superadmin.
+- The new route `GET /auth/ext-icon/<id>` serves the own icon to a signed-in session that may open the service. The policy `img-src` of the pages has no change.
+- The protocol, the Android app and the JSON that the phone reads have no change.
 
 Version 5.3.0 makes the approval a duty of each service. It removes the key `approvals` of the block `pdp_client` and the member `approval` of the document of actions. Read these points before you upgrade from 5.2.x:
 
