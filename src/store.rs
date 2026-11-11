@@ -257,6 +257,49 @@ pub enum InsertError {
     Db(String),
 }
 
+/// One row of the table `external_services`, as the database keeps it. The conversion checks the type of the image
+/// against its bytes, and gives an error that names the row.
+pub struct ExternalRow {
+    pub id: String,
+    pub name: String,
+    pub href: String,
+    pub description: String,
+    pub icon_type: Option<String>,
+    pub icon: Option<Vec<u8>>,
+    pub created_at: i64,
+}
+
+impl ExternalRow {
+    pub fn into_entry(self) -> Result<ExternalEntry, String> {
+        let icon = match (self.icon_type, self.icon) {
+            (None, None) => None,
+            (Some(mime), Some(bytes)) => Some(std::sync::Arc::new(
+                crate::catalog::image::Image::from_stored(&mime, bytes).map_err(|reason| {
+                    format!(
+                        "the database holds an external service that the rules refuse: the row {:?} of the table external_services: icon: {reason}; fix or delete the row, then start again",
+                        self.id
+                    )
+                })?,
+            )),
+            _ => {
+                return Err(format!(
+                    "the database holds an external service that the rules refuse: the row {:?} of the table external_services: icon_type and icon must both be set or both be empty; fix or delete the row, then start again",
+                    self.id
+                ))
+            }
+        };
+        Ok(ExternalEntry {
+            id: self.id,
+            name: self.name,
+            href: self.href,
+            description: self.description,
+            icon,
+            created_at: self.created_at,
+            from_file: false,
+        })
+    }
+}
+
 /// Why the store refuses a new external service.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ExternalError {
@@ -1282,6 +1325,7 @@ mod tests {
             name,
             href: href.into(),
             created_at: NOW,
+            ..Default::default()
         }
     }
 
@@ -1368,6 +1412,162 @@ mod tests {
             // The accounts and their other grants stay.
             assert_eq!(store.load_users().unwrap()[0].grants.len(), 2);
         });
+    }
+
+    fn svg_icon() -> std::sync::Arc<crate::catalog::image::Image> {
+        std::sync::Arc::new(
+            crate::catalog::image::Image::from_bytes(
+                br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><rect width="8" height="8"/></svg>"##
+                    .to_vec(),
+                None,
+            )
+            .unwrap(),
+        )
+    }
+
+    fn png_icon() -> std::sync::Arc<crate::catalog::image::Image> {
+        std::sync::Arc::new(
+            crate::catalog::image::Image::from_bytes(
+                b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0\x1f\x15\xc4\x89\xff\0\x0a".to_vec(),
+                None,
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn an_external_service_keeps_its_description_and_its_icon_exactly() {
+        each_backend(|backend| {
+            let store = backend.fresh();
+            let mut plain = external("Plain", "https://plain.example.org/");
+            plain.created_at = 7;
+            let mut svg = external("With svg", "https://svg.example.org/");
+            svg.description = "\u{e9}".repeat(200);
+            svg.icon = Some(svg_icon());
+            let mut png = external("With png", "http://[::1]:8080/x");
+            png.description = "Dashboards".into();
+            png.icon = Some(png_icon());
+            for entry in [&plain, &svg, &png] {
+                store.insert_external(entry, 10).unwrap();
+            }
+            let loaded = store.load_directory().unwrap().externals;
+            assert_eq!(
+                loaded,
+                [plain.clone(), png.clone(), svg.clone()],
+                "{}",
+                backend.name()
+            );
+            // The bytes come back as they went in: the last byte of the PNG is a line end.
+            let png_back = loaded.iter().find(|e| e.id == png.id).unwrap();
+            assert_eq!(png_back.icon.as_ref().unwrap().bytes().last(), Some(&b'\n'));
+            assert_eq!(png_back.icon.as_ref().unwrap().mime(), "image/png");
+            assert!(
+                loaded.iter().all(|e| !e.from_file),
+                "a row is never from the file"
+            );
+            assert_eq!(
+                loaded
+                    .iter()
+                    .find(|e| e.id == plain.id)
+                    .unwrap()
+                    .description,
+                ""
+            );
+        });
+    }
+
+    /// The bytes of a binary column in the syntax of each backend.
+    fn blob(backend: &testing::Backend, hex: &str) -> String {
+        match backend {
+            testing::Backend::Sqlite => format!("X'{hex}'"),
+            testing::Backend::Postgres(_) => format!("'\\x{hex}'::bytea"),
+        }
+    }
+
+    #[test]
+    fn a_row_that_breaks_the_rules_is_named_when_the_start_reads_it() {
+        each_backend(|backend| {
+            let store = backend.fresh();
+            // A row that a hand wrote, with a link that the rule refuses.
+            store.execute_raw(
+                "INSERT INTO external_services (id, name, href, created_at) VALUES ('ext-bad', 'Bad', 'http://1.2.3/', 1)",
+            );
+            let snapshot = store.load_directory().unwrap();
+            let error = crate::bootstrap::check_external_rows(&snapshot).unwrap_err();
+            assert!(
+                error.contains("ext-bad")
+                    && error.contains("href")
+                    && error.contains("IPv4")
+                    && error.contains("http://1.2.3/"),
+                "{error}"
+            );
+            store.execute_raw("DELETE FROM external_services");
+            // A name that does not make its id.
+            store.execute_raw(
+                "INSERT INTO external_services (id, name, href, created_at) VALUES ('ext-other', 'Wiki', 'https://wiki.example.org/', 1)",
+            );
+            let error = crate::bootstrap::check_external_rows(&store.load_directory().unwrap())
+                .unwrap_err();
+            assert!(
+                error.contains("ext-other") && error.contains("id"),
+                "{error}"
+            );
+            store.execute_raw("DELETE FROM external_services");
+            // A good row passes.
+            store.execute_raw(
+                "INSERT INTO external_services (id, name, href, created_at, description) VALUES ('ext-wiki', 'Wiki', 'https://wiki.example.org/', 1, 'The wiki')",
+            );
+            assert!(
+                crate::bootstrap::check_external_rows(&store.load_directory().unwrap()).is_ok()
+            );
+            store.execute_raw("DELETE FROM external_services");
+            // An image whose bytes are not the declared type: the read stops and names the row.
+            store.execute_raw(&format!(
+                "INSERT INTO external_services (id, name, href, created_at, icon_type, icon) VALUES ('ext-wiki', 'Wiki', 'https://wiki.example.org/', 1, 'image/png', {})",
+                blob(backend, "68656c6c6f")
+            ));
+            let error = store.load_directory().expect_err("the row is refused");
+            assert!(
+                error.contains("ext-wiki")
+                    && error.contains("external_services")
+                    && error.contains("icon"),
+                "{error}"
+            );
+            store.execute_raw("DELETE FROM external_services");
+            // An SVG with a script, written by hand, is refused too.
+            let script = "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>x</script></svg>"
+                .bytes()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            store.execute_raw(&format!(
+                "INSERT INTO external_services (id, name, href, created_at, icon_type, icon) VALUES ('ext-wiki', 'Wiki', 'https://wiki.example.org/', 1, 'image/svg+xml', {})",
+                blob(backend, &script)
+            ));
+            let error = store.load_directory().expect_err("the row is refused");
+            assert!(
+                error.contains("ext-wiki") && error.contains("script"),
+                "{error}"
+            );
+        });
+    }
+
+    #[test]
+    fn the_import_of_a_sqlite_file_keeps_the_description_and_the_icon() {
+        let Some(pg) = postgres() else { return };
+        let dir = std::env::temp_dir().join(format!("portal-import-icon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("portal.db");
+        let mut entry = external("Wiki", "https://wiki.example.org/");
+        entry.description = "The wiki".into();
+        entry.icon = Some(png_icon());
+        {
+            let source = Store::open(&path).unwrap();
+            source.insert_external(&entry, 5).unwrap();
+        }
+        let target = pg.fresh();
+        assert_eq!(target.import_sqlite(&path).unwrap().externals, 1);
+        assert_eq!(target.load_directory().unwrap().externals, [entry]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

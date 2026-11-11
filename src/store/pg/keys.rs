@@ -476,6 +476,10 @@ impl Pg {
             tx.commit()?;
             Ok((version, users, keys, grants, externals))
         })?;
+        let externals = externals
+            .into_iter()
+            .map(crate::store::ExternalRow::into_entry)
+            .collect::<Result<Vec<_>, String>>()?;
         let users = Self::assemble_users(user_rows)?;
         let mut by_key: std::collections::HashMap<String, Vec<GrantRow>> =
             std::collections::HashMap::new();

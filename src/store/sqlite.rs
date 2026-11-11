@@ -218,6 +218,12 @@ ALTER TABLE keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'mcp' CHECK (kind IN ('mc
 /// absolute link. The id is the resource id of the grants `access` on the service. A file that the version 8 made
 /// before the external services lacks the table: [`Sqlite::init`] refuses it.
 ///
+/// The description and the icon of an external service (5.4.0) are part of this version too. `description` is a text of
+/// 200 characters at most. `icon` holds the bytes of the own icon, at most 32 KiB, and `icon_type` its media type: both
+/// are NULL when the service has no own icon. The portal checks the bytes against the type when it reads the row. A file
+/// that the version 8 made before 5.4.0 lacks the three columns: [`Sqlite::init`] refuses it. The file
+/// `homelab-migration/5.3.0-to-5.4.0.sql` adds them.
+///
 /// The approvals (5.1.0) are part of this version too. `user_grants.confirm` and `key_grants.confirm` hold the property
 /// `confirm` of a grant. `keys.interaction` holds `conversational` or `one_shot`: a key of kind `api` that exists before
 /// gets `one_shot`, the others get `conversational`. A file that the version 8 made before the approvals lacks the three
@@ -251,7 +257,10 @@ CREATE TABLE external_services (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   href TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  description TEXT NOT NULL DEFAULT '' CHECK (length(description) <= 200),
+  icon_type TEXT CHECK (icon_type IN ('image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml')),
+  icon BLOB CHECK (icon IS NULL OR (icon_type IS NOT NULL AND length(icon) BETWEEN 1 AND 32768))
 );
 ALTER TABLE user_grants ADD COLUMN confirm INTEGER NOT NULL DEFAULT 0 CHECK (confirm IN (0, 1));
 ALTER TABLE key_grants ADD COLUMN confirm INTEGER NOT NULL DEFAULT 0 CHECK (confirm IN (0, 1));
@@ -519,6 +528,14 @@ impl Sqlite {
                         "the database was made by schema version {SCHEMA_VERSION} before the agents, and this portal has no migration for it: make a new database, or add the column keys.agents by hand (see README, Upgrades, version 5.1.0)"
                     ));
                 }
+                if !(has_column(&conn, "external_services", "description")?
+                    && has_column(&conn, "external_services", "icon_type")?
+                    && has_column(&conn, "external_services", "icon")?)
+                {
+                    return Err(format!(
+                        "the database was made by schema version {SCHEMA_VERSION} before the description and the icon of the external services (5.4.0), and this portal has no migration for it: apply the migration file 5.3.0-to-5.4.0.sql, or add the columns external_services.description, external_services.icon_type and external_services.icon by hand (see README, Upgrades, version 5.4.0)"
+                    ));
+                }
             }
             newer => {
                 return Err(format!(
@@ -667,8 +684,17 @@ impl Sqlite {
             return Err(ExternalError::Full);
         }
         match tx.execute(
-            "INSERT INTO external_services (id, name, href, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![entry.id, entry.name, entry.href, entry.created_at],
+            "INSERT INTO external_services (id, name, href, created_at, description, icon_type, icon)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                entry.id,
+                entry.name,
+                entry.href,
+                entry.created_at,
+                entry.description,
+                entry.icon.as_ref().map(|icon| icon.mime()),
+                entry.icon.as_ref().map(|icon| icon.bytes().to_vec()),
+            ],
         ) {
             Ok(_) => {}
             Err(rusqlite::Error::SqliteFailure(e, _))
@@ -703,19 +729,27 @@ impl Sqlite {
     }
 
     pub(super) fn load_externals_with(conn: &Connection) -> Result<Vec<ExternalEntry>, String> {
-        conn.prepare("SELECT id, name, href, created_at FROM external_services ORDER BY id")
+        let rows = conn
+            .prepare(
+                "SELECT id, name, href, created_at, description, icon_type, icon
+                 FROM external_services ORDER BY id",
+            )
             .map_err(db)?
             .query_map([], |row| {
-                Ok(ExternalEntry {
+                Ok(ExternalRow {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     href: row.get(2)?,
                     created_at: row.get(3)?,
+                    description: row.get(4)?,
+                    icon_type: row.get(5)?,
+                    icon: row.get(6)?,
                 })
             })
             .map_err(db)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(db)
+            .map_err(db)?;
+        rows.into_iter().map(ExternalRow::into_entry).collect()
     }
 
     // History: writes -------------------------------------------------------------------------
@@ -1490,6 +1524,89 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         drop(Sqlite::open(&path).unwrap());
         assert!(Sqlite::open(&path).is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The columns of 5.4.0 changed the base schema in place: a file of version 8 without them is refused, and the
+    /// migration file adds them without a loss.
+    #[test]
+    fn a_database_made_before_the_description_and_the_icon_is_refused_and_the_migration_file_repairs_it(
+    ) {
+        let dir = std::env::temp_dir().join(format!("portal-v8-icon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("portal.db");
+        drop(Sqlite::open(&path).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        // The table as 5.3.0 made it, with one row.
+        conn.execute_batch(
+            "DROP TABLE external_services;
+             CREATE TABLE external_services (id TEXT PRIMARY KEY, name TEXT NOT NULL, href TEXT NOT NULL, created_at INTEGER NOT NULL);
+             INSERT INTO external_services VALUES ('ext-wiki', 'Wiki', 'https://wiki.example.org/', 5);",
+        )
+        .unwrap();
+        drop(conn);
+        let error = Sqlite::open(&path).err().expect("the file is refused");
+        assert!(
+            error.contains("before the description and the icon")
+                && error.contains("external_services.icon_type")
+                && error.contains("5.3.0-to-5.4.0.sql")
+                && error.contains("5.4.0"),
+            "{error}"
+        );
+        // The migration file of the repository.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(include_str!(
+            "../../deploy/migrations/5.3.0-to-5.4.0.sqlite.sql"
+        ))
+        .unwrap();
+        // A second run stops: SQLite has no IF NOT EXISTS for a column, and the file says so.
+        assert!(conn
+            .execute_batch(include_str!(
+                "../../deploy/migrations/5.3.0-to-5.4.0.sqlite.sql"
+            ))
+            .is_err());
+        conn.execute_batch("ROLLBACK;").ok();
+        drop(conn);
+        let store = Sqlite::open(&path).unwrap();
+        let rows = store.load_directory().unwrap().externals;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (
+                rows[0].id.as_str(),
+                rows[0].href.as_str(),
+                rows[0].description.as_str(),
+                rows[0].created_at
+            ),
+            ("ext-wiki", "https://wiki.example.org/", "", 5)
+        );
+        assert!(rows[0].icon.is_none());
+        // The migrated table takes the same values as a new one, and it refuses the same bad values.
+        store
+            .insert_external(
+                &ExternalEntry {
+                    id: "ext-docs".into(),
+                    name: "Docs".into(),
+                    href: "https://docs.example.org/".into(),
+                    description: "Docs".into(),
+                    created_at: 6,
+                    ..Default::default()
+                },
+                5,
+            )
+            .unwrap();
+        for bad in [
+            format!("INSERT INTO external_services (id, name, href, created_at, description) VALUES ('ext-a', 'A', 'https://a.example.org/', 1, '{}')", "x".repeat(201)),
+            "INSERT INTO external_services (id, name, href, created_at, icon_type, icon) VALUES ('ext-b', 'B', 'https://b.example.org/', 1, 'text/html', X'3c')".to_string(),
+            "INSERT INTO external_services (id, name, href, created_at, icon) VALUES ('ext-c', 'C', 'https://c.example.org/', 1, X'3c')".to_string(),
+            "INSERT INTO external_services (id, name, href, created_at, icon_type, icon) VALUES ('ext-d', 'D', 'https://d.example.org/', 1, 'image/png', X'')".to_string(),
+            format!("INSERT INTO external_services (id, name, href, created_at, icon_type, icon) VALUES ('ext-e', 'E', 'https://e.example.org/', 1, 'image/png', zeroblob({}))", 32 * 1024 + 1),
+        ] {
+            assert!(store.conn().execute_batch(&bad).is_err(), "{bad}");
+        }
+        assert!(store
+            .conn()
+            .execute_batch(&format!("INSERT INTO external_services (id, name, href, created_at, icon_type, icon) VALUES ('ext-f', 'F', 'https://f.example.org/', 1, 'image/png', zeroblob({}))", 32 * 1024))
+            .is_ok());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
