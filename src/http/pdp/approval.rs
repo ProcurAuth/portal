@@ -88,6 +88,8 @@ pub(super) struct Ask<'a> {
     pub enabled: bool,
     /// The subject of the question, as the request gives it. The approval is bound to it.
     pub subject: &'a str,
+    /// `context.permission_only`: the question is for another permission of an operation. The gate ignores `confirm`.
+    pub permission_only: bool,
 }
 
 impl Ask<'_> {
@@ -98,6 +100,7 @@ impl Ask<'_> {
             effect: None,
             enabled: false,
             subject: "",
+            permission_only: false,
         }
     }
 }

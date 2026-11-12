@@ -199,13 +199,11 @@ impl Fixture {
     }
 
     fn post(&self, body: &str) -> Reply {
-        pdp(
-            self.port,
-            "/access/v1/evaluation",
-            Some(PDP_DB_TOKEN),
-            body,
-            None,
-        )
+        self.post_to("/access/v1/evaluation", body)
+    }
+
+    fn post_to(&self, path: &str, body: &str) -> Reply {
+        pdp(self.port, path, Some(PDP_DB_TOKEN), body, None)
     }
 
     /// The answer of a question about analytics.
@@ -1041,6 +1039,97 @@ fn an_evaluation_id_above_1024_bytes_is_never_given() {
         assert!(
             answer["context"]["evaluation_id"].is_null() && reason(&answer).is_none(),
             "[{name}] {answer}"
+        );
+    });
+}
+
+// ---------------------------------------------------------------- other permissions of an operation (spec Q53)
+
+/// A question with `context.permission_only` for a grant with `confirm`.
+fn marked(f: &Fixture, subject: &str, context: Value) -> Reply {
+    f.post(
+        &json!({
+            "subject": {"type": "user", "id": subject},
+            "action": {"name": "data.write"},
+            "resource": {"type": "database", "id": "analytics", "properties": {"ancestors": [
+                {"type": "service", "id": "db"}, {"type": "host", "id": "prod"}]}},
+            "context": context
+        })
+        .to_string(),
+    )
+}
+
+/// The approval follows the action of the use alone (protocol 5.5a, 17.1). The question of another permission carries
+/// `context.permission_only`: the PDP ignores `confirm` for it, with no reason of 17.1 and no `evaluation_id`.
+#[test]
+fn a_question_of_another_permission_never_asks_for_an_approval() {
+    each_fixture(true, |f, name| {
+        let key = f.key("9b1c04e2aa71f0c3", 1, None);
+        // Without the marker: the grant has `confirm`, so the use asks for an approval.
+        let plain = marked(f, &key, json!({})).json();
+        assert_eq!(
+            reason(&plain),
+            Some("approval_required"),
+            "[{name}] {plain}"
+        );
+        // With the marker: a plain `true`.
+        let reply = marked(f, &key, json!({"permission_only": true}));
+        assert_eq!(reply.status, 200, "[{name}] {}", reply.body);
+        let answer = reply.json();
+        assert_eq!(answer["decision"], true, "[{name}] {answer}");
+        assert!(
+            answer["context"]["reason"].is_null() && answer["context"]["evaluation_id"].is_null(),
+            "[{name}] {answer}"
+        );
+        // The marker limits the scope: the key still needs the grant.
+        add_key(
+            &f.node,
+            "3e3e3e3e3e3e3e3e",
+            Some("alice"),
+            20,
+            vec![Grant::new("access", "db").unwrap()],
+        );
+        let none = marked(f, "key:3e3e3e3e3e3e3e3e", json!({"permission_only": true})).json();
+        assert_eq!(none["decision"], false, "[{name}] {none}");
+        assert!(none.get("context").is_none(), "[{name}] {none}");
+        // The marker with a use, with an effect, or with another value is a bad request.
+        for bad in [
+            json!({"permission_only": true, "usage": {"units": 1}}),
+            json!({"permission_only": true, "approval": {"effect": effect(1)}}),
+            json!({"permission_only": false}),
+            json!({"permission_only": "true"}),
+        ] {
+            let reply = marked(f, &key, bad.clone());
+            assert_eq!(reply.status, 400, "[{name}] {bad}: {}", reply.body);
+        }
+        // In a batch, the item gets `invalid_request`.
+        let item = |context: Value| {
+            json!({
+                "subject": {"type": "user", "id": key},
+                "action": {"name": "data.write"},
+                "resource": {"type": "database", "id": "analytics", "properties": {"ancestors": [
+                    {"type": "service", "id": "db"}, {"type": "host", "id": "prod"}]}},
+                "context": context
+            })
+        };
+        let batch = json!({"evaluations": [item(json!({"permission_only": true})), item(json!({"permission_only": 1})), item(json!({}))]});
+        let reply = f.post_to("/access/v1/evaluations", &batch.to_string());
+        assert_eq!(reply.status, 200, "[{name}] {}", reply.body);
+        let answers = reply.json()["evaluations"].clone();
+        assert_eq!(answers[0]["decision"], true, "[{name}] {answers}");
+        assert_eq!(
+            answers[1]["context"]["reason"], "invalid_request",
+            "[{name}] {answers}"
+        );
+        assert_eq!(
+            answers[2]["context"]["reason"], "approval_required",
+            "[{name}] {answers}"
+        );
+        // No request is ever made for the marked question: the approval API sees none.
+        assert_eq!(
+            f.metric("approval_required"),
+            2,
+            "[{name}] only the two unmarked questions"
         );
     });
 }

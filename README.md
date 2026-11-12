@@ -245,6 +245,12 @@ A grant can ask for the approval of a person before each use of its action. The 
   - The decision for a key asks when a grant of the key has `confirm`. It also asks when a grant of the owner has `confirm`.
   - The two sides combine with OR, as the limits do. When the owner is the superadmin, only the grants of the key count.
   - The approval API never gets a person as the subject of a request.
+- **An operation with several permissions.** The approval follows the action of the use alone (protocol 5.5a, 17.7).
+  - The action of the use is the action that the call runs. For example, the tool `export_query` of ClickHouse Dash uses `query.export` and also needs `query.run.read`.
+  - Only a `confirm` on `query.export` submits `export_query` for approval.
+  - A `confirm` on `query.run.read` asks for the tools that use `query.run.read` themselves, for example `run_query`. It never blocks `export_query` and never asks for it.
+  - To keep exports under control, put `confirm` on `query.export`.
+  - The service marks the question of the other permission with `context.permission_only` (see "The approval gate"). The PDP then ignores `confirm`.
 - **Pages and routes that cannot wait.** A service answers a call that cannot wait with `403` and `{"error": "approval_cannot_wait"}`, when the PDP asks for an approval (protocol 17.7a).
   - A key that calls an HTTP route or a page of a service meets this answer. Only a call of an MCP tool can wait.
   - A `confirm` on such an action is thus useful for MCP tools only. This is a documented exception: nothing changes for the plain HTTP routes.
@@ -445,7 +451,14 @@ pdp_client "db" {
 
 The server puts the effect of the operation in `context.approval.effect`. The effect is `sha256:` and 64 lower-case hexadecimal digits (protocol 17.3). A bad value gets status `400`. The question never holds the operation itself.
 
-The PDP first decides as for a question without an effect. The action `access`, the action `mcp.session` and a question with `context.match` equal to `"subtree"` ignore `confirm`. A question of a person ignores it too. The `confirm` of a grant of a person applies to the keys of the person (protocol 17.8). When the decision is true and the action needs an approval, the PDP reads the newest approval. It must have the same server, subject, action, resource and effect:
+The PDP first decides as for a question without an effect. These questions ignore `confirm`:
+
+- a question for the action `access` or the action `mcp.session`;
+- a question with `context.match` equal to `"subtree"`;
+- a question of a person: the `confirm` of a grant of a person applies to the keys of the person (protocol 17.8);
+- a question with `context.permission_only` equal to `true` (see below).
+
+When the decision is true and the action needs an approval, the PDP reads the newest approval. It must have the same server, subject, action, resource and effect:
 
 | State of the approval | Question without `usage` | Question with `usage` (a use) |
 |---|---|---|
@@ -467,6 +480,12 @@ The `evaluation_id` holds no state. It has the id of a content key, the time of 
 A submission has no subject, no action and no resource. The portal reads them from the sealed part. The server sees no fact in clear text. Each instance that has the content keys can check the value.
 
 The `evaluation_id` is valid for `inbox.approvals.evaluation_ttl`.
+
+An operation can need several permissions (protocol 5.5a). The question of each permission other than the action of the use has `context.permission_only` equal to `true`, no `context.usage` and no `context.approval`.
+
+- The PDP decides it as for a question without an effect, and it ignores `confirm`. The answer is `true` or `false` with no reason of the gate and no `evaluation_id`. The ceilings of that permission apply to its part.
+- The marker with `context.usage`, with `context.approval`, or with another value than `true` gets status `400`. In a batch, the item gets `invalid_request`.
+- The PDP trusts the service for the marker, as it trusts it for every member (protocol 12). A service that does not mark such a question gets `approval_required` for it.
 
 A use is a question with `context.usage` and the effect. The PDP takes three steps (protocol 17.2):
 

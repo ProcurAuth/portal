@@ -892,10 +892,17 @@ fn decide(
     matching: Match,
     usage: bool,
     effect: Option<&str>,
+    scope: Scope,
 ) -> Outcome {
     if matching == Match::Invalid {
         return Outcome::deny(
             "context.match is not node or subtree",
+            Some(INVALID_REQUEST),
+        );
+    }
+    if scope == Scope::Invalid {
+        return Outcome::deny(
+            "context.permission_only is not true, or it comes with an effect",
             Some(INVALID_REQUEST),
         );
     }
@@ -928,6 +935,7 @@ fn decide(
         effect,
         enabled: approval::configured(state),
         subject: &subject.id,
+        permission_only: scope == Scope::PermissionOnly,
     };
     match SubjectId::parse(&subject.id) {
         SubjectId::User(login) => decide_person(state, login, &q, &ask),
@@ -1138,6 +1146,9 @@ fn finish(state: &AppState, q: &Question<'_>, verdict: Verdict, ask: &Ask<'_>) -
         && q.action != ACCESS
         && q.action != crate::grants::MCP_SESSION
         && !matches!(SubjectId::parse(ask.subject), SubjectId::User(_))
+        // The question of another permission of an operation limits the scope only: the approval follows the action of
+        // the use (protocol 5.5a, 17.1).
+        && !ask.permission_only
     {
         match approval::gate(state, q, ask) {
             Err(refusal) => return refusal,
@@ -1199,10 +1210,11 @@ fn decide_and_log(
     matching: Match,
     usage: bool,
     effect: Option<&str>,
+    scope: Scope,
     request_id: Option<&str>,
 ) -> Outcome {
     let outcome = decide(
-        state, client, subject, action, resource, matching, usage, effect,
+        state, client, subject, action, resource, matching, usage, effect, scope,
     );
     if outcome.reason == Some(INVALID_RESOURCE) {
         read_document_soon(state, client, request_id);
@@ -1266,6 +1278,32 @@ fn read_usage(context: Option<&Value>) -> Result<bool, String> {
     }
 }
 
+/// What a question says about its place in an operation (protocol 5.5a, 17.1). A question of the action of the use has no
+/// marker. A question of another permission of the operation has `context.permission_only` = `true`: it limits the
+/// scope, and the PDP ignores `confirm` for it, so it never asks for an approval.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Scope {
+    /// No marker: the question of the action of the use, or a question outside an operation.
+    Use,
+    /// `context.permission_only` is `true`.
+    PermissionOnly,
+    /// The member is not `true`, or it comes with an effect.
+    Invalid,
+}
+
+/// Reads `context.permission_only`. Another value than `true`, and `true` with `context.approval`, are invalid. The
+/// caller checks `context.usage` (a use has no other-permission marker).
+fn read_scope(context: Option<&Value>, effect: Option<&str>) -> Scope {
+    match context
+        .and_then(Value::as_object)
+        .and_then(|c| c.get("permission_only"))
+    {
+        None => Scope::Use,
+        Some(Value::Bool(true)) if effect.is_none() => Scope::PermissionOnly,
+        Some(_) => Scope::Invalid,
+    }
+}
+
 /// Whether a `context` object has the member `usage`, with any value.
 fn has_usage(value: Option<&Value>) -> bool {
     value
@@ -1303,6 +1341,13 @@ fn evaluation(
         ));
     }
     let effect = approval::read_effect(request.get("context"))?;
+    // In a request with one evaluation, a bad `permission_only` gets HTTP 400, also with `usage` (protocol 17.1).
+    let scope = read_scope(request.get("context"), effect.as_deref());
+    if scope == Scope::Invalid || (scope == Scope::PermissionOnly && usage) {
+        return Err(PdpError::Bad(
+            "context.permission_only must be true, and it takes no context.usage and no context.approval".into(),
+        ));
+    }
     let outcome = decide_and_log(
         state,
         client,
@@ -1312,6 +1357,7 @@ fn evaluation(
         matching,
         usage,
         effect.as_deref(),
+        scope,
         request_id,
     );
     if let Some(cause) = outcome.unavailable {
@@ -1386,10 +1432,12 @@ fn evaluations(
         let matching = Match::of(pick("context"));
         let effect = approval::read_effect(pick("context"))
             .map_err(|e| format!("evaluations[{index}]: {e}"))?;
-        parsed.push((subject, action, resource, matching, effect));
+        // A bad `permission_only` gives `invalid_request` in its item (protocol 11.1).
+        let scope = read_scope(pick("context"), effect.as_deref());
+        parsed.push((subject, action, resource, matching, effect, scope));
     }
     let mut out = Vec::with_capacity(parsed.len());
-    for (subject, action, resource, matching, effect) in &parsed {
+    for (subject, action, resource, matching, effect, scope) in &parsed {
         let outcome = decide_and_log(
             state,
             client,
@@ -1399,6 +1447,7 @@ fn evaluations(
             *matching,
             false,
             effect.as_deref(),
+            *scope,
             request_id,
         );
         let decision = outcome.decision;
@@ -1466,7 +1515,16 @@ fn search_action(
         .into_iter()
         .filter(|name| {
             decide_and_log(
-                state, client, &subject, name, &resource, matching, false, None, request_id,
+                state,
+                client,
+                &subject,
+                name,
+                &resource,
+                matching,
+                false,
+                None,
+                Scope::Use,
+                request_id,
             )
             .decision
         })

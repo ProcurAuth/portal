@@ -42,7 +42,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ProcurAuth/procurauth
-          ref: 85efd9781af648dd771925eae3aa46dc4d30dc20
+          ref: 74f5495d74d475c2bb7fa074ff7c7f79517436fb
           path: procurauth
           # A public repository needs no token. A private one needs a secret that can read it.
           token: ${{ secrets.PROCURAUTH_READ_TOKEN || github.token }}

@@ -1272,7 +1272,7 @@
         button.setAttribute("aria-pressed", on ? "true" : "false");
         button.setAttribute("aria-label", "Asks for an approval");
         // A call that cannot wait, for example a page of the service, gets the error approval_cannot_wait.
-        var cannotWait = " A call that cannot wait, such as a page of the service, is refused with approval_cannot_wait.";
+        var cannotWait = " A call that cannot wait, such as a page of the service, is refused with approval_cannot_wait. A tool that needs several permissions asks only for the permission that it uses, so put the lock on that permission.";
         if (imposed) button.title = "Asks for an approval. Your own grant asks for it, so this key must too." + cannotWait;
         else if (data.person) button.title = "Asks for an approval when a key of this account uses the action. The account itself never asks." + cannotWait;
         else button.title = "Asks for an approval." + cannotWait;
