@@ -96,9 +96,16 @@ The portal knows nothing about TLS. Its listeners speak plain HTTP. Traefik term
 2. Make the ForwardAuth middleware `portal-user` for `/auth/verify`. It copies `Cookie` and `User-Agent` to the portal and the identity token back. Set it on the entry point, or on each service router.
 3. Route `/auth/` and `/` to the portal. Do not apply ForwardAuth to `/auth/`: the portal checks the session itself.
 4. Route `/v1/`, `/api/v1/`, `/mcp` and `/api/version` to the portal without ForwardAuth. Add the middleware `retry`. A phone, a sender and an agent have no session.
-5. For key routes of agents, use a second ForwardAuth middleware that points to `/auth/verify-key`. It copies `Authorization`.
+5. For key routes of agents, use a second ForwardAuth middleware that points to `/auth/verify-key` and copies `Authorization`. Chain the middleware `drop-authorization` after it (`portal-key-chain` in `examples/traefik-dynamic.yaml`). The answer of the portal cannot clear a header. Only the proxy can remove the key before the service (protocol 9.1). Without `drop-authorization`, the key reaches the service. The portal cannot see the proxy, so this is a duty of the deployment.
 6. Set `server.trusted_proxies` to the network of Traefik. The portal then reads `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host` from Traefik only.
 7. Keep `trustForwardHeader: false` on each ForwardAuth middleware. Traefik then writes `X-Forwarded-Uri` and `X-Forwarded-Method` from the real request.
+
+**A global middleware and a key route exclude each other.** A middleware on the entry point (step 2, "Global Traefik ForwardAuth") runs on each router of this entry point, also on a key route. A request that has only `Authorization: Bearer mcp_...` has no session. The check `/auth/verify` then refuses it before the key route sees it. The priority of a router does not change this. Use one of these two recipes:
+
+- **A dedicated entry point for the agents.** Add an entry point with no middleware, for example `websecure-agents` on its own port. Put the key routers on it, with the middleware `portal-key-chain`. Keep `portal-user` on the entry point of the persons. The example `examples/traefik-entrypoint-snippet.yaml` shows both entry points.
+- **No middleware on the entry point.** Put `portal-user` on each router of a person, and `portal-key-chain` on each key router. A key router has a rule that only a key matches, for example ``PathPrefix(`/clickhouse/mcp`) && HeaderRegexp(`Authorization`, `^Bearer mcp_`)``. Give it a higher priority than the router of the persons for the same path.
+
+The portal ignores the cookies on a key route. A request on this route needs a key.
 
 Set `trustForwardHeader: true` only when each hop in front of Traefik overwrites or removes the `X-Forwarded-Uri` and `X-Forwarded-Method` headers of the client. Otherwise the client chooses the request that `/auth/verify` checks. For example, a request with `X-Forwarded-Uri: /auth/login` passes the gate without a session. Behind a TCP load balancer, give the client address with the PROXY protocol of the entry point. Behind an HTTP proxy, keep `false` and set `session.bind = "user_agent"`.
 
@@ -201,10 +208,11 @@ A grant is an action on a node of the resource tree of a service (contract 11.8)
 The `<id>` is the id of the service in the catalogue. The id is the label `portal.id`, or the slug of the group and the name. The part after the service has 0 to 4 segments.
 
 - `access` lets the user open the service. portal decides `access` in `/auth/verify`.
+- The service `portal` is the scope of the functions of the portal. It is not a service of the protocol: see "Approval of an action".
 - The other actions are the actions that the service publishes at `/.well-known/procurauth/actions` (protocol 5.1). The service decides these actions. The service asks the PDP of portal.
 - A grant covers the node that it names and each node below it. portal compares the segments one by one (prefix match). For example, `query.run.read on service:db` covers each host and each database of `db`.
 - A grant below the service does not cover its parent, a node of another branch, or the whole service.
-- The service gives its tree of resource types. The top-level list `resource_types` of its document declares each type and its parent: `service` or another declared type. A document without this list has one level: each type of an action has the parent `service`.
+- The service gives its tree of resource types. The top-level list `resource_types` of its document declares each type and its parent: `service` or another declared type. The list is mandatory (protocol 5.2). It can be empty: each action of the document then lists only the type `service`. A document without the list is bad as a whole, and the portal keeps the last good document.
 - Each action of the document has a list `resource_types`: the types on which a grant for this action is valid. The type `service` is the whole service: it is never a segment.
 - The types of the segments must follow the parents. With `host` below `service` and `database` below `host`, write `host:<id>/database:<id>`. A grant on `database:<id>` alone does not follow the tree.
 - A grant below the service applies only when the last known document of the service follows it. The action must list the type of the last segment, and the segments must follow the parents. Else, the PDP does not apply the grant. If portal never read the document of the service, the PDP does not apply any grant below this service. A grant on the whole service does not need a declaration.
@@ -223,11 +231,24 @@ portal has no groups of users. Each user has their own grants.
 
 A grant can ask for the approval of a person before each use of its action. The grant then has the property `confirm`. The PDP uses the property: see "The approval gate" in the section "AuthZEN PDP".
 
-- Each action of each service can ask. A service must handle `approval_required` for all its actions. The document of the service has no member for this, and the file of the portal has no flag for it. The portal ignores a member `approval` in an action.
+- Each action of each service can ask, except `access` and `mcp.session` (see below). A service must handle `approval_required` for all its actions: a service that cannot approve one of its actions does not conform (protocol 1.3, 17). The document of the service has no member for this, and the file of the portal has no flag for it. The portal ignores a member `approval` in an action.
+- **The `portal` scope is not a service.** The service `portal` holds the functions of the portal itself: the keys, the alerts and the questions of the Inbox.
+  - Its document is in the code of the portal. It has no PEP, no route `/.well-known/procurauth/actions` and no identity token.
+  - The portal decides these actions in process.
+  - Protocol 1.3a lets a PDP have such built-in actions. Protocol 1.3, 5.2b and 17 do not apply to them, so `confirm` is refused on them.
 - The PDP asks for an approval when the file has the block `inbox.approvals`. Else the PDP gives a plain `false`, and the approval API gives `403`. Any token of a block `pdp_client` can use the approval API. The sealed `evaluation_id` limits it: a request must have the exact service, subject, action, resource and effect of the answer `approval_required`.
-- The grant editor shows a lock button on the row of each ticked permission of a service. The tooltip says "Asks for an approval". An open lock means no approval. A closed lock means that the permission asks for an approval. The action `access` and the actions of the service `portal` have no lock.
-- The server refuses `confirm` on a grant of the service `portal` and on the action `access`. A form that asks for it gets a bad grant. A file that asks for it stops at start.
-- The decision for a person asks for an approval when a grant that covers the action has `confirm`. The decision for a key asks when a grant of the key has `confirm`. It also asks when a grant of the owner has `confirm`. The two sides combine with OR, as the limits do. When the owner is the superadmin, only the grants of the key count.
+- The grant editor shows a lock button on the row of each ticked permission of a service, when the file has the block `inbox.approvals`. Without this block, the editor shows no lock: a grant with `confirm` would be a plain refusal. A grant that already has `confirm` shows a closed lock that is off, with the reason in its tooltip. An open lock means no approval. A closed lock means that the permission asks for an approval. The action `access`, the action `mcp.session` and the actions of the service `portal` have no lock.
+- The tooltip of the lock on the form of an account says that the lock asks for the keys of the account. It says that the account itself never asks.
+  - The tooltip also says that a call that cannot wait is refused with `approval_cannot_wait`. A page of the service is such a call.
+- The server refuses `confirm` on a grant of the service `portal`, on the action `access` and on the action `mcp.session`. A form that asks for it gets a bad grant. A file that asks for it stops at start. The action `mcp.session` opens a session and answers the methods that have no tool, for example `initialize` and `ping`. It has no effect to approve, and such a method cannot wait (protocol 17.8, binding 3.6a). A tool of a service never uses it.
+- **A person never asks for their own use** (protocol 17.8). The `confirm` of a grant of a person has no effect on the questions of that person, because the person would approve their own action. It applies to the keys of the person.
+  - The decision for a key asks when a grant of the key has `confirm`. It also asks when a grant of the owner has `confirm`.
+  - The two sides combine with OR, as the limits do. When the owner is the superadmin, only the grants of the key count.
+  - The approval API never gets a person as the subject of a request.
+- **Pages and routes that cannot wait.** A service answers a call that cannot wait with `403` and `{"error": "approval_cannot_wait"}`, when the PDP asks for an approval (protocol 17.7a).
+  - A key that calls an HTTP route or a page of a service meets this answer. Only a call of an MCP tool can wait.
+  - A `confirm` on such an action is thus useful for MCP tools only. This is a documented exception: nothing changes for the plain HTTP routes.
+  - A read with a standalone key, with no identity token and no PDP, stays outside the approval.
 - A key shows the chip `confirm` in the list of the keys. The editor of a key shows the lock closed and locked when a grant of the owner asks for the approval. The person cannot open it, because the key cannot go beyond its owner.
 - Two grants that differ only by `confirm` count as one grant with `confirm`.
 - In the file, an item of `grants` can be an object: `{ grant = "query.run.write on service:clickhouse-dash/host:prod", confirm = true }`. The value is `true` or `false`, without quotes. The default is `false`.
@@ -299,6 +320,7 @@ The token is a JWT. Its algorithm is `Ed25519`. The header has `kid`. `kid` is t
 | `sub` | the login of the user (the superadmin has its own login) |
 | `aud` | the id of the service |
 | `iat`, `exp` | the time of issue, and `iat + identity.token_ttl` |
+| `owner` | the login of the owner of the key. A token for a key has it, and `sub` is then `key:<id>`. A token for a person has no `owner`. A service uses it for logs and for approvals, never for a decision (protocol 9.5). |
 
 The token contains no permission. The service asks the PDP. portal keeps one token for each session and each service. portal gives the same token again until half of its life is gone. A path that no service owns gets no token.
 
@@ -328,10 +350,11 @@ pdp_client "db" {
 
 | Endpoint | Use |
 |---|---|
-| `POST /access/v1/evaluation` | One decision: `subject`, `action`, `resource`, `context`. The answer is `{"decision": true}` or `{"decision": false}`. If the subject does not exist or the resource is not valid, the answer has a reason (see the rules below). |
+| `POST /access/v1/evaluation` | One decision: `subject`, `action`, `resource`, `context`. The answer is `{"decision": true}` or `{"decision": false}`. A `true` answer can have `context.limits` (the ceilings) and, for a question with `context.usage`, `context.usage.units`. A `false` answer can have a reason (see the rules below and the example after them). |
 | `POST /access/v1/evaluations` | A batch. The top-level members are the defaults of each item. `options.evaluations_semantic` is `execute_all` (default), `deny_on_first_deny` or `permit_on_first_permit`. The batch has at most `pdp.max_evaluations` items. |
 | `POST /access/v1/search/action` | The actions that the subject can do on the resource. The resource has the same form as in an evaluation, with its ancestors. The answer is one page. |
-| `GET /.well-known/authzen-configuration` | The endpoints under `pdp.url`. This endpoint needs no token. |
+| `GET /.well-known/authzen-configuration` | The endpoints under `pdp.url`, and the limits of the PDP (see "The metadata"). This endpoint needs no token. |
+| `POST /approval/v1/requests` and two more routes | The approval API (see "The approval API for a service"). |
 
 Rules:
 
@@ -340,7 +363,7 @@ Rules:
 - A resource of another type is a node below the service, for example a database. `resource.properties.ancestors` gives the chain from the service to the parent of the node: `[{"type": "service", "id": "db"}, {"type": "host", "id": "local"}]`. The ids are not encoded in a request.
 - A node below the service must have this chain. A node of depth 1, for example the host `local`, has the chain `[{"type": "service", "id": "db"}]`. A node without `ancestors`, or with an empty list, gets `invalid_resource`.
 - The first ancestor must be the service of the server that asks: its token tells which server it is. The chain (the ancestors, then the resource) must follow the parents of the last known document of the service. The chain has at most 4 nodes below the service.
-- A resource that does not obey these rules gets `{"decision": false, "context": {"reason": "invalid_resource"}}`. The service of another server gets the same answer. This check comes before the search of the login or the key: the superadmin and an unknown user get the same answer.
+- A resource that does not obey these rules gets `{"decision": false, "context": {"reason": "invalid_resource"}}`. An id or a type name that breaks protocol 4.1 or 5.2 gets it too. Examples are an empty id, an id of more than 256 bytes, a control character and the type `service` in the chain. The service of another server gets the same answer. This check comes before the search of the login or the key: the superadmin and an unknown user get the same answer.
 - An `invalid_resource` answer also starts an early read of the document of the server that asks (see "Actions of the services"). The server can have a new tree that portal does not know yet.
 - If portal has no good document of the service, the decision is `false`, without a reason. This applies to each node and to the whole service. Only a request for `access` on the whole service is not affected. Without the document, the PDP cannot apply the ceilings and the budgets of a grant. The reason in the log is `the document of the service is not known`. After a change of the `portal.actions` URL of a service, a failed read leaves no document.
 - Without a good document, the PDP still checks the start of the chain. A node without ancestors, or with a first ancestor that is not this service, gets `invalid_resource`.
@@ -351,10 +374,12 @@ Rules:
 - In a batch, the `context` of an item replaces the `context` at the top of the request (AuthZEN 1.0). An item without `context` uses the top-level one. The action search reads `context.match` too.
 - A grant below the service applies only when the last known document of the service follows it (see "Grants"). The PDP keeps the last document that it read for each service. A failed read does not remove it. A new document that changes the tree removes the effect of the grants that do not follow it, at once. The PDP ignores such a grant: the reason in the log is `no grant` when no other grant applies. A grant on the whole service is not affected.
 - The subject type must be `user`. The subject must be an account, the superadmin or a key. If not, the decision is `false`.
-- A subject that the PDP does not know gets a reason: `{"decision": false, "context": {"reason": "unknown_subject"}}`. This applies to a login that no account has, and to a subject type that is not `user`. The batch gives the same answer in each item of this kind. A service can use it to tell an unknown user from a user without a grant.
-- An id with a colon is not a login: the id `key:<id>` names a key (protocol 3.2, see "Keys and limits"). Without the block `keys`, each key gets `unknown_subject`. A key that does not exist and an expired key get it too. A key older than the `max_key_lifetime` of its owner, or whose owner cannot use keys, also gets it. An id with another prefix gets the same answer.
+- A subject that the PDP does not know gets a reason: `{"decision": false, "context": {"reason": "unknown_subject"}}`. This applies to a login that no account has, and to a subject type that is not `user`. The batch gives the same answer in each item of this kind. A service can use it to tell an unknown user from a user without a grant. A service reads this reason as an orphan: a deleted subject (contract 11.5, protocol 11.1).
+- An id with a colon is not a login: the id `key:<id>` names a key (protocol 3.2, see "Keys and limits"). Without the block `keys`, each key gets `unknown_subject`. A key that does not exist, an expired key and a key whose owner does not exist get it too. An id with another prefix gets the same answer.
+- A condition of the owner that can change later gives `false` with no reason, never `unknown_subject` (protocol 3.5, 11.1). These conditions are the right `keys.own.use` of the owner for the kind of the key, and the `max_key_lifetime` of the owner. A service must not read such a key as a deleted key. When the owner gets the right again, or a longer life, the key works again.
 - The reasons `invalid_resource` and `invalid_request` tell that the request of the service is not correct. They do not show the grants of a user.
 - No other denial has a reason, except `budget_exceeded` (see "Keys and limits") and the four reasons of the approval gate (see "The approval gate"). The answer is `{"decision": false}`, so that it does not show the grants of a user.
+- The action search (`/access/v1/search/action`) asks the gate without an effect. For a key, it thus lists no action that needs an approval: the gate answers `false` with no effect, and the search skips the action. For a person, `confirm` has no effect, so the search lists the action.
 - The PDP fails closed. A request that the PDP cannot read gets status `400` and no decision.
 - The PDP returns the header `X-Request-ID` of the request.
 - The log records each decision (`pdp_decision`). The record has the server, the subject, the action, the resource, the effect, the decision and the reason. The resource is the chain in the text form of a grant path, with the ids encoded, for example `service:db/host:local/database:analytics`. The record also has the match: `node`, `subtree` or `invalid`.
@@ -375,6 +400,33 @@ A request about a database of the host `local`:
 }
 ```
 
+The same request with `"context": {"usage": {"units": 1}}` is a use. The PDP counts one unit of each budget of the subject, and the answer gives the ceilings and the units:
+
+```json
+{"decision": true, "context": {"limits": {"max_duration": 30}, "usage": {"units": 1}}}
+```
+
+The value `units` is `0` when no budget applies to the subject for this action, and `1` otherwise (protocol 6.12). When a counter has no room, the answer is HTTP 200 with the reason `budget_exceeded` and `retry_after` (protocol 11.1). The value `retry_after` is a whole number of seconds from 1. The PDP never answers `429`:
+
+```json
+{"decision": false, "context": {"reason": "budget_exceeded", "retry_after": 12}}
+```
+
+Only a request with one evaluation can carry `context.usage` (protocol 6.11). A request that has `usage` at another place, or `usage` with `"subtree"`, gets status `400`. The PDP gives status `503` and no decision when it cannot read or change a counter (protocol 6.9).
+
+#### The metadata
+
+`GET /.well-known/authzen-configuration` gives the endpoints and the limits of the PDP. The limits are the real values of the listener (protocol 6.9, 10.7, 10.7a). A service reads them and keeps within them.
+
+| Member | Value |
+|---|---|
+| `procurauth_idle_max_seconds` | `server.header_read_timeout`. The listener closes a connection that sends no request for this time. A service closes its idle connection after half of it. |
+| `procurauth_evaluations_max_bytes` | `pdp.max_body_bytes`. A larger body gets `400`. |
+| `procurauth_evaluations_max_items` | `pdp.max_evaluations` (default 128). A batch with more items gets `400`. A service splits its questions into batches that fit. |
+| `procurauth_usage_max_seconds` | `5`. A question with `context.usage` gets a decision or status `503` within 5 seconds. The look at the approval, the count of the units and the consumption of the approval each end within 2 seconds, and the count ends within 1 second. |
+
+With the block `inbox.approvals`, the metadata also has the twelve members `procurauth_approval_*` (see "The approval gate").
+
 #### The approval gate
 
 A grant with `confirm` makes an action need the approval of a person (see "Approval of an action"). The block `inbox.approvals` starts the gate. It needs `inbox.items`, `inbox.at_rest`, `pdp` and `keys.mcp = true`. The service has no flag for it. Each action of each service can ask, and a service must handle `approval_required` for all its actions (see "Approval of an action"). Without the block `inbox.approvals`, a grant with `confirm` gives a plain `{"decision": false}`.
@@ -393,7 +445,7 @@ pdp_client "db" {
 
 The server puts the effect of the operation in `context.approval.effect`. The effect is `sha256:` and 64 lower-case hexadecimal digits (protocol 17.3). A bad value gets status `400`. The question never holds the operation itself.
 
-The PDP first decides as for a question without an effect. The action `access` and a question with `context.match` equal to `"subtree"` ignore `confirm`. When the decision is true and the action needs an approval, the PDP reads the newest approval. It must have the same server, subject, action, resource and effect:
+The PDP first decides as for a question without an effect. The action `access`, the action `mcp.session` and a question with `context.match` equal to `"subtree"` ignore `confirm`. A question of a person ignores it too. The `confirm` of a grant of a person applies to the keys of the person (protocol 17.8). When the decision is true and the action needs an approval, the PDP reads the newest approval. It must have the same server, subject, action, resource and effect:
 
 | State of the approval | Question without `usage` | Question with `usage` (a use) |
 |---|---|---|
@@ -408,19 +460,27 @@ A question with an effect, a spent approval and no `usage` gets `approval_requir
 
 The answers `approval_required` and `approval_pending` have `context.evaluation_id` when the question had an effect. The server sends this value back when it submits the request. It never reads it.
 
+The `evaluation_id` has at most 1024 bytes (protocol 17.1). A question whose id would be longer gets `false` with no reason. An example is a resource with very long ids. The PDP gives no approval for it.
+
 The `evaluation_id` holds no state. It has the id of a content key, the time of issue, an HMAC-SHA-256 and the sealed facts of the question. The HMAC covers the server, the subject, the action, the resource, the effect and the time. The facts are the subject, the action and the resource, sealed with the content key.
 
 A submission has no subject, no action and no resource. The portal reads them from the sealed part. The server sees no fact in clear text. Each instance that has the content keys can check the value.
 
 The `evaluation_id` is valid for `inbox.approvals.evaluation_ttl`.
 
-A use is a question with `context.usage` and the effect. The PDP then takes three steps:
+A use is a question with `context.usage` and the effect. The PDP takes three steps (protocol 17.2):
 
-1. It consumes the approval with one compare-and-set in the inbox database.
+1. It looks at the approval and consumes nothing. When the approval cannot be used, the answer is the reason of the table.
 2. It counts the unit of each budget of the subject.
-3. If a budget refuses or the count fails, it gives the approval back.
+3. It consumes the approval with one compare-and-set in the inbox database. The answer is `true` only after this step.
 
-After a refusal by a budget, the answer is `budget_exceeded`, and the approval stays usable until `consume_before`. After a failed count, the status is `503` and the approval stays usable too. The counters and the items are in two stores that have no common transaction. A crash between step 1 and step 2 loses one approval. The agent asks again. A crash never gives two executions.
+The counters and the items are in two stores that have no common transaction, so the order is the guard.
+
+- A budget that refuses, or a count that fails, leaves the approval as it was. The answer is `budget_exceeded` or status `503`, and the approval stays usable until `consume_before`.
+- A crash or a failure between step 2 and step 3 leaves the approval usable and one unit counted (the over-count of protocol 10.6). The agent asks again.
+- When the compare-and-set loses a race, or the store fails, the PDP gives the units back. The answer is the reason of the table, or status `503`.
+- The PDP never loses an approval because of a failure of its own. It never leaves an approval consumed when the answer is not `true`, and it never consumes an approval two times.
+- With several callers that use one approval at the same time, one gets `true`. Another caller can get `budget_exceeded` when the budget is just spent.
 
 The decision of the owner sets `consume_before` to the time of the answer plus the larger of `inbox.approvals.consume_within` and `lease_s` of the request. After this time the approval is `lapsed`. After an explicit refusal, the same effect gets `approval_denied` during `inbox.approvals.deny_cooldown`. A void or a used approval starts no deny time. An approval for another effect never depends on it.
 
@@ -443,7 +503,9 @@ With the block `inbox.approvals`, the metadata of the PDP has these twelve membe
 | `procurauth_approval_ref_ttl_seconds` | `inbox.approvals.intent_ttl` |
 | `procurauth_approval_max_command_bytes` | `inbox.approvals.max_command_bytes` |
 
-The metric `portal_pdp_approval_total{reason}` counts the outcomes of the gate: `approval_required`, `approval_pending`, `approval_denied`, `approval_expired`, `consumed`, `released` and `not_enabled`. The metric `portal_pdp_decisions_total` has the four reasons too. The journal of the items has `approval_consumed` and `approval_released`. No line holds a command.
+The metric `portal_pdp_approval_total{reason}` counts the outcomes of the gate: `approval_required`, `approval_pending`, `approval_denied`, `approval_expired`, `consumed`, `refunded` and `not_enabled`. The value `refunded` counts the uses that gave their units back because the consumption failed.
+
+The metric `portal_budget_refunds_total{result}` counts the refunds that worked and the refunds that failed. The metric `portal_pdp_decisions_total` has the four reasons too. The journal of the items has `approval_consumed`. No line holds a command.
 
 #### The approval API for a service
 
@@ -463,7 +525,11 @@ The portal checks a submission in this order:
 2. The size of the command.
 3. The `evaluation_id`: it must be valid, for the server of the token and for the effect of the body. The subject must be a key that the PDP can still use.
 4. The effect: the portal computes it again from the server of the token, the action, the resource and `op` (protocol 17.3). An `op` with a float, a big integer or a duplicate member name is `invalid_op`. An `op` that is not an object is `invalid_op` too.
-5. The `view`: each pointer must name a value of `op` (protocol 17.9).
+5. The `view`: each member is optional (protocol 17.9). A view with no member, `{}`, is valid.
+   - A pointer that is present must name a value of `op`. A field names a string, an integer, a boolean or `null`, and the body names a string.
+   - A view with no `title` shows the name of the action.
+   - A view with no `body` has no command text: the page and the phone say that the service gave no command.
+   - A title has 128 characters at most, a label 48 and a pointer 256 bytes. A view has 12 fields at most.
 6. The range of the wait. The portal never changes a value to fit.
 7. An open request for the same server, subject, action, resource and effect. It is the answer: the same `request_id` and `code`, status `200`. It renews no lease and replaces no body.
 8. The request to replace, the `approval_ref`, and the limits of the creation (below).
@@ -532,7 +598,7 @@ portal reads the actions of each service at `/.well-known/procurauth/actions`. T
 - A grant of any action can have `confirm`. The document has no member for it, and portal ignores a member `approval`. See "Approval of an action".
 - The top-level list `resource_types` declares the tree of types (protocol 5.2). Each item has `name`, `parent` and `description`. A name starts with `a-z`, then has `a-z`, `0-9` and `_`, 1 to 32 characters. It is not `service`. The parent is `service` or another declared type. The tree has no cycle and at most 4 levels below `service`. The list has at most 16 types.
 - When the document has this list, each type in the list of an action is `service` or a declared type. A type occurs one time in the list of an action.
-- The document can have an optional list `resources`. This list names the nodes of the tree that the service knows, for example its hosts. Each item has `path` (the text form of a grant, for example `host:prod`), an optional `label`, and an optional list `actions`. A path follows the declared types. A path occurs one time. Each action of an item lists the type of the node. Without `actions`, the item takes each action that lists its type. The settings pages show each named resource apart, with the actions that apply on it only. The list has 256 items at most. The list is not part of AuthZEN: a service that does not give it works as before, and the superadmin types the ids.
+- The document can have an optional list `resources`. This list names the nodes of the tree that the service knows, for example its hosts. Each item has `path` (the text form of a grant, for example `host:prod`), an optional `label`, and an optional list `actions`. A path follows the declared types. A path occurs one time. Each action of an item lists the type of the node. Without `actions`, the item takes each action that lists its type. The settings pages show each named resource apart, with the actions that apply on it only. The list has 4096 items at most (`access.max_resources`, at least 256). The list is not part of AuthZEN: a service that does not give it works as before, and the superadmin types the ids.
 - A document that does not obey one of these rules is bad as a whole. portal keeps the last good document, and the Services page shows the problem.
 
 ```json
@@ -553,7 +619,7 @@ portal reads the actions of each service at `/.well-known/procurauth/actions`. T
 }
 ```
 
-- A `404` means that the service does not publish actions. The service then has only `access`. `access` is the full permission. portal lets the user in. The service does no other check.
+- A `404` is a failed read like any other (protocol 5.3). The portal keeps the last good document. A service that never had a good document has only `access`. `access` is the full permission. portal lets the user in. The service does no other check.
 - Any other failure keeps the last good document. The Services settings page shows the problem. The PDP also uses this document: see "AuthZEN PDP".
 - The page of a user has one editor of grants, the same editor as the forms of the keys (see "Editor of grants"). The editor shows the tree of the resources of a service and the actions of the chosen node. A person who gives a grant on a resource does not type its id: the editor lists the resources. portal takes them from the member `resources` of the action document and from the options of the service (portal 3.1a, protocol 5.6).
 - One **Save access** sends every grant of the account, with its limit values. The form replaces the grants of the account. The grants on the service `portal` (the rights on the keys) have their own form. A grant that the document of the service does not name now stays in the editor. The editor shows it, so a person can remove it. A grant of the configuration shows a lock and cannot change on the page.
@@ -655,13 +721,16 @@ The block `keys` has two switches. `keys.mcp` has the default `true`. `keys.api`
 ### The page and the edge
 
 - **Key page:** `GET /auth/keys` is one page. The list of the keys is on the left. It has a kind icon, the chips of the kinds, the filter Mine and All, and a box in each row for **Revoke (N)**. The form of a key is a pane on the right. With the pane closed, the toolbar has **New key**. With the pane open, the toolbar button is absent, and the head of the pane has the title, **Cancel** and the action (**Create** or **Save**). `GET /auth/keys/new` and `GET /auth/keys/edit?id=<id>` are direct links that open the page with the pane in that state. The kind selector is a small GET form: `?kind=` loads the pane again. An API key has the matrix of the Inbox and the budget of the alerts. An MCP key has the services only. The pane shows the text of a new key one time, with a **Copy** button and **Done**. A refused form returns to the pane of a new key, with the reason in a notice.
-- **Edge:** `GET /auth/verify-key` is the ForwardAuth address for the key routes of agents. It reads only memory. A good `mcp_` key gives status 200 and an identity token. A bad key gives status 401, the header `WWW-Authenticate: Bearer error="invalid_token"` and an empty body.
+- **Edge:** `GET /auth/verify-key` is the ForwardAuth address for the key routes of agents. It reads only memory. A good `mcp_` key gives status 204 and an identity token in the header `identity.header`. Traefik accepts each 2xx status.
+- **Age of the document:** the age of the action document of the service never changes the answer of the edge. `access` stays `true` (protocol 8.3, 11.1).
+- **Bad key:** a bad key gives status 401, the header `WWW-Authenticate: Bearer error="invalid_token"` and an empty body.
 - **Senders and agents:** the routes of the Inbox verify the `api_` keys, and the MCP endpoint verifies the `mcp_` keys. See "Agents and senders" in the section "Inbox".
 
 ### Rights, limits and commands
 
 - **Rights of the portal for the keys:** the service `portal` has these actions for the keys: `keys.own.read`, `keys.own.create`, `keys.own.edit`, `keys.own.revoke`, `keys.own.use`, `keys.all.read`, `keys.all.revoke` and `users.read`. The ceiling `max_key_lifetime` limits the age of a key. The Inbox adds its own actions to the same service (see "Rights of the Inbox").
 - **Limits:** a grant can hold limit values. A ceiling is a value that the service applies. A budget is a count in a window (`second`, `minute`, `hour` or `day`) that the PDP counts. The PDP counts one use for the key and for its owner, and it takes the unit from both counters or from none. When a budget is empty, the PDP answers `false` with the reason `budget_exceeded` and `retry_after`.
+- **Numbers:** a limit is a whole number from 0 to 9,007,199,254,740,991. This is 2^53 - 1, the largest integer that is safe in JSON. An amount of a budget is from 1 to the same value. This applies to `min` and `max` of a ceiling, to a value of a ceiling and to an amount. The portal refuses a larger number in a document, in a form and in a file. A grant has 8 limit values at most, and their text has 1024 bytes at most (protocol 6.1).
 - **Counters:** the table `budget_counters` holds the counters. PostgreSQL uses a second pool of connections (`pdp.counter_connections`). `keys.max_counter_rows` limits the number of rows.
 - **Revoke:** the page revokes keys one at a time or in a group. The command `portal revoke-keys --config FILE (--user LOGIN | --all)` revokes keys without the web page. With SQLite, it refuses to run when an instance runs.
 - **Accounts of the file:** a block `user "<login>"` defines an account of the file, with optional blocks `key "<name>"`. These blocks are MCP keys of the file. An API key of the file is a block `api_key` of the block `inbox`. A login comes from the file or from the database, never from both. The list of keys in the tab Access lists the MCP keys of the file. It does not list the `api_key` blocks.
@@ -1683,7 +1752,7 @@ The HTTP server.
 | `max_connections` | number, 1 to 100000 | `1024` | The largest number of open TCP connections of the pages and the API. A connection that upgrades to a phone session gives its permit back and takes a permit of the session budget: `server.max_connections` plus two times `inbox.devices.max_devices`. This budget exists only with the block `inbox`. |
 | `max_headers` | number, 8 to 256 | `64` | The largest number of headers in a request. |
 | `max_header_bytes` | size, 8KiB to 1MiB | `"32KiB"` | The largest size of the headers of a request. |
-| `header_read_timeout` | duration, 1s to 1m | `"10s"` | The time that a client has to send the request headers. |
+| `header_read_timeout` | duration, 1s to 1m | `"10s"` | The time that a client has to send the request headers. On the PDP listener it is also the longest time that a connection stays open with no request: the metadata publishes it as `procurauth_idle_max_seconds`, and a service closes an idle connection before this time. |
 | `body_read_timeout` | duration, 1s to 1m | `"10s"` | The time that a client has to send the request body. A sign-in also gets its Argon2 check in this time, or the server answers `503`. |
 | `max_login_body_reads` | number, 1 to 100000 | `64` | The largest number of sign-in requests that the server reads, or that wait for their Argon2 check, at the same time. The server answers `503` at once to a sign-in request above this number. Slow sign-in bodies and a queue of sign-ins thus cannot hold all the connections that ForwardAuth needs. It must be less than `server.max_connections`. |
 | `trusted_proxies` | list of at most 64 quoted strings: IP networks such as "10.42.0.0/16" or "127.0.0.1/32"; the address is the first address of the network | required | The networks of the proxies (Traefik) that set `X-Forwarded-For`. The server reads this header only from a TCP peer in these networks. It then takes the first address from the right that is not in these networks. From any other peer, the client address is the address of the peer. `[]` trusts no proxy. The client address keys the session binding, the login limiter and, for the phones, the limiter of the enrollment attempts (the routes of the phones use this list too). |
@@ -1718,7 +1787,7 @@ The grants of the users, and the actions that the services publish.
 | `grants_mode` | `static`, `dynamic`, `hybrid` | `"dynamic"` | Where the grants come from. `static`: only the `user` blocks; the settings pages show the grants and do not change them. `dynamic`: only the settings pages; a `user` block stops the server. `hybrid`: both; the grants of a `user` block are read-only in the settings pages. |
 | `actions_timeout` | duration, 100ms to 30s | `"2s"` | The time that the server waits for the `/.well-known/procurauth/actions` document of one service. |
 | `actions_refresh` | duration, 10s to 1d | `"5m"` | The time between two reads of the `/.well-known/procurauth/actions` documents. It is also the shortest time between two early reads of the document of one service, after an `invalid_resource` of the PDP. |
-| `actions_max_age` | duration, 1m to 7d | `"1h"` | The longest time that the server keeps the last good document of a service after its last good read. After this time, the server acts as if the service had no good document. The edge also refuses each key for this service. The value must be more than `access.actions_refresh`. |
+| `actions_max_age` | duration, 1m to 7d | `"1h"` | The longest time that the server keeps the last good document of a service after its last good read. After this time, the server acts as if the service had no good document (protocol 5.3a, 11.1): the PDP answers `false` with no reason for each question of the service, except `access` on the whole service. The edge never refuses a person or a key because of the age of the document: `access` stays `true` (protocol 8.3), and the service then gets `false` for each other question. The value must be more than `access.actions_refresh`. |
 | `max_actions` | number, 64 to 4096 | `1024` | The largest number of actions in the document of one service. A larger document is bad. Protocol 5.3c asks a reader to accept 64 at least. |
 | `max_resources` | number, 256 to 65536 | `4096` | The largest number of resources in the document of one service. A larger document is bad. Protocol 5.3c asks a reader to accept 256 at least. |
 | `max_document_bytes` | number, 65536 to 4194304 | `262144` | The largest size, in bytes, of the document of one service. The server stops the read at this size, and the document is bad. Protocol 5.3c asks a reader to accept 64 KiB at least. The server keeps the last good document of each service in memory. |
@@ -1743,8 +1812,8 @@ This block is optional. If it is present, the server is an AuthZEN PDP on a seco
 |---|---|---|---|
 | `listen_address` | text: an IP address and a port, such as 0.0.0.0:4182 | required | The address and the port of the PDP listener. Do not expose it through Traefik: only the services use it. |
 | `url` | text: an http or https URL without a path, a query or a fragment | required | The URL at which the services reach the PDP. `/.well-known/authzen-configuration` gives the endpoints under this URL. |
-| `max_body_bytes` | size, 1KiB to 1MiB | `"64KiB"` | The largest request body that the PDP reads. |
-| `max_evaluations` | number, 1 to 1024 | `64` | The largest number of evaluations in one request to `/access/v1/evaluations`. |
+| `max_body_bytes` | size, 1KiB to 1MiB | `"64KiB"` | The largest request body that the PDP reads. The metadata publishes it as `procurauth_evaluations_max_bytes`. With the approval API, the body of a submission holds the command and some more members, so this value is at least `inbox.approvals.max_command_bytes` and 2 KiB more. |
+| `max_evaluations` | number, 1 to 1024 | `128` | The largest number of evaluations in one request to `/access/v1/evaluations`. The metadata publishes it as `procurauth_evaluations_max_items`, and a service splits its questions to fit. ClickHouse Dash sends up to 100 questions in one request, so keep the value at 100 or more. |
 | `plain_http` | `true` or `false` | `false` | Set it to `true` to accept an `http` value of `pdp.url`. Then the operator states that other means secure the link to the PDP. With `false`, an `http` URL stops the server. With `true`, an `https` URL also stops the server. With `true`, the start log has a warning. |
 | `counter_connections` | number, 1 to 64 | `2` | The number of database connections that count the uses of the budgets. Each connection counts approximately 1,000 uses each second. A use that waits more than 500 ms gets the HTTP status 503. |
 
@@ -2043,7 +2112,7 @@ This block is optional and is inside the block `inbox`. Its presence starts the 
 | `consume_within` | duration, 5s to 1h | required | The time after the decision in which the approval can be used. It never limits the wait for the decision. The window that applies is the larger of this value and `lease_s` of the request. It must not be above `inbox.items.max_lifetime`. Recommended: `"5m"`. |
 | `evaluation_ttl` | duration, 10s to 1h | `"5m"` | The time in which an `evaluation_id` of the PDP is valid. A service submits its request before this time ends. |
 | `deny_cooldown` | duration, 0s to 1d | `"5m"` | The time after an explicit refusal in which the PDP answers `approval_denied` for the same key and the same effect. Another effect, and each other end of a request, start no such time. `0s`: the PDP never answers `approval_denied`. |
-| `max_command_bytes` | size, 1KiB to 32KiB | `"16KiB"` | The largest command (`op` and `view`, as compact JSON) that the approval API accepts. A larger command gets `413 command_too_large`, and the service refuses the action. It must not be above `pdp.max_body_bytes`. |
+| `max_command_bytes` | size, 1KiB to 32KiB | `"16KiB"` | The largest command (`op` and `view`, as compact JSON) that the approval API accepts. A larger command gets `413 command_too_large`, and the service refuses the action. The PDP publishes the value as `procurauth_approval_max_command_bytes`. The body of a submission holds the command and some more members (`evaluation_id`, `effect`, the wait), so this value plus 2048 bytes must not be above `pdp.max_body_bytes`. |
 | `max_explanation_chars` | number, 0 to 8000 | `2000` | The longest explanation of an agent, in characters. A longer text gets `422 explanation_too_long`, and the portal never cuts it. `0`: no explanation is accepted. |
 | `require_explanation` | `true` or `false` | `false` | `true`: a request without an explanation gets `422 explanation_required`. It must not be `true` with `max_explanation_chars = 0`. |
 | `max_comment_chars` | number, 1 to 8000 | `2000` | The longest text that a person joins to a refusal, in characters. |

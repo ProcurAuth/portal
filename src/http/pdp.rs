@@ -59,12 +59,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
-mod approval;
+pub(super) mod approval;
 #[cfg(test)]
 mod approval_tests;
 
+use self::approval::Ask;
 pub(super) use self::approval::{configured as approvals_configured, open_evaluation_id};
-use self::approval::{Ask, Held};
 use super::*;
 use crate::counting::{Outcome as CountOutcome, Unavailable};
 use crate::decision::{self, Counter, CounterOwner, Matching, Owner, Question, Verdict};
@@ -379,6 +379,12 @@ async fn handle(
     response
 }
 
+/// The longest time that the PDP takes to answer a question with `context.usage`, in whole seconds: it gives a decision
+/// or HTTP 503 within this time (protocol 6.9). The look at the approval, the count of the units and the consumption
+/// of the approval each end within 2 s at most, and the count within 1 s (the wait for a counter connection and the
+/// statement have 500 ms each, portal 7.7). The sum is 5 s.
+pub(super) const USAGE_MAX_SECONDS: u64 = 5;
+
 /// The metadata of AuthZEN: the endpoints under `pdp.url`.
 fn metadata(state: &AppState) -> HttpResponse {
     let base = state
@@ -387,11 +393,22 @@ fn metadata(state: &AppState) -> HttpResponse {
         .as_ref()
         .map(|p| p.url.as_str())
         .unwrap_or("");
+    let (max_bytes, max_items) = state
+        .config
+        .pdp
+        .as_ref()
+        .map_or((0, 0), |p| (p.max_body_bytes, p.max_evaluations));
     let mut document = json!({
         "policy_decision_point": base,
         "access_evaluation_endpoint": format!("{base}{EVALUATION_PATH}"),
         "access_evaluations_endpoint": format!("{base}{EVALUATIONS_PATH}"),
         "search_action_endpoint": format!("{base}{SEARCH_ACTION_PATH}"),
+        // The values of protocol 6.9, 10.7 and 10.7a. They are the real limits of the listener: a client that reads
+        // them never meets a refusal for a size, an idle connection or a slow count.
+        "procurauth_idle_max_seconds": state.config.server.header_read_timeout.as_secs(),
+        "procurauth_evaluations_max_bytes": max_bytes,
+        "procurauth_evaluations_max_items": max_items,
+        "procurauth_usage_max_seconds": USAGE_MAX_SECONDS,
     });
     if let Some(Value::Object(members)) = approval::metadata(&state.config) {
         if let Value::Object(document) = &mut document {
@@ -973,6 +990,12 @@ fn decide_key(state: &AppState, id: &str, q: &Question<'_>, ask: &Ask<'_>) -> Ou
         Ok(principal) => principal,
         // The copy of the directory is too old: the PDP answers `false` for each key (protocol 3.9).
         Err(Cause::DirectoryTooOld) => return Outcome::deny(TOO_OLD, None),
+        // A condition of the owner that can change later (the right to use keys, the maximum life of a key) gives
+        // `false` with no reason. `unknown_subject` is for an orphan only: a service reads it as a deleted key
+        // (protocol 3.5, 11.1).
+        Err(Cause::OwnerCannotUseKeys | Cause::KeyTooOld) => {
+            return Outcome::deny("the rules of the owner do not let the key work", None)
+        }
         Err(_) => return Outcome::deny("the key is not valid", Some(UNKNOWN_SUBJECT)),
     };
     // A key holds only the actions of the service `portal` that its kind lists (portal 6.5): the PDP
@@ -1083,55 +1106,74 @@ pub(super) fn decide_person_for(
     use_verdict(&decide_person(state, login, &q, &Ask::internal(usage)))
 }
 
-/// The answer from a verdict: the approval gate, then for a use the count of the units.
+/// The answer from a verdict: the approval gate, then for a use the count of the units and the consumption of the
+/// approval.
 ///
-/// An action that needs an approval and is a use takes three steps (portal P7): consume the approval, count the
-/// units, and give the approval back when the count refuses or fails. The two stores have no common transaction, so
-/// a crash between the steps loses one approval and never gives two executions.
+/// An action that needs an approval and is a use takes three steps (portal P7). The gate looks at the approval, and it
+/// consumes nothing. The PDP counts the units. Then it consumes the approval with one compare-and-set. The two stores
+/// have no common transaction, so the order is the guard (protocol 17.2):
+///
+/// - a refusal or a failure of the count leaves the approval as it was;
+/// - a crash or a failure between the count and the consumption leaves the approval usable and one unit counted (the
+///   over-count of protocol 10.6): the approval is never lost;
+/// - when the compare-and-set loses a race, or fails, the PDP gives the units back;
+/// - the answer is `true` only after the consumption, so an approval is never consumed without the answer `true`, and
+///   never consumed two times.
 fn finish(state: &AppState, q: &Question<'_>, verdict: Verdict, ask: &Ask<'_>) -> Outcome {
     if !verdict.allowed {
         return Outcome::deny("no grant", None);
     }
     let mut outcome = Outcome::allow("grant");
     outcome.ceilings = verdict.ceilings;
-    // `confirm` has no effect on `access` (protocol 17.8), and a question about a subtree never asks for an approval.
-    let mut held: Option<Held> = None;
-    if verdict.approval && q.action != ACCESS {
+    // `confirm` has no effect on `access` or on `mcp.session` (protocol 17.8), and a question about a subtree never
+    // asks for an approval. The decision for a person never has the flag: a person does not approve their own use
+    // (protocol 17.8), so the approval API never gets a person.
+    let mut usable: Option<approval::Usable> = None;
+    if verdict.approval
+        && q.action != ACCESS
+        && q.action != crate::grants::MCP_SESSION
+        && !matches!(SubjectId::parse(ask.subject), SubjectId::User(_))
+    {
         match approval::gate(state, q, ask) {
             Err(refusal) => return refusal,
-            Ok(taken) => held = taken,
+            Ok(found) => usable = Some(found),
         }
     }
     if !ask.usage {
         return outcome;
     }
     debug_assert!(q.matching == Matching::Node);
-    if held.is_some() && approval::fault(state) == approval::Fault::CrashAfterConsume {
-        // The process "dies" here: nothing counts, nothing is given back.
-        let mut crashed = Outcome::deny("fault: crash after the consumption", None);
-        crashed.unavailable = Some(Unavailable::StoreError);
-        return crashed;
-    }
     let counted = if approval::fault(state) == approval::Fault::CountFails {
         CountOutcome::Unavailable(Unavailable::StoreError)
     } else {
         count(state, &verdict.counters)
     };
     match counted {
-        CountOutcome::Counted { units } => outcome.units = Some(units),
-        CountOutcome::Exceeded { retry_after } => {
-            if let Some(held) = &held {
-                approval::release(state, held);
+        CountOutcome::Counted { units } => {
+            if let Some(usable) = &usable {
+                if approval::fault(state) == approval::Fault::CrashAfterCount {
+                    // The process "dies" here: the units stay counted, the approval stays usable.
+                    let mut crashed = Outcome::deny("fault: crash after the count", None);
+                    crashed.unavailable = Some(Unavailable::StoreError);
+                    return crashed;
+                }
+                if let Err(refusal) = approval::consume(state, q, ask, usable) {
+                    // The approval was not consumed: the use does not run, so its units go back.
+                    if crate::util::blocking(|| {
+                        state.counting.refund(&state.store, &verdict.counters)
+                    }) {
+                        state.pdp_stats.approval(approval::REFUNDED);
+                    }
+                    return refusal;
+                }
             }
+            outcome.units = Some(units);
+        }
+        CountOutcome::Exceeded { retry_after } => {
             outcome = Outcome::deny("budget exceeded", Some(BUDGET_EXCEEDED));
             outcome.retry_after = Some(retry_after);
         }
-        CountOutcome::Unavailable(cause) => {
-            if let Some(held) = &held {
-                approval::release(state, held);
-            }
-            outcome.unavailable = Some(cause);
-        }
+        CountOutcome::Unavailable(cause) => outcome.unavailable = Some(cause),
     }
     outcome
 }

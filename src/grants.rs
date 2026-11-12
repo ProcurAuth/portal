@@ -34,6 +34,9 @@ use crate::limits::Limits;
 
 /// The action that lets a user open a service. Only the access gateway decides it.
 pub const ACCESS: &str = "access";
+/// The action that opens an MCP session and answers a method with no tool (binding 3.6a). It has no effect to
+/// approve, so `confirm` has no effect on it and the portal refuses a grant of it that has `confirm`.
+pub const MCP_SESSION: &str = "mcp.session";
 /// The longest action name.
 pub const MAX_ACTION_CHARS: usize = 64;
 /// The longest service id in a grant.
@@ -88,13 +91,17 @@ impl fmt::Display for Segment {
 }
 
 /// Why a grant cannot carry `confirm`, or `None` when it can. The service `portal` has no action
-/// that asks for an approval, and the action `access` opens a service: a person cannot approve it
-/// one time. The file refuses these grants at start, and the forms refuse them too.
+/// that asks for an approval. The action `access` opens a service: a person cannot approve it one
+/// time. The action `mcp.session` opens a session and answers the methods that have no tool: it has
+/// no effect to approve, and a method of this kind cannot wait. The file refuses these grants at
+/// start, and the forms refuse them too.
 pub fn confirm_refusal(grant: &Grant) -> Option<&'static str> {
     if grant.service == crate::portal_actions::SERVICE {
         Some("confirm is not for a grant of the service portal")
     } else if grant.action == ACCESS {
         Some("confirm is not for the action access")
+    } else if grant.action == MCP_SESSION {
+        Some("confirm is not for the action mcp.session")
     } else {
         None
     }
@@ -852,12 +859,14 @@ mod tests {
     }
 
     #[test]
-    fn confirm_is_refused_on_the_service_portal_and_on_access() {
+    fn confirm_is_refused_on_the_service_portal_on_access_and_on_mcp_session() {
         let on_portal = grant("alert.send on service:portal").with_confirm(true);
         let on_access = grant("access on service:db").with_confirm(true);
         let fine = grant("data.write on service:db").with_confirm(true);
+        let on_session = grant("mcp.session on service:db").with_confirm(true);
         assert!(confirm_refusal(&on_portal).is_some());
         assert!(confirm_refusal(&on_access).is_some());
+        assert!(confirm_refusal(&on_session).is_some());
         assert!(confirm_refusal(&fine).is_none());
     }
 }

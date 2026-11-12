@@ -958,7 +958,7 @@ async fn the_thread_follows_the_flags_the_limits_and_the_pace_of_the_agent() {
 // ---------------------------------------------------------------- the approval of the PDP
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_approval_is_consumed_once_released_and_lapses() {
+async fn an_approval_is_consumed_once_and_lapses() {
     for env in envs().await {
         let items = env.items();
         env.device("d1", "alice").await;
@@ -979,7 +979,7 @@ async fn an_approval_is_consumed_once_released_and_lapses() {
         let Consumed::Used(l) = items.consume("hash-1").await.unwrap() else {
             panic!()
         };
-        let used_at = l.approval.unwrap().consumed_at.unwrap();
+        assert!(l.approval.unwrap().consumed_at.is_some());
         // The window is the larger of `consume_within` (300 s) and `lease_s` (900 s).
         assert_eq!(l.item.answered_at.map(|_| ()), Some(()));
         assert!(
@@ -987,12 +987,10 @@ async fn an_approval_is_consumed_once_released_and_lapses() {
             "{}",
             env.name
         );
-        // The budget refused the action: the approval goes back and can be used again.
-        assert!(items.release(&id, used_at).await.unwrap());
-        assert!(!items.release(&id, used_at).await.unwrap(), "released once");
+        // A consumed approval stays consumed: the PDP never gives it back (portal P7).
         assert!(matches!(
             items.consume("hash-1").await.unwrap(),
-            Consumed::Used(_)
+            Consumed::Gone(_)
         ));
         // An approval that nobody used lapses after its window.
         let (n2, b2) = approval(2);

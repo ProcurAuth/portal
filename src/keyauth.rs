@@ -47,12 +47,10 @@ pub enum Cause {
     KeysDisabled,
     /// The last good read of the directory is older than `keys.directory_max_age`.
     DirectoryTooOld,
-    /// The last good document of the service is older than `access.actions_max_age`.
-    ActionsTooOld,
 }
 
 impl Cause {
-    pub const ALL: [Cause; 14] = [
+    pub const ALL: [Cause; 13] = [
         Cause::NoKey,
         Cause::BadFormat,
         Cause::WrongKind,
@@ -66,7 +64,6 @@ impl Cause {
         Cause::NoAccess,
         Cause::KeysDisabled,
         Cause::DirectoryTooOld,
-        Cause::ActionsTooOld,
     ];
 
     /// The name of portal 10.5d.
@@ -85,7 +82,6 @@ impl Cause {
             Cause::NoAccess => "no_access",
             Cause::KeysDisabled => "keys_disabled",
             Cause::DirectoryTooOld => "directory_too_old",
-            Cause::ActionsTooOld => "actions_too_old",
         }
     }
 }
@@ -459,7 +455,6 @@ mod tests {
                 "no_access",
                 "keys_disabled",
                 "directory_too_old",
-                "actions_too_old",
             ]
         );
     }

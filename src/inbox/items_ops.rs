@@ -1478,7 +1478,7 @@ pub async fn supersede<T: ItemTx>(
 
 #[derive(Debug)]
 pub enum Consumed {
-    /// The approval is used. The value `consumed_at` goes back to `release`.
+    /// The approval is used.
     Used(Box<Loaded>),
     /// The approval can be used. Only `status` gives this value: it consumes nothing.
     Usable(Box<Loaded>),
@@ -1563,31 +1563,6 @@ async fn gate<T: ItemTx>(
         }
     };
     done(tx, cx, value, fx).await
-}
-
-/// Gives an approval back after the count of the budget refused the action: the approval stays usable until its
-/// `consume_before`. The value `consumed_at` of the consumption must still be the one in the row.
-pub async fn release<T: ItemTx>(
-    tx: &mut T,
-    cx: &Cx,
-    id: &str,
-    consumed_at: i64,
-) -> Result<Done<bool>, DbError> {
-    let mut fx = Effects::default();
-    let mut released = false;
-    if let Some(mut l) = tx.load(id).await? {
-        if let Some(a) = l
-            .approval
-            .as_mut()
-            .filter(|a| a.consumed_at == Some(consumed_at))
-        {
-            a.consumed_at = None;
-            tx.save(&l).await?;
-            fx.event(&l.item, cx.now, "released", "server", None);
-            released = true;
-        }
-    }
-    done(tx, cx, released, fx).await
 }
 
 // ---------------------------------------------------------------- the sweeper

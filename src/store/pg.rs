@@ -1711,6 +1711,19 @@ impl Pg {
         })
         .unwrap()
     }
+
+    /// The sum of the units of all the counters.
+    #[cfg(test)]
+    pub fn counted_units(&self) -> i64 {
+        self.run(|c| {
+            Ok(c.query_one(
+                "SELECT COALESCE(SUM(units), 0)::bigint FROM budget_counters",
+                &[],
+            )?
+            .get(0))
+        })
+        .unwrap()
+    }
 }
 
 /// The tables that the import fills. All of them must be empty.

@@ -631,6 +631,17 @@ impl Registry {
 #[cfg(test)]
 const TEST_URL: &str = "http://test/.well-known/procurauth/actions";
 
+#[cfg(test)]
+impl Registry {
+    /// A good document whose last good read was `age` ago.
+    pub fn set_document_aged(&self, service: &str, document: Document, age: Duration) {
+        let read_at = Instant::now()
+            .checked_sub(age)
+            .expect("the clock of the test is long enough");
+        self.record(service, TEST_URL, Outcome::Document(document), read_at);
+    }
+}
+
 /// The result of one read.
 #[derive(Debug, PartialEq, Eq)]
 enum Outcome {
@@ -896,7 +907,15 @@ fn check_resources(
             ));
         }
         check_description(&item.label, &format!("the resource {:?}", item.path))?;
+        let mut named = std::collections::HashSet::new();
         for name in &item.actions {
+            // A name that occurs more than one time makes the document bad (protocol 5.2).
+            if !named.insert(name.as_str()) {
+                return Err(format!(
+                    "the resource {:?} names the action {name:?} two times",
+                    item.path
+                ));
+            }
             let listed = document
                 .actions
                 .iter()
@@ -1320,6 +1339,10 @@ mod tests {
             (
                 r#"[{"path":"host:a"},{"path":"host:a"}]"#,
                 "the same path twice",
+            ),
+            (
+                r#"[{"path":"host:a","actions":["query.run.read","query.run.read"]}]"#,
+                "the same action twice in one item",
             ),
             (r#"[{"path":""}]"#, "an empty path"),
         ] {

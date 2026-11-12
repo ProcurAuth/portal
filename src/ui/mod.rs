@@ -780,6 +780,7 @@ fn demo_services(catalog: &Catalog) -> Vec<ServiceActions> {
                 crate::actions::Document::default()
             };
             ServiceActions {
+                approvals: true,
                 external: false,
                 id: service.id.clone(),
                 name: service.name.clone(),
@@ -830,6 +831,7 @@ fn demo_features() -> ServiceActions {
     };
     let document = document(&features);
     ServiceActions {
+        approvals: true,
         external: false,
         id: crate::portal_actions::SERVICE.into(),
         name: "Server permissions".into(),

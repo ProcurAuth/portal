@@ -67,6 +67,9 @@ pub struct EditorService {
     pub source: Source,
     /// The service is an external service: a link with no action. The script draws its switch and nothing else.
     pub external: bool,
+    /// The PDP can ask for the approval of a person (the file has the block `inbox.approvals`). Without it, the
+    /// lock is not offered: a grant with `confirm` would be a plain refusal.
+    pub approvals: bool,
 }
 
 /// What the form needs to draw the editor. It has two parts: the services, which are the workloads
@@ -84,6 +87,9 @@ pub struct EditorData {
     pub owner: Option<Vec<Grant>>,
     /// Grants that the form shows and does not change: they come from the configuration file.
     pub locked: Vec<Grant>,
+    /// The form is the form of the grants of a person. The `confirm` of such a grant asks for the keys of the person,
+    /// and never for the person (protocol 17.8). The form of a key has `false`.
+    pub person: bool,
 }
 
 /// The icons that the script draws. The page inlines the symbols that its text uses.
@@ -223,6 +229,8 @@ fn json_block(data: &EditorData) -> String {
                 .collect::<Vec<_>>()
         }),
         "locked": data.locked.iter().map(grant_json).collect::<Vec<_>>(),
+        "approvals": data.services.iter().filter(|s| !s.external).all(|s| s.approvals),
+        "person": data.person,
     });
     value
         .to_string()
@@ -364,6 +372,7 @@ fn editor_service(service: &ServiceActions) -> EditorService {
                 approval: false,
             }],
             external: true,
+            approvals: service.approvals,
             ..bare_service(&service.id, &service.name)
         };
     }
@@ -417,7 +426,8 @@ fn editor_service(service: &ServiceActions) -> EditorService {
             } else {
                 Vec::new()
             },
-            approval: !portal,
+            // The lock needs the approvals of the file. The action `mcp.session` has no effect to approve (protocol 17.8).
+            approval: !portal && service.approvals && name != crate::grants::MCP_SESSION,
         });
     }
     for node in &service.document.resources {
@@ -447,6 +457,7 @@ fn editor_service(service: &ServiceActions) -> EditorService {
         fetch: service.fetch,
         source: service.source,
         external: false,
+        approvals: service.approvals,
     }
 }
 
@@ -483,6 +494,7 @@ fn bare_service(id: &str, name: &str) -> EditorService {
         fetch: false,
         source: Source::Absent,
         external: false,
+        approvals: true,
     }
 }
 
@@ -618,6 +630,7 @@ pub fn build(
         ticked,
         owner: owner.map(|held| held.iter().filter(|g| offered(g)).cloned().collect()),
         locked: Vec::new(),
+        person: false,
     };
     if keep_extras {
         // Each grant of the owner, and each grant of the key, can be ticked (portal 4.2).
@@ -681,11 +694,13 @@ mod tests {
                 fetch: false,
                 source: Source::Fresh(std::time::Duration::from_secs(120)),
                 external: false,
+                approvals: true,
             }],
             features: None,
             ticked: vec![grant("data.read on service:db/host:prod")],
             owner: None,
             locked: Vec::new(),
+            person: false,
         }
     }
 
@@ -694,6 +709,7 @@ mod tests {
         let text = r#"{"server":"portal","resource_types":[{"name":"inbox_group","parent":"service","description":"A group."}],"actions":[{"name":"alert.send","resource_types":["inbox_group"],"description":"Send an alert to the group."},{"name":"alert.send_user","resource_types":["service"],"description":"Send an alert to one account."}]}"#;
         let document = crate::actions::parse("portal", text.as_bytes()).unwrap();
         ServiceActions {
+            approvals: true,
             external: false,
             id: "portal".into(),
             name: "Server permissions".into(),
@@ -720,6 +736,7 @@ mod tests {
         render(&mut out, &data, PLACE);
         assert!(out.contains(r#""name":"alert.send_user""#), "{out}");
         let without = ServiceActions {
+            approvals: true,
             external: false,
             actions: vec![("alert.send".into(), "Send.".into())],
             ..portal_with_direct_alerts()
@@ -789,6 +806,7 @@ mod tests {
         };
         let document = crate::portal_actions::document(&features);
         ServiceActions {
+            approvals: true,
             external: false,
             id: crate::portal_actions::SERVICE.into(),
             name: "Server permissions".into(),
@@ -901,6 +919,7 @@ mod tests {
         let text = r#"{"server":"db","resource_types":[{"name":"host","parent":"service","description":"A host."}],"actions":[{"name":"data.read","resource_types":["service","host"],"description":"Read."}],"resources":[{"path":"host:prod","label":"Prod"}]}"#;
         let document = crate::actions::parse("db", text.as_bytes()).unwrap();
         ServiceActions {
+            approvals: true,
             external: false,
             id: "db".into(),
             name: "Data".into(),
@@ -920,6 +939,62 @@ mod tests {
         let block = &block[block.find('>').unwrap() + 1..];
         let block = block[..block.find("</script>").unwrap()].replace("\\u003c", "<");
         serde_json::from_str::<serde_json::Value>(&block).unwrap()
+    }
+
+    /// The lock needs the approvals of the file (a grant with `confirm` is a plain refusal without them), and the action
+    /// `mcp.session` has no lock (protocol 17.8). The data says whether the form is the form of a person.
+    #[test]
+    fn the_lock_is_offered_only_with_the_approvals_of_the_file_and_never_on_mcp_session() {
+        let text = r#"{"server":"db","resource_types":[],"actions":[{"name":"data.read","resource_types":["service"],"description":"Read."},{"name":"mcp.session","resource_types":["service"],"description":"Open a session."}]}"#;
+        let document = crate::actions::parse("db", text.as_bytes()).unwrap();
+        let mut service = datastore();
+        service.document = std::sync::Arc::new(document);
+        service.actions = vec![
+            ("data.read".into(), "Read.".into()),
+            ("mcp.session".into(), "Open a session.".into()),
+        ];
+        let approval_of = |data: &EditorData, name: &str| {
+            data.services[0]
+                .actions
+                .iter()
+                .find(|a| a.name == name)
+                .map(|a| a.approval)
+        };
+        let on = build(
+            std::slice::from_ref(&service),
+            None,
+            None,
+            |_| true,
+            Vec::new(),
+            true,
+        );
+        assert_eq!(approval_of(&on, "data.read"), Some(true));
+        assert_eq!(
+            approval_of(&on, "mcp.session"),
+            Some(false),
+            "no lock on mcp.session"
+        );
+        assert_eq!(approval_of(&on, "access"), Some(false));
+        assert_eq!(owner_json(&on)["approvals"], true);
+        service.approvals = false;
+        let off = build(
+            std::slice::from_ref(&service),
+            None,
+            None,
+            |_| true,
+            Vec::new(),
+            true,
+        );
+        assert_eq!(
+            approval_of(&off, "data.read"),
+            Some(false),
+            "no lock without inbox.approvals"
+        );
+        assert_eq!(owner_json(&off)["approvals"], false);
+        assert_eq!(owner_json(&off)["person"], false);
+        let mut person = off;
+        person.person = true;
+        assert_eq!(owner_json(&person)["person"], true);
     }
 
     #[test]
@@ -1010,6 +1085,7 @@ mod tests {
     #[test]
     fn an_external_service_has_the_switch_and_no_action_list_in_the_editor() {
         let link = ServiceActions {
+            approvals: true,
             external: true,
             id: "ext-wiki".into(),
             name: "Wiki".into(),
@@ -1118,6 +1194,7 @@ mod tests {
             {"name":"query.run.read","resource_types":["service"],"description":"Read."}]}"#;
         let document = crate::actions::parse("db", text.as_bytes()).unwrap();
         let service = |id: &str, document: crate::actions::Document| ServiceActions {
+            approvals: true,
             external: false,
             id: id.into(),
             name: "Data".into(),

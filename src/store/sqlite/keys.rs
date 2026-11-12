@@ -332,6 +332,32 @@ impl Sqlite {
         Ok(CountOutcome::Counted)
     }
 
+    /// Gives back the unit that `count_use` took from each counter, when the window of the counter is still the
+    /// current window. A counter that has no row, or whose window ended, stays as it is.
+    pub fn refund_use(&self, counters: &[Counter], clock: Option<f64>) -> Result<(), String> {
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(db)?;
+        let now = clock.unwrap_or_else(clock_seconds);
+        for counter in counters {
+            let length = counter.id.window.seconds() as f64;
+            let window_start = ((now / length).floor() * length) as i64;
+            if let Some((row_id, start, _)) =
+                counter_row(&tx, &counter.owner, &counter.id).map_err(db)?
+            {
+                if start == window_start {
+                    tx.execute(
+                        "UPDATE budget_counters SET units = units - 1 WHERE id = ?1 AND units > 0",
+                        params![row_id],
+                    )
+                    .map_err(db)?;
+                }
+            }
+        }
+        tx.commit().map_err(db)
+    }
+
     pub fn ensure_counter_rows(&self, rows: &[(CounterOwner, CounterId)]) -> Result<usize, String> {
         let mut conn = self.conn();
         let tx = super::begin_write(&mut conn).map_err(db)?;

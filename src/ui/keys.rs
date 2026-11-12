@@ -1196,6 +1196,7 @@ mod tests {
             ticked: Vec::new(),
             owner: None,
             locked: Vec::new(),
+            person: false,
         };
         let mut api = view(Pane::New, &BOTH);
         api.kind = Some(KeyKind::Api);
