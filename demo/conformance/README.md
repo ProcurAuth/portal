@@ -36,7 +36,7 @@ The values of the profile agree with `notes`: the service `notes`, the header `X
 
 ## Result
 
-With `notes-profile.json`, the runner gave 34 passed, 0 failed and 65 skipped cases of the 99 cases that existed then. This result is out of date: the series U has 117 cases now (U100 to U117 for section 17), and the demo service `notes` is a PEP that has not run them. Run the profile again before you rely on a count. The runner skips a case for these reasons:
+With `notes-profile.json`, the runner gave 34 passed, 0 failed and 65 skipped cases of the 99 cases that existed then. This result is out of date. The series U has 117 cases now (U100 to U117 for section 17). The demo service `notes` has not run them. Run the profile again before you use a count. The runner skips a case for these reasons:
 
 | Reason | Cases |
 | --- | --- |
