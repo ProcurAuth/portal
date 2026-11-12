@@ -385,6 +385,9 @@ async fn handle(
 /// statement have 500 ms each, portal 7.7). The sum is 5 s.
 pub(super) const USAGE_MAX_SECONDS: u64 = 5;
 
+/// The reason in the log for a key that the rules of its owner refuse (the right to use keys, the maximum life).
+const OWNER_RULES: &str = "the rules of the owner do not let the key work";
+
 /// The metadata of AuthZEN: the endpoints under `pdp.url`.
 fn metadata(state: &AppState) -> HttpResponse {
     let base = state
@@ -994,7 +997,7 @@ fn decide_key(state: &AppState, id: &str, q: &Question<'_>, ask: &Ask<'_>) -> Ou
         // `false` with no reason. `unknown_subject` is for an orphan only: a service reads it as a deleted key
         // (protocol 3.5, 11.1).
         Err(Cause::OwnerCannotUseKeys | Cause::KeyTooOld) => {
-            return Outcome::deny("the rules of the owner do not let the key work", None)
+            return Outcome::deny(OWNER_RULES, None)
         }
         Err(_) => return Outcome::deny("the key is not valid", Some(UNKNOWN_SUBJECT)),
     };
@@ -1056,7 +1059,9 @@ fn use_verdict(outcome: &Outcome) -> UseVerdict {
         UseVerdict::Allowed
     } else if let Some(seconds) = outcome.retry_after {
         UseVerdict::Limited(seconds)
-    } else if outcome.reason == Some(UNKNOWN_SUBJECT) {
+    } else if outcome.reason == Some(UNKNOWN_SUBJECT) || outcome.why == OWNER_RULES {
+        // The PDP answers a plain `false` for a key that the rules of its owner refuse (protocol 3.5), but the
+        // portal itself treats such a key as not valid, as before.
         UseVerdict::UnknownSubject
     } else if outcome.why == TOO_OLD {
         UseVerdict::NotReady

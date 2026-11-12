@@ -1284,20 +1284,6 @@ fn a08_effect_mismatch_invalid_view_command_too_large() {
                 "[{name}] {view}"
             );
         }
-        // Each member of a view is optional (protocol 17.9): a view with no member, or with a title only, is valid.
-        for view in [
-            json!({}),
-            json!({"title": "t"}),
-            json!({"title": "t", "fields": []}),
-        ] {
-            let mut body = ok.clone();
-            body["view"] = view.clone();
-            let (code, error) = status(&body);
-            assert!(
-                code == 201 || code == 200,
-                "[{name}] {view}: {code} {error:?}"
-            );
-        }
         // An `op` with a float, or a duplicate member name: `invalid_op`.
         let text = ok.to_string().replace(r#""sql":"#, r#""f":1.5,"sql":"#);
         assert_eq!(r.post_text(&text).status, 422, "[{name}]");
@@ -1331,6 +1317,20 @@ fn a08_effect_mismatch_invalid_view_command_too_large() {
         );
         // And the good command is taken.
         assert_eq!(r.post(&ok).status, 201, "[{name}]");
+        // Each member of a view is optional (protocol 17.9): a view with no member, or with a title only, is valid.
+        for view in [
+            json!({}),
+            json!({"title": "t"}),
+            json!({"title": "t", "fields": []}),
+        ] {
+            let mut body = ok.clone();
+            body["view"] = view.clone();
+            let (code, error) = status(&body);
+            assert!(
+                code == 201 || code == 200,
+                "[{name}] {view}: {code} {error:?}"
+            );
+        }
     });
 }
 

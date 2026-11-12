@@ -769,7 +769,11 @@ mod tests {
         assert!(check_view(&op, &parse_view(r#"{"body":"/n"}"#).unwrap()).is_err());
         assert!(check_view(&op, &parse_view(r#"{"title":"two\nlines"}"#).unwrap()).is_err());
         // A view is an object: a sequence or a text is not a view.
-        assert!(parse_view("[]").is_err() && parse_view("null").is_err() && parse_view("\"x\"").is_err());
+        assert!(
+            parse_view("[]").is_err()
+                && parse_view("null").is_err()
+                && parse_view("\"x\"").is_err()
+        );
         // The empty op `{}` has a valid view `{}`.
         let none = json!({});
         check_view(&none, &parse_view("{}").unwrap()).unwrap();

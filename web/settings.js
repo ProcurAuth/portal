@@ -1287,7 +1287,7 @@
         var span = node("span", "statusIcon statusIcon--warn");
         span.title =
           data.approvals === false
-            ? "This grant asks for an approval, but the portal has no approvals (the block inbox.approvals is not in the file). The PDP refuses the action."
+            ? "This grant asks for an approval, but the file has no approvals (the block inbox.approvals is missing). The PDP refuses the action."
             : name === "mcp.session"
               ? "The action mcp.session cannot ask for an approval. The PDP ignores this setting."
               : "This action cannot ask for an approval.";
@@ -1406,7 +1406,7 @@
             } else {
               var lost = isTicked && !owns(svc.id, a.name, item.path);
               var asks = isTicked && a.approval;
-              var dead = isTicked && !a.approval && svc.id !== "portal" && held && held.confirm;
+              var dead = isTicked && !a.approval && held && held.confirm;
               if (lost || asks || dead) {
                 // The warning and the lock of the approval share the last cell of the row.
                 var tools = node("span", "ge__tools");

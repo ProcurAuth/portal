@@ -3752,7 +3752,7 @@ fn the_metadata_publishes_the_maxima_of_the_pdp_and_the_idle_time_is_real() {
         Arc::new(Store::open_in_memory()),
         None,
         Custom {
-            server: "header_read_timeout = \"1s\"",
+            server: r#"trusted_proxies = ["127.0.0.1/32"] header_read_timeout = "1s""#,
             ..Custom::default()
         },
         &format!(
@@ -5341,6 +5341,11 @@ fn an_account_of_the_file_signs_in_reads_its_keys_and_changes_none() {
         old.status, 204,
         "a too old document does not refuse the key: {:?}",
         old.headers
+    );
+    // A fresh read brings the document back: the PDP answers the questions of the service again (protocol 5.3a).
+    node.state.actions.set_document(
+        "db",
+        crate::actions::parse("db", KEY_TEST_DOCUMENT.as_bytes()).unwrap(),
     );
     let page = get_keys(&node, &carol, "");
     assert_eq!(page.status, 200, "{}", page.body);
