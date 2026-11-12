@@ -34,10 +34,26 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      # The tests of the series D (the PDP) and E (the edge) of the protocol read the cases of the procurauth repository.
+      # The step pins one commit, so a change of the protocol never breaks a run by itself.
+      # TODO(lot PS1, merge): the commit below is the tip of the branch lot/PS1 of procurauth. After the merge of this
+      # branch into main of procurauth, replace it with the commit of the merge. Never leave a commit that is not on main.
+      - name: Check out the conformance cases of the protocol
+        uses: actions/checkout@v4
+        with:
+          repository: ProcurAuth/procurauth
+          ref: 85efd9781af648dd771925eae3aa46dc4d30dc20
+          path: procurauth
+          # A public repository needs no token. A private one needs a secret that can read it.
+          token: ${{ secrets.PROCURAUTH_READ_TOKEN || github.token }}
       - name: Format and clippy
         run: tools/dev/lint.sh
       # tools/dev/test.sh starts a throwaway PostgreSQL in Docker and runs `cargo test --locked` with the arguments.
+      # PROCURAUTH_CONFORMANCE_REQUIRED=1: the run fails when it cannot read the cases (it never skips the series D and E).
       - name: Tests of the workspace (SQLite, and the tests that need PostgreSQL)
+        env:
+          PROCURAUTH_CONFORMANCE: ${{ github.workspace }}/procurauth/conformance
+          PROCURAUTH_CONFORMANCE_REQUIRED: "1"
         run: tools/dev/test.sh --workspace --no-fail-fast
       - name: End-to-end tests of the inbox on PostgreSQL
         env:

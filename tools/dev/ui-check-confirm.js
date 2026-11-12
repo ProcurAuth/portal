@@ -119,7 +119,7 @@ async function setApproval(browser) {
   let s = await lockState(page, "query.run.write");
   check("account page: a ticked action has a lock", s !== null, "no lock");
   check("account page: the lock starts open", s && s.pressed === "false" && s.icon === "#i-lock-open", JSON.stringify(s));
-  check("account page: the tooltip says Asks for an approval", s && s.title === "Asks for an approval", JSON.stringify(s));
+  check("account page: the tooltip says that the lock asks for the keys of the account", s && /^Asks for an approval when a key of this account uses the action\. The account itself never asks\./.test(s.title || "") && /approval_cannot_wait/.test(s.title || ""), JSON.stringify(s));
   check("account page: the lock is a flat icon button of 24 px", s && s.width === 24, JSON.stringify(s));
   // An action that is not ticked has no lock.
   await tick(page, "query.run.write", false);
