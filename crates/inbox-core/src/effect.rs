@@ -383,19 +383,60 @@ pub fn short(effect: &str) -> Option<&str> {
 
 // ---------------------------------------------------------------- the view
 
-/// A template over `op`. It is not part of the effect.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// A template over `op`. It is not part of the effect. Each member is optional (protocol 17.9): a call with no
+/// argument to show has the view `{}`. The screen then shows the name of the action as the title, no field and no
+/// command text (see [`View::title_or`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct View {
-    /// One line, 1 to 128 characters.
-    pub title: String,
-    /// `[label, pointer]` pairs, 0 to 12. Each pointer names a string, an integer, a boolean or `null`.
+    /// One line, 1 to 128 characters. Absent: the screen shows the name of the action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// `[label, pointer]` pairs, 0 to 12. Each pointer names a string, an integer, a boolean or `null`. Absent: none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<(String, String)>,
-    /// Pointer to the command text. It names a string of `op`.
-    pub body: String,
-    /// Label of the command, 1 to 48 characters. Absent: the phone shows a fixed label.
+    /// Pointer to the command text. It names a string of `op`. Absent: the request has no command text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// Label of the command, 1 to 48 characters. Absent: the phone shows a fixed label. It has no effect without `body`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_label: Option<String>,
+}
+
+/// A view is a JSON object. Without this check, a derived reader would take the sequence `[]` for a view with no
+/// member (a struct can be read from a sequence).
+impl<'de> Deserialize<'de> for View {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Members {
+            #[serde(default)]
+            title: Option<String>,
+            #[serde(default)]
+            fields: Vec<(String, String)>,
+            #[serde(default)]
+            body: Option<String>,
+            #[serde(default)]
+            body_label: Option<String>,
+        }
+        let value = Value::deserialize(deserializer)?;
+        if !value.is_object() {
+            return Err(serde::de::Error::custom("a view is a JSON object"));
+        }
+        let members = Members::deserialize(value).map_err(serde::de::Error::custom)?;
+        Ok(View {
+            title: members.title,
+            fields: members.fields,
+            body: members.body,
+            body_label: members.body_label,
+        })
+    }
+}
+
+impl View {
+    /// The title that the screen shows: the title of the view, else the name of the action.
+    pub fn title_or<'a>(&'a self, action: &'a str) -> &'a str {
+        self.title.as_deref().unwrap_or(action)
+    }
 }
 
 /// One field of a resolved view.
@@ -405,14 +446,25 @@ pub struct ResolvedField {
     pub value: String,
 }
 
-/// The view with the values of `op`. The text is what the screen shows.
+/// The view with the values of `op`. The text is what the screen shows. `title` and `body` are absent when the view
+/// has none: the screen then shows the name of the action as the title (see [`ResolvedView::title_or`]) and no
+/// command text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedView {
-    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub fields: Vec<ResolvedField>,
-    pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_label: Option<String>,
+}
+
+impl ResolvedView {
+    /// The title that the screen shows: the title of the view, else the name of the action.
+    pub fn title_or<'a>(&'a self, action: &'a str) -> &'a str {
+        self.title.as_deref().unwrap_or(action)
+    }
 }
 
 fn is_line(text: &str, max_chars: usize) -> bool {
@@ -486,7 +538,9 @@ pub fn check_view(op: &Value, view: &View) -> Result<(), EffectError> {
 impl View {
     /// Checks the sizes and the text rules of the view. It reads no pointer.
     pub fn check_shape(&self) -> Result<(), EffectError> {
-        if !is_line(&self.title, MAX_VIEW_TITLE_CHARS) {
+        if let Some(title) = &self.title
+            && !is_line(title, MAX_VIEW_TITLE_CHARS)
+        {
             return Err(EffectError::InvalidView("title is not one line of 1 to 128 characters"));
         }
         if self.fields.len() > MAX_VIEW_FIELDS {
@@ -509,7 +563,7 @@ impl View {
                 return Err(EffectError::InvalidView("a pointer is longer than 256 bytes"));
             }
         }
-        if self.body.len() > MAX_POINTER_BYTES {
+        if self.body.as_ref().is_some_and(|b| b.len() > MAX_POINTER_BYTES) {
             return Err(EffectError::InvalidView("a pointer is longer than 256 bytes"));
         }
         Ok(())
@@ -527,16 +581,20 @@ pub fn resolve_view(op: &Value, view: &View) -> Result<ResolvedView, EffectError
             .ok_or(EffectError::InvalidView("a field names an object or an array"))?;
         fields.push(ResolvedField { label: label.clone(), value });
     }
-    let body = match pointer(op, &view.body) {
-        Some(Value::String(s)) => s.clone(),
-        Some(_) => return Err(EffectError::InvalidView("the body does not name a string")),
-        None => return Err(EffectError::InvalidView("a pointer names no value of op")),
+    let body = match &view.body {
+        None => None,
+        Some(ptr) => match pointer(op, ptr) {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(_) => return Err(EffectError::InvalidView("the body does not name a string")),
+            None => return Err(EffectError::InvalidView("a pointer names no value of op")),
+        },
     };
     Ok(ResolvedView {
         title: view.title.clone(),
         fields,
         body,
-        body_label: view.body_label.clone(),
+        // The label of the command has no use without a command.
+        body_label: view.body.as_ref().and(view.body_label.clone()),
     })
 }
 
@@ -551,9 +609,9 @@ mod tests {
 
     fn view(fields: &[(&str, &str)], body: &str) -> View {
         View {
-            title: "Write".into(),
+            title: Some("Write".into()),
             fields: fields.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
-            body: body.into(),
+            body: Some(body.into()),
             body_label: Some("SQL".into()),
         }
     }
@@ -649,7 +707,7 @@ mod tests {
         assert_eq!(r.fields[1].value, "3");
         assert_eq!(r.fields[2].value, "true");
         assert_eq!(r.fields[3].value, "20");
-        assert_eq!(r.body, "INSERT 1");
+        assert_eq!(r.body.as_deref(), Some("INSERT 1"));
         check_view(&op, &ok).unwrap();
         // A pointer that names nothing, in a field or in the body.
         for bad in
@@ -671,13 +729,50 @@ mod tests {
         many.fields = (0..13).map(|i| (format!("L{i}"), "/host".to_string())).collect();
         assert!(check_view(&op, &many).is_err());
         let mut bad_title = view(&[], "/sql");
-        bad_title.title = "two\nlines".into();
+        bad_title.title = Some("two\nlines".into());
         assert!(check_view(&op, &bad_title).is_err());
         let mut long = view(&[], "/sql");
-        long.title = "x".repeat(129);
+        long.title = Some("x".repeat(129));
         assert!(check_view(&op, &long).is_err());
         assert!(parse_view(r#"{"title":"t","fields":[],"body":"/sql","x":1}"#).is_err());
         assert!(parse_view(r#"{"title":"t","fields":[["a","/host"]],"body":"/sql"}"#).is_ok());
+    }
+
+    /// Protocol 17.9: each member of a view is optional. The screen shows the name of the action as the title.
+    #[test]
+    fn every_member_of_a_view_is_optional() {
+        let op = op();
+        for text in [
+            "{}",
+            r#"{"title":"Only a title"}"#,
+            r#"{"fields":[["Host","/host"]]}"#,
+            r#"{"body":"/sql"}"#,
+            r#"{"body_label":"SQL"}"#,
+        ] {
+            let view = parse_view(text).unwrap_or_else(|e| panic!("{text}: {e:?}"));
+            check_view(&op, &view).unwrap_or_else(|e| panic!("{text}: {e:?}"));
+        }
+        let empty = resolve_view(&op, &parse_view("{}").unwrap()).unwrap();
+        assert!(empty.title.is_none() && empty.fields.is_empty() && empty.body.is_none());
+        assert_eq!(empty.title_or("data.write"), "data.write");
+        assert_eq!(serde_json::to_value(&empty).unwrap(), json!({"fields": []}));
+        // The label of the command has no use without a command.
+        let label = resolve_view(&op, &parse_view(r#"{"body_label":"SQL"}"#).unwrap()).unwrap();
+        assert!(label.body_label.is_none());
+        let titled = resolve_view(&op, &parse_view(r#"{"title":"Write"}"#).unwrap()).unwrap();
+        assert_eq!(titled.title_or("data.write"), "Write");
+        // The view of the frame keeps no member that the service did not send.
+        let view = parse_view(r#"{"title":"t"}"#).unwrap();
+        assert_eq!(serde_json::to_string(&view).unwrap(), r#"{"title":"t"}"#);
+        // A pointer that is present is still checked.
+        assert!(check_view(&op, &parse_view(r#"{"body":"/missing"}"#).unwrap()).is_err());
+        assert!(check_view(&op, &parse_view(r#"{"body":"/n"}"#).unwrap()).is_err());
+        assert!(check_view(&op, &parse_view(r#"{"title":"two\nlines"}"#).unwrap()).is_err());
+        // A view is an object: a sequence or a text is not a view.
+        assert!(parse_view("[]").is_err() && parse_view("null").is_err() && parse_view("\"x\"").is_err());
+        // The empty op `{}` has a valid view `{}`.
+        let none = json!({});
+        check_view(&none, &parse_view("{}").unwrap()).unwrap();
     }
 
     #[test]

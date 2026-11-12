@@ -27,7 +27,8 @@ object ShownEffect {
         }
         if (effect != approval.effect) return Verdict.Invalid(Validity.EFFECT_MISMATCH)
         return when (val v = hasher.view(opJson, approval.viewJson)) {
-            is ViewResult.Resolved -> Verdict.Valid(effect, v.view)
+            // The title of a view is optional: the screen shows the name of the action (ProcurAuth 17.9).
+            is ViewResult.Resolved -> Verdict.Valid(effect, if (v.view.title.isEmpty()) v.view.copy(title = approval.action) else v.view)
             is ViewResult.Failure -> Verdict.Invalid(if (v.code == "invalid_op") Validity.INVALID_OP else Validity.INVALID_VIEW)
         }
     }

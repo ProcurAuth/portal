@@ -412,7 +412,8 @@ class ApprovalActivity : BaseFragmentActivity() {
         val view = i.view
         val language = approval.language?.takeIf { it != Language.PLAIN }
         // The command: the colors of the hint, then the marks of the hidden characters over the colors.
-        val colored = CodeSpans.build(language?.wire, view.body, NativeRender)
+        // A view with no `body` has no command text (ProcurAuth 17.9): the box shows a fixed sentence.
+        val colored = CodeSpans.build(language?.wire, view.body.ifEmpty { getString(R.string.approval_no_command) }, NativeRender)
         val marked = VisibleText.render(colored, nonAscii = true)
         val fieldMarks = view.fields.map { VisibleText.render(it.value, nonAscii = true) }
         val report = VisibleText.combine(listOf(marked) + fieldMarks)
@@ -480,11 +481,13 @@ class ApprovalActivity : BaseFragmentActivity() {
         val head = lin(vertical = false, padH = 12, padV = 8).apply { gravity = Gravity.CENTER_VERTICAL }
         head.addView(caption(getString(R.string.approval_command)))
         head.addView(caption(getString(R.string.approval_from_service), color(R.color.primary)), lp(0, WRAP, 1f).margins(this, l = 8))
-        head.addView(copyButton(getString(R.string.approval_copy_description)) {
-            // The command goes to the clipboard as it came, byte for byte: never the marked text.
-            copyToClipboard(server?.let { PortalLabels.clipboardLabel(PortalIdentity.of(it)) } ?: "command", view.body)
-            snackbar(getString(R.string.approval_copied))
-        })
+        if (view.body.isNotEmpty()) {
+            head.addView(copyButton(getString(R.string.approval_copy_description)) {
+                // The command goes to the clipboard as it came, byte for byte: never the marked text.
+                copyToClipboard(server?.let { PortalLabels.clipboardLabel(PortalIdentity.of(it)) } ?: "command", view.body)
+                snackbar(getString(R.string.approval_copied))
+            })
+        }
         card.addView(head)
         card.addView(divider())
 
@@ -540,7 +543,7 @@ class ApprovalActivity : BaseFragmentActivity() {
             if (gate != before) item?.let { refreshDynamic(it) }
         }
         box.addView(inner, android.view.ViewGroup.LayoutParams(MATCH, WRAP))
-        box.contentDescription = getString(R.string.approval_command) + ". " + view.body
+        box.contentDescription = getString(R.string.approval_command) + ". " + view.body.ifEmpty { getString(R.string.approval_no_command) }
         card.addView(box, lp())
         card.addView(divider())
 
@@ -564,7 +567,7 @@ class ApprovalActivity : BaseFragmentActivity() {
 
         // The foot: the numbers of the command and the marks.
         val sqlLike = language == null || language == Language.SQL
-        val words = VisibleText.facts(view.body, marked, sqlLike).words().toMutableList()
+        val words = VisibleText.facts(view.body.ifEmpty { getString(R.string.approval_no_command) }, marked, sqlLike).words().toMutableList()
         if (language != null) words += "colors: ${language.wire} hint, text unchanged"
         val foot = lin(padH = 12, padV = 8)
         foot.addView(mono(words.joinToString("  "), SP_S, color(R.color.text_subtle), lines = 4))

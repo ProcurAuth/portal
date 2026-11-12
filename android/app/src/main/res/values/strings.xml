@@ -236,6 +236,7 @@
     <string name="approval_read_to_unlock">Read to the end to unlock Approve.</string>
     <string name="approval_read_done">You read the whole command.</string>
     <string name="approval_end_of_text">(end of text)</string>
+    <string name="approval_no_command">The service gave no command text. The effect covers the action, the resource and the arguments of the call.</string>
     <string name="approval_gone">This request is not on this phone any more.</string>
     <string name="approval_changed">The request changed while you were checking. Read it again.</string>
     <string name="approval_no_lock">This phone has no screen lock or fingerprint. Set one to approve.</string>

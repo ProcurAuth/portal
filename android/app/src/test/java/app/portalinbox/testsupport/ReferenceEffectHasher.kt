@@ -61,7 +61,7 @@ class ReferenceEffectHasher : EffectHasher {
             }
             ResolvedField(label, text)
         }
-        val body = pointer(op, spec.body) as? String ?: return ViewResult.Failure("invalid_view", "the body does not name a string")
+        val body = if (spec.body.isEmpty()) "" else pointer(op, spec.body) as? String ?: return ViewResult.Failure("invalid_view", "the body does not name a string")
         return ViewResult.Resolved(ResolvedView(spec.title, fields, body, spec.bodyLabel))
     }
 

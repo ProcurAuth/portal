@@ -54,7 +54,8 @@ pub(super) fn id_ok(id: &str) -> bool {
 }
 
 /// The text of an approval from its unsealed body: the view with the values of `op`, the language and the explanation.
-fn parse_text(plain: &[u8]) -> Option<Text> {
+/// A view with no title shows the name of the action. A view with no body has an empty command (protocol 17.9).
+fn parse_text(plain: &[u8], action: &str) -> Option<Text> {
     let value: serde_json::Value = serde_json::from_slice(plain).ok()?;
     let view: View = serde_json::from_value(value.get("view")?.clone()).ok()?;
     let resolved = resolve_view(value.get("op")?, &view).ok()?;
@@ -67,13 +68,13 @@ fn parse_text(plain: &[u8]) -> Option<Text> {
         .and_then(|f| serde_json::from_value::<ExplanationFormat>(f.clone()).ok())
         .unwrap_or(ExplanationFormat::Plain);
     Some(Text {
-        title: resolved.title,
+        title: resolved.title_or(action).to_string(),
         fields: resolved
             .fields
             .into_iter()
             .map(|f| (f.label, f.value))
             .collect(),
-        command: resolved.body,
+        command: resolved.body.unwrap_or_default(),
         command_label: resolved.body_label,
         language,
         explanation: value
@@ -87,7 +88,10 @@ fn parse_text(plain: &[u8]) -> Option<Text> {
 /// The body of a request for its owner.
 pub(super) async fn body_of(items: &Items<'_>, l: &Loaded) -> Result<Body, ItemError> {
     Ok(match items.serve_body(l).await? {
-        Served::Body(plain) => parse_text(&plain).map_or(Body::Mismatch, Body::Shown),
+        Served::Body(plain) => {
+            let action = l.approval.as_ref().map_or("", |a| a.action.as_str());
+            parse_text(&plain, action).map_or(Body::Mismatch, Body::Shown)
+        }
         Served::Purged => Body::Purged,
         Served::Mismatch => Body::Mismatch,
         Served::NotFound => Body::Hidden,
@@ -477,7 +481,8 @@ pub(super) async fn detail(
                     return unavailable();
                 }
                 mode = Mode::AdminBody;
-                parse_text(&plain).map_or(Body::Mismatch, Body::Shown)
+                let action = loaded.approval.as_ref().map_or("", |a| a.action.as_str());
+                parse_text(&plain, action).map_or(Body::Mismatch, Body::Shown)
             }
             Ok(Served::Purged) => Body::Purged,
             Ok(Served::Mismatch) => Body::Mismatch,

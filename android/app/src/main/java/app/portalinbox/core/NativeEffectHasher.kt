@@ -17,12 +17,13 @@ object NativeEffectHasher : EffectHasher {
         val fields = v.getJSONArray("fields")
         return ViewResult.Resolved(
             ResolvedView(
-                title = v.getString("title"),
+                // The members `title` and `body` are absent when the view has none (ProcurAuth 17.9).
+                title = v.optString("title", ""),
                 fields = (0 until fields.length()).map {
                     val f = fields.getJSONObject(it)
                     ResolvedField(f.getString("label"), f.getString("value"))
                 },
-                body = v.getString("body"),
+                body = v.optString("body", ""),
                 bodyLabel = if (v.has("body_label") && !v.isNull("body_label")) v.getString("body_label") else null,
             ),
         )

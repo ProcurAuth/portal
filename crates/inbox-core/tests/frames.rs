@@ -334,11 +334,11 @@ fn max_approval() -> RequestMsg {
     // `op` and `view` together are at most 32 KiB.
     let op = json!({"sql": "q".repeat(MAX_COMMAND_BYTES - 2000), "host": "prod"});
     let view = effect::View {
-        title: "t".repeat(128),
+        title: Some("t".repeat(128)),
         fields: (0..12)
             .map(|i| (format!("{i}").repeat(48).chars().take(48).collect(), "/host".to_string()))
             .collect(),
-        body: "/sql".into(),
+        body: Some("/sql".into()),
         body_label: Some("b".repeat(48)),
     };
     let effect = effect::effect_hash("s".repeat(64).as_str(), "a", "r", &op).unwrap();
@@ -492,14 +492,14 @@ fn golden_approval_verifies_and_a_changed_op_does_not() {
     assert_eq!(body.computed_effect().unwrap(), body.effect);
     assert_eq!(effect::short(&body.effect).unwrap().len(), 8);
     let resolved = effect::resolve_view(body.op.as_value(), &body.view).unwrap();
-    assert_eq!(resolved.body, "INSERT INTO analytics.events SELECT 1");
+    assert_eq!(resolved.body.as_deref(), Some("INSERT INTO analytics.events SELECT 1"));
     assert_eq!(resolved.fields[0].value, "prod");
     // The server keeps the frame valid but the phone sees the mismatch.
     let mut changed = body.clone();
     changed.service = "other".into();
     assert!(!changed.verify());
     let mut changed = body.clone();
-    changed.view.body = "/missing".into();
+    changed.view.body = Some("/missing".into());
     assert!(!changed.verify());
     // The explanation is outside the hash.
     let mut changed = body;
@@ -1569,4 +1569,26 @@ fn the_protocol_document_names_the_agent_members_and_its_examples_read_with_the_
     assert_eq!((open.len(), agents.map(|a| a.len())), (1, Some(1)));
     // The request example keeps its form and now has the agent in `from`.
     assert!(doc.contains(r#""from":{"label":"claude-laptop","key_name":"claude-laptop","owner":"alice","via":"mcp","interaction":"conversational","agent_id":"#));
+}
+
+/// Protocol 17.9: each member of a view is optional. A frame whose view is `{}` is valid for the phone, and the frame
+/// of an older server (all three members) still decodes.
+#[test]
+fn a_frame_with_an_empty_view_is_valid_and_the_old_form_still_reads() {
+    let frame = files("server").into_iter().find(|f| f.0 == "request-approval.json").unwrap();
+    let ServerMsg::Request(req) = ServerMsg::decode(&frame.1).unwrap() else { panic!() };
+    let body = req.approval.unwrap();
+    // The old form has title, fields and body: it reads as before.
+    assert!(body.view.title.is_some() && body.view.body.is_some() && !body.view.fields.is_empty());
+    let mut empty = body.clone();
+    empty.view = effect::View::default();
+    assert!(empty.verify(), "a view with no member names no pointer");
+    assert_eq!(serde_json::to_string(&empty.view).unwrap(), "{}");
+    let resolved = effect::resolve_view(empty.op.as_value(), &empty.view).unwrap();
+    assert_eq!(resolved.title_or(&empty.action), "data.write");
+    assert!(resolved.body.is_none() && resolved.fields.is_empty());
+    // The frame with the empty view survives the round trip of the wire form.
+    let text = serde_json::to_string(&empty).unwrap();
+    let back: ApprovalBody = serde_json::from_str(&text).unwrap();
+    assert_eq!(back.view, effect::View::default());
 }
