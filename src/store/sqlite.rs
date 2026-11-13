@@ -564,6 +564,18 @@ impl Sqlite {
             .unwrap()
     }
 
+    /// The sum of the units of all the counters.
+    #[cfg(test)]
+    pub fn counted_units(&self) -> i64 {
+        self.conn()
+            .query_row(
+                "SELECT COALESCE(SUM(units), 0) FROM budget_counters",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
     // Accounts --------------------------------------------------------------------------------
 
     #[cfg(test)]

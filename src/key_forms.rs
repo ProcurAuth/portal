@@ -235,8 +235,9 @@ pub fn limits_of(fields: &[LimitField]) -> Result<Limits, &'static str> {
         if field.value.is_empty() {
             continue;
         }
+        // The largest limit is 2^53 - 1: 16 digits (protocol 6.1). `Limits` checks the value.
         let amount: u64 =
-            if field.value.bytes().all(|b| b.is_ascii_digit()) && field.value.len() <= 12 {
+            if field.value.bytes().all(|b| b.is_ascii_digit()) && field.value.len() <= 16 {
                 field.value.parse().map_err(|_| BAD_LIMITS)?
             } else {
                 return Err(BAD_LIMITS);
@@ -1434,5 +1435,48 @@ mod tests {
         other[1] = ("grant1", "data.read on service:datastore/host:test");
         other.push(("confirm1", "1"));
         assert!(check_form(&other).unwrap().iter().any(|g| g.confirm));
+    }
+
+    /// `confirm` on `mcp.session` is refused by the form of an account and by the form of a key (protocol 17.8).
+    #[test]
+    fn a_form_refuses_confirm_on_mcp_session_access_and_the_service_portal() {
+        let document = document();
+        let lookup = move |service: &str| (service == "datastore").then(|| Arc::clone(&document));
+        let exists = |service: &str| service == "datastore";
+        for holder in [Holder::Account, Holder::Key(crate::keys::KeyKind::Mcp)] {
+            let check_form = |pairs: &[(&str, &str)]| {
+                let raw = read(fields(pairs), true).unwrap();
+                check_grants(
+                    &raw,
+                    &Context {
+                        now: NOW,
+                        owner_grants: None,
+                        max_lifetime: None,
+                        document: &lookup,
+                        service_exists: &exists,
+                        is_external: &|_| false,
+                        old_grants: None,
+                    },
+                    holder,
+                )
+            };
+            let asking = |action: &'static str| {
+                [
+                    ("grant0", "access on service:datastore"),
+                    ("grant1", action),
+                    ("confirm1", "1"),
+                ]
+            };
+            assert_eq!(
+                check_form(&asking("mcp.session on service:datastore")),
+                Err(BAD_GRANT),
+                "{holder:?}"
+            );
+            assert_eq!(
+                check_form(&asking("access on service:datastore")),
+                Err(BAD_GRANT),
+                "{holder:?}"
+            );
+        }
     }
 }

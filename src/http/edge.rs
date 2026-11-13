@@ -5,8 +5,11 @@
 //! It checks the key in memory, in the order of portal 8.3, and it answers:
 //!
 //! - 204 with the identity token of the key for the service, in the header that
-//!   `identity.header` names. Traefik copies the token to the request and removes the header
-//!   `Authorization` (portal 8.1).
+//!   `identity.header` names. Traefik copies the token to the request with `authResponseHeaders`.
+//!   The answer cannot clear the header `Authorization`: the middleware `drop-authorization` of
+//!   `examples/traefik-dynamic.yaml` does it after this check (protocol 9.1). Without it, the text of the key
+//!   reaches the service. The portal cannot see the setting of the proxy, so the README gives it as a duty of the
+//!   deployment.
 //! - 401 with `WWW-Authenticate: Bearer` and an empty body for each failure. When the request has
 //!   no text of a key, the header has no error. Otherwise it has `error="invalid_token"`. The
 //!   answer never shows the cause (protocol 9.8). The cause is in the log and in the measures.
@@ -158,9 +161,9 @@ fn check(state: &AppState, headers: &HeaderMap) -> Result<HttpResponse, Cause> {
             })
         }
     };
-    if state.actions.too_old(&service) {
-        return Err(Cause::ActionsTooOld);
-    }
+    // The age of the action document of the service does not change this answer (protocol 5.3a, 8.3). The edge asks
+    // only `access`, and `access` stays `true` with an old or a missing document. The PDP answers `false` with no
+    // reason for each other question of the service (protocol 11.1).
     let (Some(signer), Some(identity)) = (&state.signer, &state.config.identity) else {
         // The block `keys` needs the block `identity`: the start checks it.
         return Err(Cause::KeysDisabled);

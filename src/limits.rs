@@ -35,8 +35,10 @@ use crate::grants::ACCESS;
 pub const MAX_LIMITS: usize = 8;
 /// The most limits that one document declares.
 pub const MAX_DECLARATIONS: usize = 16;
-/// The largest number that a value accepts.
-pub const MAX_NUMBER: u64 = 1_000_000_000;
+/// The largest number that a limit accepts: `min`, `max`, the value of a ceiling and the amount of a budget item.
+/// It is 2^53 - 1, the largest integer that is safe in JSON (protocol 6.1): a browser, a script and a JSON library
+/// that reads numbers as doubles all keep it exact.
+pub const MAX_NUMBER: u64 = 9_007_199_254_740_991;
 const MAX_NAME_CHARS: usize = 32;
 const MAX_LABEL_CHARS: usize = 60;
 const MAX_DESCRIPTION_CHARS: usize = 300;
@@ -464,6 +466,11 @@ pub fn check_declarations(raw: Vec<RawDeclaration>) -> Result<Vec<Declaration>, 
                 if min > max {
                     return Err(format!("{what} needs min <= max, not {min} and {max}"));
                 }
+                if max > MAX_NUMBER {
+                    return Err(format!(
+                        "{what} has the max {max}: a limit is a whole number from 0 to {MAX_NUMBER}"
+                    ));
+                }
                 if !item.name.starts_with(CEILING_PREFIX) || item.name.len() == CEILING_PREFIX.len()
                 {
                     return Err(format!(
@@ -612,7 +619,7 @@ mod tests {
             r#"{"1a":1}"#,
             r#"{"a":-1}"#,
             r#"{"a":1.5}"#,
-            r#"{"a":1000000001}"#,
+            r#"{"a":9007199254740992}"#,
             r#"{"a":"x"}"#,
             r#"{"a":true}"#,
             r#"{"a":null}"#,
@@ -786,6 +793,53 @@ mod tests {
             .collect();
         let too_many = format!("[{}]", seventeen.join(","));
         assert!(check_declarations(raw(&too_many)).is_err());
+    }
+
+    /// The largest number of a limit is 2^53 - 1 (protocol 6.1). The text form keeps it exact in both directions, as a
+    /// browser and a JSON library that reads doubles need.
+    #[test]
+    fn the_largest_number_is_2_pow_53_minus_1_and_stays_exact_in_the_text_form() {
+        assert_eq!(MAX_NUMBER, 9_007_199_254_740_991);
+        assert_eq!(MAX_NUMBER, (1u64 << 53) - 1);
+        let text = r#"{"max_duration":9007199254740991,"requests":[{"amount":9007199254740991,"window":"day"}]}"#;
+        let limits = Limits::from_json(text).unwrap();
+        assert_eq!(
+            limits.get("max_duration"),
+            Some(&Value::Ceiling(MAX_NUMBER))
+        );
+        assert_eq!(
+            limits.to_json(),
+            text,
+            "the number is written as it was read"
+        );
+        assert_eq!(Limits::from_json(&limits.to_json()).unwrap(), limits);
+        // A number above the bound is refused, in a ceiling and in a budget.
+        for bad in [
+            r#"{"max_duration":9007199254740992}"#,
+            r#"{"requests":[{"amount":9007199254740992,"window":"day"}]}"#,
+            r#"{"max_duration":18446744073709551615}"#,
+        ] {
+            assert!(Limits::from_json(bad).is_err(), "{bad}");
+        }
+        // A ceiling that Dash declares above 1e9 works: a value of 5 GB (the old bound was 1e9).
+        let wide = check_declarations(raw(
+            r#"[{"name":"max_read_size","label":"Read size","description":"d","unit":"byte","kind":"ceiling","min":1,"max":1000000000000000}]"#,
+        ))
+        .unwrap();
+        let big = Limits::from_json(r#"{"max_read_size":5000000000}"#).unwrap();
+        assert!(big
+            .check(&wide, "query.run.read", &["max_read_size".to_string()])
+            .is_ok());
+        // The declaration itself is bounded too.
+        let too_wide = format!(
+            r#"[{{"name":"max_a","label":"x","description":"d","unit":"u","kind":"ceiling","min":0,"max":{}}}]"#,
+            MAX_NUMBER + 1
+        );
+        assert!(check_declarations(raw(&too_wide)).is_err());
+        let at_bound = format!(
+            r#"[{{"name":"max_a","label":"x","description":"d","unit":"u","kind":"ceiling","min":0,"max":{MAX_NUMBER}}}]"#
+        );
+        assert!(check_declarations(raw(&at_bound)).is_ok());
     }
 
     #[test]

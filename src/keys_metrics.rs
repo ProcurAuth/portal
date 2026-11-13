@@ -86,6 +86,11 @@ pub fn render(state: &AppState) -> String {
         read(&stats.refused)
     ));
     out.push_str(&format!(
+        "# HELP portal_budget_refunds_total Counted uses whose units went back, by result. The approval of the use could not be consumed.\n# TYPE portal_budget_refunds_total counter\nportal_budget_refunds_total{{result=\"refunded\"}} {}\nportal_budget_refunds_total{{result=\"failed\"}} {}\n",
+        read(&stats.refunded),
+        read(&stats.refund_failed)
+    ));
+    out.push_str(&format!(
         "# HELP portal_counter_statement_seconds The time of the counter statements.\n# TYPE portal_counter_statement_seconds summary\nportal_counter_statement_seconds_sum {:.6}\nportal_counter_statement_seconds_count {}\n",
         read(&stats.statement_micros) as f64 / 1_000_000.0,
         read(&stats.statements)

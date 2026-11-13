@@ -3743,6 +3743,86 @@ fn key_node(backend: &Backend) -> (Node, u16) {
     (node, pdp_port)
 }
 
+/// Protocol 6.9, 10.7 and 10.7a: the metadata publishes the real limits of the PDP. The idle time is real: the listener
+/// closes a connection that sends no request after `server.header_read_timeout`.
+#[test]
+fn the_metadata_publishes_the_maxima_of_the_pdp_and_the_idle_time_is_real() {
+    let pdp_port = free_port();
+    let _node = start_custom(
+        Arc::new(Store::open_in_memory()),
+        None,
+        Custom {
+            server: r#"trusted_proxies = ["127.0.0.1/32"] header_read_timeout = "1s""#,
+            ..Custom::default()
+        },
+        &format!(
+            r#"identity {{ issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" }}
+            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true max_evaluations = 8 max_body_bytes = "2KiB" }}
+            pdp_client "db" {{ token_env = "TEST_PDP_DB" }}"#
+        ),
+    );
+    wait_until(Duration::from_secs(10), || {
+        TcpStream::connect(("127.0.0.1", pdp_port)).is_ok()
+    });
+    let reply = send(
+        pdp_port,
+        "GET",
+        "/.well-known/authzen-configuration",
+        &[],
+        "",
+    );
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let metadata = reply.json();
+    assert_eq!(metadata["procurauth_idle_max_seconds"], 1, "{metadata}");
+    assert_eq!(
+        metadata["procurauth_evaluations_max_bytes"], 2048,
+        "{metadata}"
+    );
+    assert_eq!(
+        metadata["procurauth_evaluations_max_items"], 8,
+        "{metadata}"
+    );
+    assert_eq!(metadata["procurauth_usage_max_seconds"], 5, "{metadata}");
+    // The limits are real. A body above the maximum, and a batch above the maximum, get 400 (spec 10.7a).
+    let big = format!(
+        r#"{{"subject":{{"type":"user","id":"x"}},"pad":"{}"}}"#,
+        "x".repeat(3000)
+    );
+    assert_eq!(
+        pdp(
+            pdp_port,
+            "/access/v1/evaluation",
+            Some(PDP_DB_TOKEN),
+            &big,
+            None
+        )
+        .status,
+        400
+    );
+    // The idle time: one request, then no byte. The listener closes the connection at the published time.
+    let mut stream = TcpStream::connect(("127.0.0.1", pdp_port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .write_all(b"GET /.well-known/authzen-configuration HTTP/1.1\r\nHost: pdp.test\r\n\r\n")
+        .unwrap();
+    let mut buffer = [0u8; 8192];
+    let first = stream.read(&mut buffer).unwrap();
+    assert!(first > 0 && buffer[..first].starts_with(b"HTTP/1.1 200"));
+    let waited = std::time::Instant::now();
+    let closed = stream.read(&mut buffer);
+    let elapsed = waited.elapsed();
+    assert!(
+        matches!(closed, Ok(0)),
+        "the listener closes the idle connection: {closed:?}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(500) && elapsed <= Duration::from_millis(2500),
+        "closed after {elapsed:?}, and the published idle time is 1 s"
+    );
+}
+
 /// Alice reads `host:prod` with `max_rows` 5000 and a budget of 3 each minute. She can use keys.
 pub(super) fn add_alice(node: &Node, extra: &[Grant]) {
     stay_in_a_minute();
@@ -3906,7 +3986,7 @@ fn the_pdp_decides_for_a_key_with_its_owner_its_ceilings_and_its_counters() {
 }
 
 #[test]
-fn a_key_that_is_unknown_revoked_expired_too_old_or_without_an_owner_right_is_an_unknown_subject() {
+fn an_orphan_key_is_an_unknown_subject_and_a_condition_of_the_owner_gives_false_with_no_reason() {
     each_backend(|backend| {
         let (node, port) = key_node(backend);
         add_alice(&node, &[]);
@@ -3948,7 +4028,9 @@ fn a_key_that_is_unknown_revoked_expired_too_old_or_without_an_owner_right_is_an
         ));
         node.state.users.refresh(&node.state.store).unwrap();
         assert_eq!(ask("key:a2"), unknown);
-        // The owner loses the right `keys.own.use`: the key gets the same answer (portal 9.3).
+        // The owner loses the right `keys.own.use`: the key gets `false` with no reason. The condition can change
+        // later, so the key is not an orphan (protocol 3.5, 11.1).
+        let plain = serde_json::json!({"decision": false});
         assert_eq!(ask("key:a3"), yes);
         let without_use: Vec<Grant> = node
             .state
@@ -3963,7 +4045,7 @@ fn a_key_that_is_unknown_revoked_expired_too_old_or_without_an_owner_right_is_an
             .update_user("alice", None, Some(&without_use))
             .unwrap();
         node.state.users.refresh(&node.state.store).unwrap();
-        assert_eq!(ask("key:a3"), unknown);
+        assert_eq!(ask("key:a3"), plain);
         assert_eq!(
             ask("alice")["decision"],
             true,
@@ -3981,7 +4063,7 @@ fn a_key_that_is_unknown_revoked_expired_too_old_or_without_an_owner_right_is_an
             .update_user("alice", None, Some(&zero))
             .unwrap();
         node.state.users.refresh(&node.state.store).unwrap();
-        assert_eq!(ask("key:a3"), unknown, "the key is older than 0 seconds");
+        assert_eq!(ask("key:a3"), plain, "the key is older than 0 seconds");
         // A high value lets the key work again.
         let high: Vec<Grant> = zero
             .into_iter()
@@ -5237,6 +5319,34 @@ fn an_account_of_the_file_signs_in_reads_its_keys_and_changes_none() {
         "",
     );
     assert_eq!(edge.status, 204, "{:?}", edge.headers);
+    // The age of the action document never changes the answer of the edge: `access` stays `true`, also when the
+    // last good document is older than `access.actions_max_age` (protocol 5.3a, 8.3, 11.1).
+    node.state.actions.set_document_aged(
+        "db",
+        crate::actions::parse("db", KEY_TEST_DOCUMENT.as_bytes()).unwrap(),
+        Duration::from_secs(48 * 3600),
+    );
+    assert!(node.state.actions.too_old("db"));
+    let old = send(
+        node.port,
+        "GET",
+        "/auth/verify-key",
+        &[
+            ("Authorization", &format!("Bearer {key_text}")),
+            ("X-Forwarded-Uri", "/db/x"),
+        ],
+        "",
+    );
+    assert_eq!(
+        old.status, 204,
+        "a too old document does not refuse the key: {:?}",
+        old.headers
+    );
+    // A fresh read brings the document back: the PDP answers the questions of the service again (protocol 5.3a).
+    node.state.actions.set_document(
+        "db",
+        crate::actions::parse("db", KEY_TEST_DOCUMENT.as_bytes()).unwrap(),
+    );
     let page = get_keys(&node, &carol, "");
     assert_eq!(page.status, 200, "{}", page.body);
     assert!(page.body.contains("nightly report") && page.body.contains(&id));
@@ -5254,7 +5364,7 @@ fn an_account_of_the_file_signs_in_reads_its_keys_and_changes_none() {
         "an account of the file makes no key"
     );
     assert!(
-        page.body.contains("1 checks"),
+        page.body.contains("2 checks"),
         "the checks of the key of the file are in memory"
     );
     // No address changes a key of the file.

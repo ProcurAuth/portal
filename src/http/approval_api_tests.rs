@@ -1272,8 +1272,9 @@ fn a08_effect_mismatch_invalid_view_command_too_large() {
             json!({"title": "t", "fields": [], "body": "/nothing"}),
             json!({"title": "t", "fields": [], "body": "/host/0"}),
             json!([]),
-            json!({"title": "t", "fields": []}),
             json!({"title": "t", "fields": [], "body": "/sql", "extra": 1}),
+            json!({"title": "two\nlines"}),
+            json!({"body": "/missing"}),
         ] {
             let mut body = ok.clone();
             body["view"] = view.clone();
@@ -1316,6 +1317,20 @@ fn a08_effect_mismatch_invalid_view_command_too_large() {
         );
         // And the good command is taken.
         assert_eq!(r.post(&ok).status, 201, "[{name}]");
+        // Each member of a view is optional (protocol 17.9): a view with no member, or with a title only, is valid.
+        for view in [
+            json!({}),
+            json!({"title": "t"}),
+            json!({"title": "t", "fields": []}),
+        ] {
+            let mut body = ok.clone();
+            body["view"] = view.clone();
+            let (code, error) = status(&body);
+            assert!(
+                code == 201 || code == 200,
+                "[{name}] {view}: {code} {error:?}"
+            );
+        }
     });
 }
 

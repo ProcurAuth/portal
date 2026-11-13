@@ -81,9 +81,11 @@ pub struct Verdict {
     pub counters: Vec<Counter>,
     /// The action needs the approval of a person: a grant that covers the node has `confirm`, on
     /// the side of the key or on the side of the owner (OR rule, like the limits of protocol 8.1).
-    /// When the owner is the superadmin, only the side of the key counts. A question about a
-    /// subtree (`Matching::Subtree`) answers `false`: it is for the display only. Always `false`
-    /// for a `false` answer.
+    /// When the owner is the superadmin, only the side of the key counts. The `confirm` of a grant
+    /// of a person has no effect on a question whose subject is that person (protocol 17.8, spec
+    /// question 51): the person would approve their own action. A question about a subtree
+    /// (`Matching::Subtree`) answers `false`: it is for the display only. Always `false` for a
+    /// `false` answer.
     pub approval: bool,
 }
 
@@ -204,14 +206,15 @@ fn counters_of(owner: &CounterOwner, grants: &[Grant], q: &Question<'_>) -> Vec<
     out
 }
 
-/// The decision for a person with these grants.
+/// The decision for a person with these grants. The `confirm` of a grant has no effect here: it
+/// applies to the keys of the person only (see [`key`]).
 pub fn person(login: &str, grants: &[Grant], q: &Question<'_>) -> Verdict {
     let node: Vec<&Grant> = covering(grants, q).collect();
     match q.matching {
         Matching::Node if node.is_empty() => Verdict::denied(),
         Matching::Node => Verdict {
             allowed: true,
-            approval: confirms(&node),
+            approval: false,
             ceilings: ceilings_of(node.into_iter(), q),
             counters: counters_of(&CounterOwner::User(login.to_string()), grants, q),
         },
@@ -834,9 +837,11 @@ mod tests {
         // The side of the owner asks: every key of the owner asks.
         let verdict = key(&who, &plain, Owner::Person(&asking), &owner_who, &q);
         assert!(verdict.allowed && verdict.approval, "owner side");
-        // A grant above the node asks for the node below.
+        // The grant of a person asks for nothing when the question is the question of the person
+        // (protocol 17.8): it applies to the keys of the person only.
         let above = vec![confirming("data.write on service:datastore/host:prod")];
-        assert!(person("alice", &above, &q).approval);
+        let own = person("alice", &above, &q);
+        assert!(own.allowed && !own.approval, "own use: confirm is ignored");
         // A grant of another action, or on another node, does not ask.
         let other = vec![
             confirming("data.read on service:datastore/host:prod"),
@@ -844,12 +849,17 @@ mod tests {
         ];
         let verdict = person("alice", &other, &q);
         assert!(!verdict.allowed && !verdict.approval, "no covering grant");
-        // Two covering grants: one with confirm is enough (OR rule).
+        // Two covering grants of the owner: one with confirm is enough for a key (OR rule).
         let mixed = vec![
             grant("data.write on service:datastore/host:prod", "{}"),
             confirming("data.write on service:datastore/host:prod/database:test2"),
         ];
-        assert!(person("alice", &mixed, &q).approval);
+        assert!(!person("alice", &mixed, &q).approval);
+        let verdict = key(&who, &plain, Owner::Person(&mixed), &owner_who, &q);
+        assert!(
+            verdict.allowed && verdict.approval,
+            "owner side, two grants"
+        );
         // A denied question never asks.
         let denied = key(&who, &asking, Owner::Person(&[]), &owner_who, &q);
         assert!(!denied.allowed && !denied.approval);
@@ -915,6 +925,12 @@ mod tests {
         let b = person("alice", &asking, &q);
         assert_eq!(a.ceilings, b.ceilings);
         assert_eq!(a.counters, b.counters);
-        assert!(!a.approval && b.approval);
+        // The grant of a person asks for nothing for the person. It asks for the key of the person.
+        assert!(!a.approval && !b.approval);
+        let who = CounterOwner::Key("k".into());
+        let owner_who = CounterOwner::User("alice".into());
+        let verdict = key(&who, &plain, Owner::Person(&asking), &owner_who, &q);
+        assert!(verdict.allowed && verdict.approval);
+        assert_eq!(verdict.ceilings, a.ceilings);
     }
 }

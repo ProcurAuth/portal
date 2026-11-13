@@ -81,6 +81,24 @@ class ShownEffectTest {
     }
 
     @Test
+    fun aViewWithNoMemberIsValidAndShowsTheNameOfTheActionAsTitle() {
+        // Each member of a view is optional (ProcurAuth 17.9).
+        val empty = edited { it.put("view", JSONObject()) }
+        assertEquals("{}", StrictJson.compact(empty.view.toJson()))
+        val v = verdict(empty) as ShownEffect.Verdict.Valid
+        assertEquals("data.write", v.view.title)
+        assertEquals("", v.view.body)
+        assertTrue(v.view.fields.isEmpty())
+        val titleOnly = edited { it.put("view", JSONObject().put("title", "Only a title")) }
+        val t = verdict(titleOnly) as ShownEffect.Verdict.Valid
+        assertEquals("Only a title", t.view.title)
+        assertEquals("", t.view.body)
+        // A pointer that is present is still checked.
+        val bad = edited { it.put("view", JSONObject().put("body", "/missing")) }
+        assertEquals(ShownEffect.Verdict.Invalid(Validity.INVALID_VIEW), verdict(bad))
+    }
+
+    @Test
     fun aViewThatNamesNothingOrNamesAnObjectIsInvalid() {
         val missing = edited { it.getJSONObject("view").put("body", "/missing") }
         assertEquals(ShownEffect.Verdict.Invalid(Validity.INVALID_VIEW), verdict(missing))

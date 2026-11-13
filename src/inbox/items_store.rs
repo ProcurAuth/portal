@@ -6,7 +6,7 @@
 //! seal. The clock, the box and the limits come from the caller, so a test builds the engine without a server.
 //! An item never uses the spool: when PostgreSQL has no primary, a write gets [`ItemError::Degraded`].
 
-// The PDP calls `consume`, `release` and `status_for_pdp`. The approval API, the agent channel, the phones and the web
+// The PDP calls `consume` and `status_for_pdp`. The approval API, the agent channel, the phones and the web
 // call the rest of this API in the next lots.
 #![allow(dead_code)]
 
@@ -774,21 +774,6 @@ impl Items<'_> {
         let cx = self.cx();
         let key_hash = key_hash.to_string();
         let done = in_tx!(self, [cx, key_hash], tx, ops::status(tx, &cx, &key_hash))?;
-        self.after(&done.fx);
-        Ok(done.value)
-    }
-
-    /// Gives back a consumed approval (see `ops::release`).
-    pub async fn release(&self, id: &str, consumed_at: i64) -> Result<bool, ItemError> {
-        self.writable()?;
-        let cx = self.cx();
-        let id = id.to_string();
-        let done = in_tx!(
-            self,
-            [cx, id, consumed_at],
-            tx,
-            ops::release(tx, &cx, &id, consumed_at)
-        )?;
         self.after(&done.fx);
         Ok(done.value)
     }

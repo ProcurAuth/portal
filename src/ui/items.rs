@@ -896,6 +896,7 @@ pub struct Text {
     pub title: String,
     /// The fields of the view with their values.
     pub fields: Vec<(String, String)>,
+    /// The command text. Empty when the view has no `body` (protocol 17.9): the page then says so.
     pub command: String,
     pub command_label: Option<String>,
     pub language: Language,
@@ -1006,6 +1007,9 @@ pub(super) fn marks_banner(m: &html::Marks, verb: &str) -> String {
     )
 }
 
+/// The text of the zone of a request whose view has no `body`.
+const NO_COMMAND: &str = "<p class=\"muted\">The service gave no command text. The effect covers the action, the resource and the arguments of the call.</p>";
+
 fn command_zone(d: &Detail, t: &Text) -> String {
     let l = d.loaded;
     let m = html::marks(&t.command);
@@ -1094,7 +1098,11 @@ fn command_zone(d: &Detail, t: &Text) -> String {
             &copy
         ),
         html::escape_attr(label),
-        html::command(&t.command, t.language),
+        if t.command.is_empty() {
+            NO_COMMAND.to_string()
+        } else {
+            html::command(&t.command, t.language)
+        },
         if lines == 1 { "" } else { "s" },
         t.command.len(),
         if t.command.len() == 1 { "" } else { "s" },

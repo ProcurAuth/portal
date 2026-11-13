@@ -1769,6 +1769,7 @@ fn service_grants(state: &AppState, catalog: &Catalog) -> Vec<ui::ServiceActions
             // An external service is a link: it has no document, no action and no source to read.
             if service.external {
                 return ui::ServiceActions {
+                    approvals: false,
                     external: true,
                     id: service.id.clone(),
                     name: service.name.clone(),
@@ -1784,6 +1785,7 @@ fn service_grants(state: &AppState, catalog: &Catalog) -> Vec<ui::ServiceActions
             let known = declared.is_some();
             let document = declared.unwrap_or_default();
             ui::ServiceActions {
+                approvals: pdp::approval::configured(state),
                 external: service.external,
                 id: service.id.clone(),
                 name: service.name.clone(),
@@ -2123,6 +2125,7 @@ fn feature_actions(
         })
         .unwrap_or_default();
     ui::ServiceActions {
+        approvals: pdp::approval::configured(state),
         external: false,
         id: crate::portal_actions::SERVICE.to_string(),
         name: "Server permissions".to_string(),

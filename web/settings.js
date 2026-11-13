@@ -1271,10 +1271,30 @@
         button.dataset.action = name;
         button.setAttribute("aria-pressed", on ? "true" : "false");
         button.setAttribute("aria-label", "Asks for an approval");
-        button.title = imposed ? "Asks for an approval. Your own grant asks for it, so this key must too." : "Asks for an approval";
+        // A call that cannot wait, for example a page of the service, gets the error approval_cannot_wait.
+        var cannotWait = " A call that cannot wait, such as a page of the service, is refused with approval_cannot_wait. A tool that needs several permissions asks only for the permission that it uses, so put the lock on that permission.";
+        if (imposed) button.title = "Asks for an approval. Your own grant asks for it, so this key must too." + cannotWait;
+        else if (data.person) button.title = "Asks for an approval when a key of this account uses the action. The account itself never asks." + cannotWait;
+        else button.title = "Asks for an approval." + cannotWait;
         button.disabled = imposed;
         button.appendChild(icon(on ? "lock" : "lock-open"));
         return button;
+      }
+
+      // A grant that has `confirm` where the lock is not offered: the portal has no approvals, or the action is
+      // `mcp.session`. The lock is closed and disabled, and the tooltip says why.
+      function deadLock(name) {
+        var span = node("span", "statusIcon statusIcon--warn");
+        span.title =
+          data.approvals === false
+            ? "This grant asks for an approval, but the file has no approvals (the block inbox.approvals is missing). The PDP refuses the action."
+            : name === "mcp.session"
+              ? "The action mcp.session cannot ask for an approval. The PDP ignores this setting."
+              : "This action cannot ask for an approval.";
+        span.setAttribute("role", "img");
+        span.setAttribute("aria-label", span.title);
+        span.appendChild(icon("lock"));
+        return span;
       }
 
       function renderActions() {
@@ -1386,7 +1406,8 @@
             } else {
               var lost = isTicked && !owns(svc.id, a.name, item.path);
               var asks = isTicked && a.approval;
-              if (lost || asks) {
+              var dead = isTicked && !a.approval && held && held.confirm;
+              if (lost || asks || dead) {
                 // The warning and the lock of the approval share the last cell of the row.
                 var tools = node("span", "ge__tools");
                 if (lost) {
@@ -1396,6 +1417,7 @@
                   tools.appendChild(warn);
                 }
                 if (asks) tools.appendChild(confirmButton(held, a.name));
+                if (dead) tools.appendChild(deadLock(a.name));
                 line.appendChild(tools);
               }
               if (a.limits.length) {

@@ -9,9 +9,13 @@
 //! - the owner declined, and the deny time has not ended: `false` with `approval_denied`;
 //! - the approval is void: `false` with `approval_expired` for a use, and `approval_required` for a question
 //!   without `usage`;
-//! - the approval can be used: `true`. A use consumes it first (compare-and-set in the inbox database), then
-//!   counts the unit of the budgets. When the count refuses or fails, the gate gives the approval back (P7). A crash
-//!   between the two steps loses one approval and never gives two executions.
+//! - the approval can be used: `true`. A question without `usage` only looks. A use counts the unit of the budgets
+//!   first, then consumes the approval with one compare-and-set in the inbox database. The two stores have no common
+//!   transaction, so the order is the guard (protocol 17.2). A refusal or a failure of the count leaves the approval
+//!   as it was. A failure or a crash after the count leaves the approval usable and one unit counted (the over-count
+//!   of protocol 10.6). When the compare-and-set loses a race, or fails, the gate gives the units back. The approval
+//!   is never lost because of a failure of the PDP, it is never consumed without the answer `true`, and it is never
+//!   consumed two times.
 //!
 //! A `false` answer with one of these reasons takes no unit. The answer holds the reason and the `evaluation_id`
 //! and nothing else: no owner, no device, no comment, no time of the answer (protocol 17.12).
@@ -42,7 +46,7 @@ pub(super) const GATE_REASONS: [&str; 7] = [
     APPROVAL_DENIED,
     APPROVAL_EXPIRED,
     "consumed",
-    "released",
+    "refunded",
     "not_enabled",
 ];
 const REQUIRED: usize = 0;
@@ -50,7 +54,7 @@ const PENDING: usize = 1;
 const DENIED: usize = 2;
 const EXPIRED: usize = 3;
 const CONSUMED: usize = 4;
-const RELEASED: usize = 5;
+pub(super) const REFUNDED: usize = 5;
 const NOT_ENABLED: usize = 6;
 
 /// The members `procurauth_approval_*` of the metadata: the values that protocol 17 says the PDP publishes (the names
@@ -84,6 +88,8 @@ pub(super) struct Ask<'a> {
     pub enabled: bool,
     /// The subject of the question, as the request gives it. The approval is bound to it.
     pub subject: &'a str,
+    /// `context.permission_only`: the question is for another permission of an operation. The gate ignores `confirm`.
+    pub permission_only: bool,
 }
 
 impl Ask<'_> {
@@ -94,6 +100,7 @@ impl Ask<'_> {
             effect: None,
             enabled: false,
             subject: "",
+            permission_only: false,
         }
     }
 }
@@ -109,27 +116,32 @@ pub(in crate::http) fn configured(state: &AppState) -> bool {
         .is_some_and(|inbox| inbox.approvals.is_some())
 }
 
-/// An approval that the gate consumed. `release` gives it back.
-pub(super) struct Held {
-    request_id: String,
-    consumed_at: i64,
+/// An approval that the gate found usable. `consume` takes it after the count of the units.
+pub(super) struct Usable {
+    key_hash: String,
+    /// The facts that bind the `evaluation_id` of a refusal.
+    path: String,
 }
 
 /// A fault that a test asks the gate to play. The values are in `AppState::pdp_fault` and exist in tests only.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Fault {
     None,
-    /// The process stops after the consumption: no count, no give-back.
-    CrashAfterConsume,
+    /// The process stops after the count and before the consumption: the units stay counted, the approval stays
+    /// usable.
+    CrashAfterCount,
     /// The count of the budgets fails.
     CountFails,
+    /// The consumption fails with an error of the store, after the count.
+    ConsumeFails,
 }
 
 #[cfg(test)]
 pub(super) fn fault(state: &AppState) -> Fault {
     match state.pdp_fault.load(std::sync::atomic::Ordering::SeqCst) {
-        1 => Fault::CrashAfterConsume,
+        1 => Fault::CrashAfterCount,
         2 => Fault::CountFails,
+        3 => Fault::ConsumeFails,
         _ => Fault::None,
     }
 }
@@ -187,13 +199,9 @@ fn run<T>(work: impl Future<Output = T>) -> T {
     crate::util::blocking(|| handle.block_on(work))
 }
 
-/// The gate of one question whose verdict asks for an approval. `Ok(None)`: the action can run, and nothing was
-/// consumed. `Ok(Some(held))`: the action can run, and the use consumed this approval. `Err`: the answer.
-pub(super) fn gate(
-    state: &AppState,
-    q: &Question<'_>,
-    ask: &Ask<'_>,
-) -> Result<Option<Held>, Outcome> {
+/// The look of the gate at one question whose verdict asks for an approval. `Ok`: the approval can be used, and
+/// nothing was consumed. `Err`: the answer. A use then counts its units and calls [`consume`].
+pub(super) fn gate(state: &AppState, q: &Question<'_>, ask: &Ask<'_>) -> Result<Usable, Outcome> {
     if !ask.enabled {
         state.pdp_stats.approval(NOT_ENABLED);
         return Err(Outcome::deny(
@@ -218,31 +226,83 @@ pub(super) fn gate(
     };
     let path = resource_path(q.chain);
     let key_hash = inbox::approval_key_hash(q.service, ask.subject, q.action, &path, effect);
-    let found = if ask.usage {
-        run(items.consume(&key_hash))
-    } else {
-        run(items.status_for_pdp(&key_hash))
-    };
-    let found = match found {
+    let found = match run(items.status_for_pdp(&key_hash)) {
         Ok(found) => found,
         Err(error) => {
             inbox::log::warn!(event = "pdp_approval_store_error", error = %error);
             return Err(unavailable("the approval store failed"));
         }
     };
+    match found {
+        Consumed::Usable(_) => Ok(Usable { key_hash, path }),
+        other => Err(refusal(state, q, ask, other, &path)),
+    }
+}
+
+/// The consumption of the approval of a use, after the count of its units: one compare-and-set. `Ok`: the use owns the
+/// approval, and the answer is `true`. `Err`: the answer. The approval was not consumed, so the caller gives the
+/// units back.
+pub(super) fn consume(
+    state: &AppState,
+    q: &Question<'_>,
+    ask: &Ask<'_>,
+    usable: &Usable,
+) -> Result<(), Outcome> {
+    let Some(app) = state.inbox.app() else {
+        return Err(unavailable("the inbox is not running"));
+    };
+    let Some(items) = app.items() else {
+        return Err(unavailable("the inbox has no items"));
+    };
+    if fault(state) == Fault::ConsumeFails {
+        return Err(unavailable("fault: the consumption fails"));
+    }
+    match run(items.consume(&usable.key_hash)) {
+        Ok(Consumed::Used(_)) => {
+            state.pdp_stats.approval(CONSUMED);
+            Ok(())
+        }
+        // Another use took the approval, or the clock ended it, between the look and the consumption.
+        Ok(other) => Err(refusal(state, q, ask, other, &usable.path)),
+        Err(error) => {
+            inbox::log::warn!(event = "pdp_approval_store_error", error = %error);
+            Err(unavailable("the approval store failed"))
+        }
+    }
+}
+
+/// The answer for an approval that cannot be used. A refusal that asks the service to submit a request holds an
+/// `evaluation_id`. When the PDP cannot make one that fits the bound of protocol 17.1 (1024 bytes), or has no content
+/// key, it answers `false` with no reason: it gives no approval for this question.
+fn refusal(
+    state: &AppState,
+    q: &Question<'_>,
+    ask: &Ask<'_>,
+    found: Consumed,
+    path: &str,
+) -> Outcome {
+    let (Some(app), Some(effect)) = (state.inbox.app(), ask.effect) else {
+        return unavailable("the inbox is not running");
+    };
     let now = app.clock.now_ms();
     let bound = Bound {
         service: q.service,
         subject: ask.subject,
         action: q.action,
-        resource: &path,
+        resource: path,
         effect,
     };
-    let id = || {
-        app.secrets
-            .content
-            .as_ref()
-            .and_then(|content| evaluation_id(content, now, &bound).ok())
+    let required = |which: usize, why: &'static str| match app
+        .secrets
+        .content
+        .as_ref()
+        .and_then(|content| evaluation_id(content, now, &bound).ok())
+    {
+        Some(id) => refuse(state, which, why, Some(id)),
+        None => {
+            inbox::log::warn!(event = "pdp_evaluation_id_unavailable", detail = why);
+            Outcome::deny("no evaluation_id: fail closed", None)
+        }
     };
     let cooldown_ms = app
         .config
@@ -250,53 +310,28 @@ pub(super) fn gate(
         .as_ref()
         .map_or(0, |a| a.deny_cooldown.as_millis() as i64);
     match found {
-        Consumed::Used(l) => {
-            state.pdp_stats.approval(CONSUMED);
-            let consumed_at = l.approval.as_ref().and_then(|a| a.consumed_at);
-            match consumed_at {
-                Some(consumed_at) => Ok(Some(Held {
-                    request_id: l.item.request_id.clone(),
-                    consumed_at,
-                })),
-                None => Err(unavailable("the consumed approval has no time")),
-            }
+        Consumed::Used(_) | Consumed::Usable(_) => {
+            unavailable("the approval is usable: no refusal to give")
         }
-        Consumed::Usable(_) => Ok(None),
-        Consumed::NoApproval => Err(refuse(state, REQUIRED, "approval required", id())),
-        Consumed::Pending(_) => Err(refuse(state, PENDING, "approval pending", id())),
+        Consumed::NoApproval => required(REQUIRED, "approval required"),
+        Consumed::Pending(_) => required(PENDING, "approval pending"),
         Consumed::Denied(l) => {
             let answered = l.item.answered_at.unwrap_or(0);
             // The deny time ends at `answered_at + deny_cooldown`: the same effect then asks again.
             if now < answered + cooldown_ms {
-                Err(refuse(state, DENIED, "approval denied", None))
+                refuse(state, DENIED, "approval denied", None)
             } else {
-                Err(refuse(state, REQUIRED, "approval required", id()))
+                required(REQUIRED, "approval required")
             }
         }
         Consumed::Gone(l) => {
             let consumed = l.approval.as_ref().is_some_and(|a| a.consumed_at.is_some());
             if ask.usage && !consumed {
-                Err(refuse(state, EXPIRED, "approval expired", None))
+                refuse(state, EXPIRED, "approval expired", None)
             } else {
-                Err(refuse(state, REQUIRED, "approval required", id()))
+                required(REQUIRED, "approval required")
             }
         }
-    }
-}
-
-/// Gives a consumed approval back after the count of the budgets refused or failed. When the give-back fails, the
-/// approval stays consumed: the agent asks again. This never gives a second execution.
-pub(super) fn release(state: &AppState, held: &Held) {
-    let Some(app) = state.inbox.app() else { return };
-    let Some(items) = app.items() else { return };
-    match run(items.release(&held.request_id, held.consumed_at)) {
-        Ok(true) => state.pdp_stats.approval(RELEASED),
-        Ok(false) => {}
-        Err(error) => inbox::log::error!(
-            event = "pdp_approval_release_failed",
-            request.id = %held.request_id,
-            error = %error
-        ),
     }
 }
 
@@ -315,6 +350,10 @@ fn unavailable(why: &'static str) -> Outcome {
 }
 
 // ---------------------------------------------------------------- the evaluation_id
+
+/// The most bytes of an `evaluation_id` (protocol 17.1). A question whose id would be longer gets `false` with no
+/// reason: the PDP gives no approval for it.
+pub(crate) const MAX_EVALUATION_ID_BYTES: usize = 1024;
 
 /// The version of the text that the HMAC covers.
 const ID_CONTEXT: &[u8] = b"portal-evaluation-id/v1";
@@ -383,7 +422,14 @@ pub(super) fn evaluation_id(
     raw.extend_from_slice(&issued_at.to_be_bytes());
     raw.extend_from_slice(&tag);
     raw.extend_from_slice(&sealed);
-    Ok(Base64UrlUnpadded::encode_string(&raw))
+    let id = Base64UrlUnpadded::encode_string(&raw);
+    if id.len() > MAX_EVALUATION_ID_BYTES {
+        return Err(format!(
+            "the evaluation_id would have {} bytes, and the bound is {MAX_EVALUATION_ID_BYTES}",
+            id.len()
+        ));
+    }
+    Ok(id)
 }
 
 /// Why an `evaluation_id` is not valid. The submission API answers `invalid_evaluation` for each cause.

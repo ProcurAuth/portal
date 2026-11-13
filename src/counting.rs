@@ -58,6 +58,10 @@ pub struct Stats {
     pub store_error: AtomicU64,
     pub row_missing: AtomicU64,
     pub wait_exceeded: AtomicU64,
+    /// The uses whose units went back because the approval of the use could not be consumed.
+    pub refunded: AtomicU64,
+    /// The refunds that failed: one unit stays counted.
+    pub refund_failed: AtomicU64,
     /// The counter rows that the instance made (portal 7.2a).
     pub rows_made: AtomicU64,
     /// The statements that the instance sent to the database.
@@ -189,6 +193,27 @@ impl Counting {
             Err(_) => {
                 self.stats.store_error.fetch_add(1, Ordering::Relaxed);
                 Outcome::Unavailable(Unavailable::StoreError)
+            }
+        }
+    }
+}
+
+impl Counting {
+    /// Gives back the unit of a use that `count` counted, when the PDP could not consume the approval of the use. It
+    /// never fails the answer: a failed refund leaves one unit counted, the over-count that protocol 10.6 accepts.
+    /// Returns whether the units are back.
+    pub fn refund(&self, store: &Store, counters: &[Counter]) -> bool {
+        if counters.is_empty() {
+            return true;
+        }
+        match store.refund_use(counters, self.fixed_clock()) {
+            Ok(()) => {
+                self.stats.refunded.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+            Err(_) => {
+                self.stats.refund_failed.fetch_add(1, Ordering::Relaxed);
+                false
             }
         }
     }

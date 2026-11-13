@@ -1348,7 +1348,7 @@ fn the_pdp_block_and_its_clients() {
     let pdp = cfg.pdp.clone().unwrap();
     assert_eq!(pdp.listen_address.port(), 4182);
     assert_eq!(pdp.url, "http://portal-pdp.edge:4182", "without the last /");
-    assert_eq!((pdp.max_evaluations, pdp.max_body_bytes), (64, 64 * 1024));
+    assert_eq!((pdp.max_evaluations, pdp.max_body_bytes), (128, 64 * 1024));
     let names: Vec<&str> = secrets.pdp_tokens.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, ["db", "chat"]);
     assert_eq!(line(&cfg, "pdp_client.db.token").value, "<hidden>");
@@ -1725,8 +1725,8 @@ fn a_user_block_with_a_bad_limit_a_bad_right_or_too_many_grants_stops_the_start(
             "at most 8",
         ),
         (
-            r#"{ grant = "data.read on service:db", limits = { max_rows = 1000000001 } }"#,
-            "1000000000",
+            r#"{ grant = "data.read on service:db", limits = { max_rows = 9007199254740992 } }"#,
+            "9007199254740991",
         ),
         (
             r#"{ grant = "access on service:db", limits = { requests = [ { amount = 0, window = "minute" } ] } }"#,
@@ -4101,6 +4101,24 @@ fn config_confirm_on_portal_service_stops_start() {
     );
 }
 
+/// Protocol 17.8, binding 3.6a: `mcp.session` has no effect to approve, and a method with no tool cannot wait.
+#[test]
+fn config_confirm_on_mcp_session_stops_start() {
+    let message = err(&with_grants_of_carol(
+        r#"{ grant = "mcp.session on service:db", confirm = true }"#,
+    ));
+    assert!(
+        message.contains("confirm")
+            && message.contains("mcp.session")
+            && message.contains("user.carol"),
+        "{message}"
+    );
+    // The same grant without `confirm` is fine.
+    let _ = ok(&with_grants_of_carol(
+        r#"{ grant = "mcp.session on service:db", confirm = false }"#,
+    ));
+}
+
 #[test]
 fn config_confirm_on_access_stops_start() {
     let message = err(&with_grants_of_carol(
@@ -4412,26 +4430,33 @@ fn a_bad_key_of_the_approval_api_or_a_contradiction_stops_the_start_with_the_key
         let message = approvals_err(&format!(r#"approvals {{ consume_within = "5m" {keys} }}"#), &rest, true);
         assert!(message.contains(expected), "{keys}: {message}");
     }
-    // The command is at most the body of the PDP: 16 KiB by default, a body of 8 KiB is too small.
+    // The command plus 2 KiB is at most the body of the PDP: 16 KiB by default, a body of 8 KiB is too small.
     let small = format!("{PDP_PARTS}\n{client}",).replace(
         "plain_http = true",
         "plain_http = true max_body_bytes = \"8KiB\"",
     );
     let message = approvals_err(APPROVALS, &small, true);
     assert!(
-        message.contains("inbox.approvals.max_command_bytes must be at most pdp.max_body_bytes")
+        message.contains("inbox.approvals.max_command_bytes plus 2048 bytes")
             && message.contains("16384")
             && message.contains("8192"),
         "{message}"
     );
     let fits = approvals_ok(
-        r#"approvals { consume_within = "5m" max_command_bytes = "8KiB" }"#,
+        r#"approvals { consume_within = "5m" max_command_bytes = "6KiB" }"#,
         &small,
     );
     assert_eq!(
         fits.inbox.unwrap().approvals.unwrap().max_command_bytes,
-        8192
+        6144
     );
+    // The command alone fits the body, but the other members of the submission do not.
+    let tight = approvals_err(
+        r#"approvals { consume_within = "5m" max_command_bytes = "7KiB" }"#,
+        &small,
+        true,
+    );
+    assert!(tight.contains("max_command_bytes is 7168"), "{tight}");
 }
 
 // ---------------------------------------------------------------- inbox.mcp

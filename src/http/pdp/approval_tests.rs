@@ -1,8 +1,8 @@
 //! The approval gate of the PDP over HTTP, with the inbox and its items on SQLite and on PostgreSQL.
 //!
 //! The conformance cases D76 to D89 and E19 prove the answers of the protocol (see `conformance_tests`). These tests
-//! prove what the cases cannot: the single use of an approval under a race, the order consume, count, release, the
-//! fault between the steps, the flag of the server, and what an answer holds.
+//! prove what the cases cannot: the single use of an approval under a race, the order count then consume, the units
+//! that go back, the fault between the steps, the flag of the server, and what an answer holds.
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Barrier};
@@ -23,7 +23,8 @@ const DOCUMENT: &str = r#"{"server":"db",
   "actions":[
     {"name":"data.read","resource_types":["host","database"],"description":"Read.","limits":["requests"]},
     {"name":"data.write","resource_types":["host","database"],"description":"Write.",
-     "limits":["requests"]}],
+     "limits":["requests"]},
+    {"name":"mcp.session","resource_types":["service"],"description":"Open a session."}],
   "limits":[
     {"name":"requests","label":"Requests","description":"d","unit":"request","kind":"budget"}]}"#;
 
@@ -198,13 +199,11 @@ impl Fixture {
     }
 
     fn post(&self, body: &str) -> Reply {
-        pdp(
-            self.port,
-            "/access/v1/evaluation",
-            Some(PDP_DB_TOKEN),
-            body,
-            None,
-        )
+        self.post_to("/access/v1/evaluation", body)
+    }
+
+    fn post_to(&self, path: &str, body: &str) -> Reply {
+        pdp(self.port, path, Some(PDP_DB_TOKEN), body, None)
     }
 
     /// The answer of a question about analytics.
@@ -272,7 +271,7 @@ fn consume_takes_one_unit_once() {
 }
 
 #[test]
-fn budget_exceeded_keeps_approval_usable_release_path() {
+fn budget_exceeded_keeps_approval_usable() {
     stay_in_a_minute();
     each_fixture(true, |f, name| {
         let key = f.key("9b1c04e2aa71f0c3", 1, Some(1));
@@ -281,7 +280,7 @@ fn budget_exceeded_keeps_approval_usable_release_path() {
             f.approved(&key, e);
         }
         assert_eq!(f.ask(&key, &first, true)["decision"], true, "[{name}]");
-        // The budget is spent. The approval of the second effect is consumed, then given back.
+        // The budget is spent. The count refuses before the consumption: the approval of the second effect is not touched.
         let refused = f.ask(&key, &second, true);
         assert_eq!(refused["decision"], false, "[{name}] {refused}");
         assert_eq!(reason(&refused), Some("budget_exceeded"), "[{name}]");
@@ -289,10 +288,11 @@ fn budget_exceeded_keeps_approval_usable_release_path() {
             .as_u64()
             .is_some_and(|s| s >= 1));
         assert_eq!(
-            f.metric("released"),
+            f.metric("consumed"),
             1,
-            "[{name}] the approval was given back"
+            "[{name}] only the first use consumed"
         );
+        assert_eq!(f.metric("refunded"), 0, "[{name}] nothing to give back");
         assert!(
             f.usable(&key, &second),
             "[{name}] the approval is still usable"
@@ -306,49 +306,116 @@ fn budget_exceeded_keeps_approval_usable_release_path() {
             );
         }
         assert!(f.usable(&key, &second), "[{name}]");
-        // A count that fails: HTTP 503, no decision, and the approval is given back.
+        // A count that fails: HTTP 503, no decision, and the approval is not touched.
         f.node.state.pdp_fault.store(2, Ordering::SeqCst);
         let failed = f.post(&f.body(&key, "analytics", Some(&third), true));
         f.node.state.pdp_fault.store(0, Ordering::SeqCst);
         assert_eq!(failed.status, 503, "[{name}] {}", failed.body);
         assert!(
             f.usable(&key, &third),
-            "[{name}] given back after a failed count"
+            "[{name}] still usable after a failed count"
         );
     });
 }
 
+/// The process stops after the count and before the consumption (protocol 17.2). The approval is not lost and is not
+/// consumed: the agent asks again. One unit stays counted (the over-count of protocol 10.6), and the approval runs one
+/// time at most.
 #[test]
-fn crash_between_consume_and_count_never_double_executes() {
+fn crash_between_count_and_consume_never_loses_the_approval_and_never_double_executes() {
     stay_in_a_minute();
     each_fixture(true, |f, name| {
-        let key = f.key("9b1c04e2aa71f0c3", 1, None);
-        let e = effect(1);
+        let key = f.key("9b1c04e2aa71f0c3", 1, Some(2));
+        let (e, other) = (effect(1), effect(2));
         f.approved(&key, &e);
-        // The process stops after the consumption: no count, no give-back. The service gets no decision (HTTP 503).
+        f.approved(&key, &other);
+        let before = f.node.state.store.counted_units();
         f.node.state.pdp_fault.store(1, Ordering::SeqCst);
         let crashed = f.post(&f.body(&key, "analytics", Some(&e), true));
         f.node.state.pdp_fault.store(0, Ordering::SeqCst);
+        // The service gets no decision (HTTP 503).
         assert_eq!(crashed.status, 503, "[{name}] {}", crashed.body);
-        // The approval is lost: the agent asks again. It never gives a second execution.
+        assert_eq!(
+            f.node.state.store.counted_units(),
+            before + 1,
+            "[{name}] the unit of the key stays counted"
+        );
+        // The approval is not lost and not consumed.
+        assert!(f.usable(&key, &e), "[{name}] the approval is still usable");
+        assert_eq!(f.metric("consumed"), 0, "[{name}]");
+        // The agent asks again: one execution, and never a second one.
         let mut executions = 0;
         for _ in 0..5 {
             let answer = f.ask(&key, &e, true);
             if answer["decision"] == true {
                 executions += 1;
+            } else {
+                // The budget of the key is 2 each minute: the crash took one unit, the use took the other.
+                assert!(
+                    matches!(
+                        reason(&answer),
+                        Some("approval_required" | "budget_exceeded")
+                    ),
+                    "[{name}] {answer}"
+                );
             }
-            assert_eq!(
-                reason(&answer),
-                Some("approval_required"),
-                "[{name}] {answer}"
-            );
         }
-        assert_eq!(executions, 0, "[{name}]");
+        assert_eq!(executions, 1, "[{name}] one execution");
+        assert_eq!(f.metric("consumed"), 1, "[{name}]");
+        // The over-count is one unit: the second approval meets the spent budget.
         assert_eq!(
-            reason(&f.ask(&key, &e, false)),
-            Some("approval_required"),
+            reason(&f.ask(&key, &other, true)),
+            Some("budget_exceeded"),
             "[{name}]"
         );
+    });
+}
+
+/// The consumption fails with an error of the store, after the count: the units go back, the approval stays usable.
+#[test]
+fn a_failed_consumption_gives_the_units_back_and_leaves_the_approval_usable() {
+    stay_in_a_minute();
+    each_fixture(true, |f, name| {
+        let key = f.key("9b1c04e2aa71f0c3", 1, Some(1));
+        let e = effect(1);
+        f.approved(&key, &e);
+        let before = f.node.state.store.counted_units();
+        f.node.state.pdp_fault.store(3, Ordering::SeqCst);
+        let failed = f.post(&f.body(&key, "analytics", Some(&e), true));
+        f.node.state.pdp_fault.store(0, Ordering::SeqCst);
+        assert_eq!(failed.status, 503, "[{name}] {}", failed.body);
+        assert_eq!(
+            f.node.state.store.counted_units(),
+            before,
+            "[{name}] the units are back"
+        );
+        assert_eq!(f.metric("refunded"), 1, "[{name}]");
+        assert_eq!(f.metric("consumed"), 0, "[{name}]");
+        assert!(f.usable(&key, &e), "[{name}]");
+        // The budget of the key is 1 each minute: the use works, because the unit went back.
+        let used = f.ask(&key, &e, true);
+        assert_eq!(used["decision"], true, "[{name}] {used}");
+        assert_eq!(units(&used), Some(1), "[{name}]");
+    });
+}
+
+/// Callers that use one approval at the same time with a large budget: one `true`, and the units of the others go back.
+#[test]
+fn a_race_for_one_approval_counts_one_use() {
+    each_fixture(true, |f, name| {
+        let key = f.key("9b1c04e2aa71f0c3", 1, Some(1000));
+        for round in 0..5 {
+            let e = effect(100 + round);
+            f.approved(&key, &e);
+            let before = f.node.state.store.counted_units();
+            let (trues, required) = race(f, &key, &e, 6);
+            assert_eq!((trues, required), (1, 5), "[{name}] round {round}");
+            assert_eq!(
+                f.node.state.store.counted_units(),
+                before + 1,
+                "[{name}] round {round}: one use took one unit"
+            );
+        }
     });
 }
 
@@ -775,6 +842,294 @@ fn revoking_a_key_cancels_its_open_approvals() {
             reason(&f.ask(&other, &other_waits, true)),
             Some("approval_pending"),
             "[{name}]"
+        );
+    });
+}
+
+// ---------------------------------------------------------------- who asks: person, key, mcp.session
+
+impl Fixture {
+    /// A person with `data.write` on the host `prod`. `confirm`: the grant has `confirm`.
+    fn person(&self, login: &str, confirm: bool) {
+        let write = Grant::from_path_text("data.write", "db", "host:prod")
+            .unwrap()
+            .with_confirm(confirm);
+        self.person_with(login, vec![write]);
+    }
+
+    /// A person with `access` on the service `db`, the right to use keys, and these grants.
+    fn person_with(&self, login: &str, extra: Vec<Grant>) {
+        let mut grants = vec![
+            Grant::new("access", "db").unwrap(),
+            Grant::parse("keys.own.use on service:portal/key_kind:mcp").unwrap(),
+        ];
+        grants.extend(extra);
+        grants.sort();
+        self.node
+            .state
+            .store
+            .insert_user(&crate::store::UserRow {
+                login: login.into(),
+                password_hash: "h".into(),
+                grants,
+                created_at: 1,
+            })
+            .unwrap();
+        self.node
+            .state
+            .users
+            .refresh(&self.node.state.store)
+            .unwrap();
+    }
+}
+
+/// Protocol 17.8, spec question 51: the `confirm` of a grant of a person has no effect on the questions of the person.
+/// The approval API never gets a person. The same `confirm` asks for the keys of the person.
+#[test]
+fn the_confirm_of_a_person_is_ignored_for_the_person_and_applies_to_the_keys_of_the_person() {
+    each_fixture(true, |f, name| {
+        f.person("carol", true);
+        let e = effect(7);
+        // The person: `true` with no effect, and `true` with an effect and a use. No `evaluation_id`, no reason.
+        for (effect, usage) in [
+            (None, false),
+            (Some(e.as_str()), false),
+            (Some(e.as_str()), true),
+        ] {
+            let reply = f.post(&f.body("carol", "analytics", effect, usage));
+            assert_eq!(reply.status, 200, "[{name}] {}", reply.body);
+            let answer = reply.json();
+            assert_eq!(answer["decision"], true, "[{name}] {answer}");
+            assert!(
+                answer["context"]["evaluation_id"].is_null(),
+                "[{name}] {answer}"
+            );
+            assert!(reason(&answer).is_none(), "[{name}] {answer}");
+        }
+        assert_eq!(
+            f.metric("approval_required"),
+            0,
+            "[{name}] the gate never ran for the person"
+        );
+        // A key of carol: the grant of the owner asks for the key, whatever the grants of the key say.
+        let plain = Grant::from_path_text("data.write", "db", ANALYTICS).unwrap();
+        add_key(
+            &f.node,
+            "5a5a5a5a5a5a5a5a",
+            Some("carol"),
+            9,
+            vec![Grant::new("access", "db").unwrap(), plain],
+        );
+        let answer = f.ask("key:5a5a5a5a5a5a5a5a", &e, false);
+        assert_eq!(answer["decision"], false, "[{name}] {answer}");
+        assert_eq!(reason(&answer), Some("approval_required"), "[{name}]");
+        assert!(answer["context"]["evaluation_id"].is_string(), "[{name}]");
+        // The same grant without `confirm`: the key never asks.
+        f.person("dave", false);
+        add_key(
+            &f.node,
+            "6b6b6b6b6b6b6b6b",
+            Some("dave"),
+            10,
+            vec![
+                Grant::new("access", "db").unwrap(),
+                Grant::from_path_text("data.write", "db", ANALYTICS).unwrap(),
+            ],
+        );
+        let answer = f.ask("key:6b6b6b6b6b6b6b6b", &e, false);
+        assert_eq!(answer["decision"], true, "[{name}] {answer}");
+    });
+}
+
+/// Protocol 17.8: `confirm` has no effect on `mcp.session`, as on `access`. A grant of the data that has it (a file
+/// written by an older version) never makes `initialize` or `ping` fail.
+#[test]
+fn the_confirm_of_a_grant_of_mcp_session_has_no_effect() {
+    each_fixture(true, |f, name| {
+        f.person_with("erin", vec![Grant::new("mcp.session", "db").unwrap()]);
+        let session = Grant::new("mcp.session", "db").unwrap().with_confirm(true);
+        add_key(
+            &f.node,
+            "7c7c7c7c7c7c7c7c",
+            Some("erin"),
+            11,
+            vec![Grant::new("access", "db").unwrap(), session],
+        );
+        let body = json!({
+            "subject": {"type": "user", "id": "key:7c7c7c7c7c7c7c7c"},
+            "action": {"name": "mcp.session"},
+            "resource": {"type": "service", "id": "db"}
+        })
+        .to_string();
+        let reply = f.post(&body);
+        assert_eq!(reply.status, 200, "[{name}] {}", reply.body);
+        let answer = reply.json();
+        assert_eq!(answer["decision"], true, "[{name}] {answer}");
+        assert!(reason(&answer).is_none(), "[{name}] {answer}");
+    });
+}
+
+/// A condition of the owner that can change gives `false` with no reason. `unknown_subject` is for an orphan only.
+#[test]
+fn a_key_whose_owner_lost_the_right_to_use_keys_gets_false_with_no_reason() {
+    each_fixture(true, |f, name| {
+        let key = f.key("9b1c04e2aa71f0c3", 1, None);
+        let e = effect(8);
+        assert_eq!(
+            f.ask(&key, &e, false)["context"]["reason"],
+            "approval_required",
+            "[{name}]"
+        );
+        // The owner loses `keys.own.use`.
+        let without_use: Vec<Grant> = f
+            .node
+            .state
+            .users
+            .grants_of("alice")
+            .unwrap()
+            .into_iter()
+            .filter(|g| g.action != "keys.own.use")
+            .collect();
+        f.node
+            .state
+            .store
+            .update_user("alice", None, Some(&without_use))
+            .unwrap();
+        f.node.state.users.refresh(&f.node.state.store).unwrap();
+        let answer = f.ask(&key, &e, false);
+        assert_eq!(answer["decision"], false, "[{name}] {answer}");
+        assert!(
+            answer.get("context").is_none(),
+            "[{name}] a plain false: {answer}"
+        );
+    });
+}
+
+/// Protocol 17.1: an `evaluation_id` has at most 1024 bytes. A question whose id would be longer gets `false` with no
+/// reason: the PDP gives no approval for it.
+#[test]
+fn an_evaluation_id_above_1024_bytes_is_never_given() {
+    each_fixture(true, |f, name| {
+        let key = f.key("9b1c04e2aa71f0c3", 1, None);
+        // A key with `confirm` on the whole host, so that any database is covered.
+        add_key(
+            &f.node,
+            "8d8d8d8d8d8d8d8d",
+            Some("alice"),
+            12,
+            vec![
+                Grant::new("access", "db").unwrap(),
+                Grant::from_path_text("data.write", "db", "host:prod")
+                    .unwrap()
+                    .with_confirm(true),
+            ],
+        );
+        let wide = "key:8d8d8d8d8d8d8d8d";
+        let e = effect(9);
+        let normal = f.ask(wide, &e, false);
+        let id = normal["context"]["evaluation_id"].as_str().unwrap();
+        assert!(id.len() <= 1024, "[{name}] {}", id.len());
+        // A database id of 256 bytes of a multi-byte character, percent-encoded in the sealed facts.
+        let long = "\u{20ac}".repeat(85);
+        let _ = &key;
+        let reply = f.post(&f.body(wide, &long, Some(&e), false));
+        assert_eq!(reply.status, 200, "[{name}] {}", reply.body);
+        let answer = reply.json();
+        assert_eq!(answer["decision"], false, "[{name}] {answer}");
+        assert!(
+            answer["context"]["evaluation_id"].is_null() && reason(&answer).is_none(),
+            "[{name}] {answer}"
+        );
+    });
+}
+
+// ---------------------------------------------------------------- other permissions of an operation (spec Q53)
+
+/// A question with `context.permission_only` for a grant with `confirm`.
+fn marked(f: &Fixture, subject: &str, context: Value) -> Reply {
+    f.post(
+        &json!({
+            "subject": {"type": "user", "id": subject},
+            "action": {"name": "data.write"},
+            "resource": {"type": "database", "id": "analytics", "properties": {"ancestors": [
+                {"type": "service", "id": "db"}, {"type": "host", "id": "prod"}]}},
+            "context": context
+        })
+        .to_string(),
+    )
+}
+
+/// The approval follows the action of the use alone (protocol 5.5a, 17.1). The question of another permission carries
+/// `context.permission_only`: the PDP ignores `confirm` for it, with no reason of 17.1 and no `evaluation_id`.
+#[test]
+fn a_question_of_another_permission_never_asks_for_an_approval() {
+    each_fixture(true, |f, name| {
+        let key = f.key("9b1c04e2aa71f0c3", 1, None);
+        // Without the marker: the grant has `confirm`, so the use asks for an approval.
+        let plain = marked(f, &key, json!({})).json();
+        assert_eq!(
+            reason(&plain),
+            Some("approval_required"),
+            "[{name}] {plain}"
+        );
+        // With the marker: a plain `true`.
+        let reply = marked(f, &key, json!({"permission_only": true}));
+        assert_eq!(reply.status, 200, "[{name}] {}", reply.body);
+        let answer = reply.json();
+        assert_eq!(answer["decision"], true, "[{name}] {answer}");
+        assert!(
+            answer["context"]["reason"].is_null() && answer["context"]["evaluation_id"].is_null(),
+            "[{name}] {answer}"
+        );
+        // The marker limits the scope: the key still needs the grant.
+        add_key(
+            &f.node,
+            "3e3e3e3e3e3e3e3e",
+            Some("alice"),
+            20,
+            vec![Grant::new("access", "db").unwrap()],
+        );
+        let none = marked(f, "key:3e3e3e3e3e3e3e3e", json!({"permission_only": true})).json();
+        assert_eq!(none["decision"], false, "[{name}] {none}");
+        assert!(none.get("context").is_none(), "[{name}] {none}");
+        // The marker with a use, with an effect, or with another value is a bad request.
+        for bad in [
+            json!({"permission_only": true, "usage": {"units": 1}}),
+            json!({"permission_only": true, "approval": {"effect": effect(1)}}),
+            json!({"permission_only": false}),
+            json!({"permission_only": "true"}),
+        ] {
+            let reply = marked(f, &key, bad.clone());
+            assert_eq!(reply.status, 400, "[{name}] {bad}: {}", reply.body);
+        }
+        // In a batch, the item gets `invalid_request`.
+        let item = |context: Value| {
+            json!({
+                "subject": {"type": "user", "id": key},
+                "action": {"name": "data.write"},
+                "resource": {"type": "database", "id": "analytics", "properties": {"ancestors": [
+                    {"type": "service", "id": "db"}, {"type": "host", "id": "prod"}]}},
+                "context": context
+            })
+        };
+        let batch = json!({"evaluations": [item(json!({"permission_only": true})), item(json!({"permission_only": 1})), item(json!({}))]});
+        let reply = f.post_to("/access/v1/evaluations", &batch.to_string());
+        assert_eq!(reply.status, 200, "[{name}] {}", reply.body);
+        let answers = reply.json()["evaluations"].clone();
+        assert_eq!(answers[0]["decision"], true, "[{name}] {answers}");
+        assert_eq!(
+            answers[1]["context"]["reason"], "invalid_request",
+            "[{name}] {answers}"
+        );
+        assert_eq!(
+            answers[2]["context"]["reason"], "approval_required",
+            "[{name}] {answers}"
+        );
+        // No request is ever made for the marked question: the approval API sees none.
+        assert_eq!(
+            f.metric("approval_required"),
+            2,
+            "[{name}] only the two unmarked questions"
         );
     });
 }

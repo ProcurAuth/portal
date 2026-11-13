@@ -3,7 +3,11 @@ package app.portalinbox.core
 /** One field of a resolved view: the label of the template and the value of `op` that its pointer names. */
 data class ResolvedField(val label: String, val value: String)
 
-/** The view of an approval with the values of `op`. `body` is the command: the text that will run. */
+/**
+ * The view of an approval with the values of `op`. `body` is the command: the text that will run. An empty `title` means
+ * that the view has none, and an empty `body` means that the request has no command text (ProcurAuth 17.9).
+ * [ShownEffect] puts the name of the action in an empty title.
+ */
 data class ResolvedView(
     val title: String,
     val fields: List<ResolvedField>,

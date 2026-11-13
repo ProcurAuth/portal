@@ -925,9 +925,11 @@ fn check_approvals(config: &Config) -> Result<(), String> {
             config.inbox.as_ref().and_then(|i| i.approvals.as_ref()),
             config.pdp.as_ref(),
         ) {
-            if approvals.max_command_bytes > pdp.max_body_bytes {
+            // The body of a submission holds the command and the other members: `evaluation_id` (1024 bytes at most),
+            // `effect`, the control of the wait and `supersedes`.
+            if approvals.max_command_bytes + SUBMISSION_OVERHEAD_BYTES > pdp.max_body_bytes {
                 return Err(format!(
-                    "inbox.approvals.max_command_bytes must be at most pdp.max_body_bytes: max_command_bytes is {}, pdp.max_body_bytes is {}",
+                    "inbox.approvals.max_command_bytes plus {SUBMISSION_OVERHEAD_BYTES} bytes for the other members of a submission must be at most pdp.max_body_bytes: max_command_bytes is {}, pdp.max_body_bytes is {}; raise pdp.max_body_bytes or lower max_command_bytes",
                     approvals.max_command_bytes, pdp.max_body_bytes
                 ));
             }
@@ -935,6 +937,9 @@ fn check_approvals(config: &Config) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// The room that the body of a submission to the approval API needs beyond the command (protocol 17.4).
+const SUBMISSION_OVERHEAD_BYTES: usize = 2048;
 
 /// The block `inbox.mcp` needs the keys of the kind `mcp`, and its path must not be the path of the metrics.
 fn check_mcp(config: &Config) -> Result<(), String> {

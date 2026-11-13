@@ -297,23 +297,31 @@ data class Follows(val code: String, val intent: Intent) {
     fun toJson(): JSONObject = JSONObject().put("code", code).put("intent", intent.wire)
 }
 
-/** A template over `op`. The phone gets the values from the native `viewResolve`. */
+/**
+ * A template over `op`. The phone gets the values from the native `viewResolve`. Each member is optional (ProcurAuth 17.9).
+ * An empty `title` means that the view has none: the screen shows the name of the action. An empty `body` means that the
+ * request has no command text. No field is an empty list. A frame of an older server always has the three members, and a
+ * frame that omits them is valid.
+ */
 data class ViewSpec(val title: String, val fields: List<Pair<String, String>>, val body: String, val bodyLabel: String?) {
-    fun toJson(): JSONObject = JSONObject().put("title", title)
-        .put("fields", JSONArray(fields.map { JSONArray(listOf(it.first, it.second)) }))
-        .put("body", body).putOpt("body_label", bodyLabel)
+    fun toJson(): JSONObject = JSONObject().apply {
+        if (title.isNotEmpty()) put("title", title)
+        if (fields.isNotEmpty()) put("fields", JSONArray(fields.map { JSONArray(listOf(it.first, it.second)) }))
+        if (body.isNotEmpty()) put("body", body)
+        putOpt("body_label", bodyLabel)
+    }
 
     companion object {
         internal fun read(o: Obj): ViewSpec {
-            val title = o.str("title")
-            val fields = o.arr("fields").let { a ->
+            val title = o.optStr("title") ?: ""
+            val fields = if (!o.has("fields")) emptyList() else o.arr("fields").let { a ->
                 (0 until a.length()).map { n ->
                     val pair = a.get(n) as? JSONArray ?: Check.bad("approval.view")
                     if (pair.length() != 2) Check.bad("approval.view")
                     (pair.get(0) as? String ?: Check.bad("approval.view")) to (pair.get(1) as? String ?: Check.bad("approval.view"))
                 }
             }
-            val v = ViewSpec(title, fields, o.str("body"), o.optStr("body_label"))
+            val v = ViewSpec(title, fields, o.optStr("body") ?: "", o.optStr("body_label"))
             o.done()
             v.checkShape()
             return v
@@ -321,7 +329,7 @@ data class ViewSpec(val title: String, val fields: List<Pair<String, String>>, v
     }
 
     private fun checkShape() {
-        Check.line(title, MAX_VIEW_TITLE_CHARS, "approval.view")
+        if (title.isNotEmpty()) Check.line(title, MAX_VIEW_TITLE_CHARS, "approval.view")
         if (fields.size > MAX_VIEW_FIELDS) Check.bad("approval.view")
         bodyLabel?.let { Check.line(it, MAX_VIEW_LABEL_CHARS, "approval.view") }
         for ((label, ptr) in fields) {

@@ -377,7 +377,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Duration { min: secs(1), max: secs(MINUTE) },
         presence: Presence::Default("10s"),
         when: When::Always,
-        doc: "The time that a client has to send the request headers.",
+        doc: "The time that a client has to send the request headers. On the PDP listener it is also the longest time that a connection stays open with no request: the metadata publishes it as `procurauth_idle_max_seconds`, and a service closes an idle connection before this time.",
     },
     Key {
         block: "server",
@@ -493,7 +493,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Duration { min: secs(MINUTE), max: secs(7 * DAY) },
         presence: Presence::Default("1h"),
         when: When::Always,
-        doc: "The longest time that the server keeps the last good document of a service after its last good read. After this time, the server acts as if the service had no good document. The edge also refuses each key for this service. The value must be more than `access.actions_refresh`.",
+        doc: "The longest time that the server keeps the last good document of a service after its last good read. After this time, the server acts as if the service had no good document (protocol 5.3a, 11.1): the PDP answers `false` with no reason for each question of the service, except `access` on the whole service. The edge never refuses a person or a key because of the age of the document: `access` stays `true` (protocol 8.3), and the service then gets `false` for each other question. The value must be more than `access.actions_refresh`.",
     },
     Key {
         block: "access",
@@ -593,15 +593,15 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Size { min: 1024, max: 1024 * 1024 },
         presence: Presence::Default("64KiB"),
         when: When::PdpBlock,
-        doc: "The largest request body that the PDP reads.",
+        doc: "The largest request body that the PDP reads. The metadata publishes it as `procurauth_evaluations_max_bytes`. With the approval API, the body of a submission holds the command and some more members, so this value is at least `inbox.approvals.max_command_bytes` and 2 KiB more.",
     },
     Key {
         block: "pdp",
         name: "max_evaluations",
         kind: Kind::Int { min: 1, max: 1024 },
-        presence: Presence::Default("64"),
+        presence: Presence::Default("128"),
         when: When::PdpBlock,
-        doc: "The largest number of evaluations in one request to `/access/v1/evaluations`.",
+        doc: "The largest number of evaluations in one request to `/access/v1/evaluations`. The metadata publishes it as `procurauth_evaluations_max_items`, and a service splits its questions to fit. ClickHouse Dash sends up to 100 questions in one request, so keep the value at 100 or more.",
     },
     Key {
         block: "pdp",
@@ -1600,7 +1600,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Size { min: 1024, max: 32 * 1024 },
         presence: Presence::Default("16KiB"),
         when: When::Always,
-        doc: "The largest command (`op` and `view`, as compact JSON) that the approval API accepts. A larger command gets `413 command_too_large`, and the service refuses the action. It must not be above `pdp.max_body_bytes`.",
+        doc: "The largest command (`op` and `view`, as compact JSON) that the approval API accepts. A larger command gets `413 command_too_large`, and the service refuses the action. The PDP publishes the value as `procurauth_approval_max_command_bytes`. The body of a submission holds the command and some more members (`evaluation_id`, `effect`, the wait), so this value plus 2048 bytes must not be above `pdp.max_body_bytes`.",
     },
     Key {
         block: "inbox.approvals",

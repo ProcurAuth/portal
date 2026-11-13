@@ -1,6 +1,7 @@
 //! The conformance cases of the series D (a PDP) and E (an edge) of the protocol, driven over HTTP.
 //! The cases come from the public repository of the protocol. The tests read the path of its
-//! directory `conformance/` in `PROCURAUTH_CONFORMANCE`. Without this variable, they do nothing.
+//! directory `conformance/` in `PROCURAUTH_CONFORMANCE`. Without this variable, they do nothing, unless
+//! `PROCURAUTH_CONFORMANCE_REQUIRED=1`: then they fail (CI sets it, so a run never passes without the cases).
 //! The servers and the helpers come from `cluster_tests`.
 
 use std::net::TcpStream;
@@ -23,7 +24,12 @@ mod conformance_d {
     use sha2::{Digest, Sha256};
 
     fn conformance_dir() -> Option<std::path::PathBuf> {
-        std::env::var_os("PROCURAUTH_CONFORMANCE").map(std::path::PathBuf::from)
+        let dir = std::env::var_os("PROCURAUTH_CONFORMANCE").map(std::path::PathBuf::from);
+        if dir.is_none() && std::env::var("PROCURAUTH_CONFORMANCE_REQUIRED").is_ok_and(|v| v == "1")
+        {
+            panic!("PROCURAUTH_CONFORMANCE_REQUIRED=1 and PROCURAUTH_CONFORMANCE is not set: the cases of the protocol are missing");
+        }
+        dir
     }
 
     fn read_json(path: &std::path::Path) -> Value {
@@ -713,7 +719,12 @@ mod conformance_e {
     }
 
     fn conformance_dir() -> Option<std::path::PathBuf> {
-        std::env::var_os("PROCURAUTH_CONFORMANCE").map(std::path::PathBuf::from)
+        let dir = std::env::var_os("PROCURAUTH_CONFORMANCE").map(std::path::PathBuf::from);
+        if dir.is_none() && std::env::var("PROCURAUTH_CONFORMANCE_REQUIRED").is_ok_and(|v| v == "1")
+        {
+            panic!("PROCURAUTH_CONFORMANCE_REQUIRED=1 and PROCURAUTH_CONFORMANCE is not set: the cases of the protocol are missing");
+        }
+        dir
     }
 
     /// What the service behind the edge got.

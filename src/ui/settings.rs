@@ -473,6 +473,9 @@ pub struct ServiceActions {
     pub critical: Vec<String>,
     /// Where the document comes from and how old the copy is. The forms of the keys show it.
     pub source: crate::actions::Source,
+    /// The file has the block `inbox.approvals`: the PDP can ask for the approval of a person. Without it, a grant with
+    /// `confirm` is a plain refusal, so the editor shows no lock.
+    pub approvals: bool,
 }
 
 impl ServiceActions {
@@ -677,6 +680,7 @@ pub fn user_page(frame: &Frame, view: &UserView) -> String {
             stored,
             true,
         );
+        data.person = true;
         data.locked = user.grants.iter().filter(|g| fixed(g)).cloned().collect();
         for grant in data.locked.clone() {
             data.keep(&grant);
@@ -1161,7 +1165,7 @@ pub fn new_user_page(frame: &Frame, view: &NewUserView) -> String {
     if view.services.is_empty() && view.features.is_none() {
         out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has the catalogue labels.</p>"#);
     } else {
-        let data = grant_editor::build(
+        let mut data = grant_editor::build(
             &view.services,
             view.features.as_ref(),
             None,
@@ -1171,6 +1175,7 @@ pub fn new_user_page(frame: &Frame, view: &NewUserView) -> String {
                 .map_or_else(Vec::new, |r| r.grants.clone()),
             true,
         );
+        data.person = true;
         grant_editor::render(
             &mut out,
             &data,
@@ -2971,6 +2976,7 @@ mod tests {
         }]);
         let mut actions = services();
         actions.push(ServiceActions {
+            approvals: true,
             external: true,
             id,
             name,

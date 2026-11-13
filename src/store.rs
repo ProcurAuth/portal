@@ -687,6 +687,12 @@ impl Store {
         backend!(self.count(table))
     }
 
+    /// The sum of the units of all the counters. The tests use it to see what a use counted.
+    #[cfg(test)]
+    pub fn counted_units(&self) -> i64 {
+        backend!(self.counted_units())
+    }
+
     /// Runs SQL that the test needs, for example to remove a row. Not for the program.
     #[cfg(test)]
     pub fn execute_raw(&self, sql: &str) {
@@ -819,6 +825,17 @@ impl Store {
         clock: Option<f64>,
     ) -> Result<CountOutcome, String> {
         backend!(self.count_use(counters, clock))
+    }
+
+    /// Gives back the unit that [`Store::count_use`] took from each counter, when the window of the
+    /// counter has not ended. The PDP uses it when it counted a use and then could not consume the
+    /// approval of the use (portal 7.7d). `clock` is as for `count_use`.
+    pub fn refund_use(
+        &self,
+        counters: &[crate::decision::Counter],
+        clock: Option<f64>,
+    ) -> Result<(), String> {
+        backend!(self.refund_use(counters, clock))
     }
 
     /// Makes the counter rows that the table does not hold yet (portal 7.2a). Returns the number of
@@ -1622,6 +1639,27 @@ mod tests {
                 store.insert_key(&key("k8", Some("nobody"), 8), &caps()),
                 Err(KeyWriteError::UnknownOwner)
             );
+        });
+    }
+
+    /// The largest limit is 2^53 - 1 (protocol 6.1): the database keeps the value as it is, and the read back accepts it.
+    #[test]
+    fn the_largest_limit_value_comes_back_exact_on_both_backends() {
+        each_backend(|backend| {
+            let store = backend.fresh();
+            let limits = crate::limits::Limits::from_json(
+                r#"{"max_read_size":9007199254740991,"max_rows":5000000000}"#,
+            )
+            .unwrap();
+            let big = Grant::from_path_text("query.run.read", "db", "host:prod")
+                .unwrap()
+                .with_limits(limits.clone());
+            let mut alice = user("alice", &[]);
+            alice.grants = vec![big.clone()];
+            store.insert_user(&alice).unwrap();
+            let back = store.load_directory().unwrap().users;
+            assert_eq!(back[0].grants, vec![big]);
+            assert_eq!(back[0].grants[0].limits, limits);
         });
     }
 

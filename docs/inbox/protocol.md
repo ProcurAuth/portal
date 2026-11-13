@@ -344,7 +344,7 @@ Members of an approval: the member `approval` only.
 | `subject` | string | One line, 1 to 128 characters. |
 | `effect` | string | `sha256:` and 64 lowercase hexadecimal digits. See "Effect". |
 | `op` | object | The operation. Strict rules of the effect. `op` and `view` together have at most 32768 bytes. |
-| `view` | object | `{title, fields[], body, body_label?}`. See "Effect". |
+| `view` | object | `{title?, fields?, body?, body_label?}`. Each member is optional. See "Effect". |
 | `explanation` | string, optional | Text of the agent, not verified. 1 to 8000 characters. It is not part of the effect. |
 | `explanation_format` | string, optional | `plain` (the default) or `markdown`. Only with `explanation`. |
 | `language` | string, optional | A hint for the color of the command. It is not part of the effect. See "Text format and code color". |
@@ -817,10 +817,13 @@ A `view` is a template over `op`. It is not part of the effect.
 
 | Member of `view` | Rule |
 |---|---|
-| `title` | One line, 1 to 128 characters. |
-| `fields[]` | 0 to 12 pairs `[label, pointer]`. `label` is one line of 1 to 48 characters. |
-| `body` | A pointer to the command. It names a string. |
-| `body_label` | Optional. One line, 1 to 48 characters. |
+| `title` | Optional. One line, 1 to 128 characters. Absent: the screen shows the name of the action. |
+| `fields[]` | Optional. 0 to 12 pairs `[label, pointer]`. `label` is one line of 1 to 48 characters. Absent: no field. |
+| `body` | Optional. A pointer to the command. It names a string. Absent: the request has no command text. |
+| `body_label` | Optional. One line, 1 to 48 characters. It has no effect without `body`. |
+
+The view `{}` is valid (protocol 17.9). The phone and the web page then show the name of the action as the title and no field. They show no command text, and a fixed sentence says that the service gave no command.
+A frame can omit a member of `view`. The phone of version 5.4.0 reads only a view with `title`, `fields` and `body`, and it shows another view as invalid.
 
 A pointer is an RFC 6901 JSON Pointer of at most 256 bytes.
 It must name a value of `op`.
@@ -832,7 +835,7 @@ The short form of an effect for the screen is its first 8 hexadecimal digits.
 The screen shows it after `sha256:`.
 
 The JNI functions `effectCompute(service, action, resource, opJson)` and `viewResolve(opJson, viewJson)` give these results.
-Both return JSON text: `{"effect":"sha256:..."}`, `{"view":{...}}` or `{"error":{"code","message"}}`.
+Both return JSON text: `{"effect":"sha256:..."}`, `{"view":{...}}` or `{"error":{"code","message"}}`. In `view`, the members `title` and `body` are absent when the view has none.
 The vectors of the rule are in `crates/inbox-core/tests/fixtures/effect-vectors.json`.
 
 ## States of an item

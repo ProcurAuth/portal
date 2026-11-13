@@ -169,7 +169,58 @@ SELECT v.n, v.ok,
        (SELECT array_agg((start + len - t)::float8) FROM state WHERE cur + 1 > amount)
   FROM verdict v";
 
+/// Gives back the unit that `COUNT_USE` took from each counter, when the window of the counter is the current window.
+const REFUND_USE: &str = "
+WITH want AS (
+  SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[],
+                       $7::bigint[], $8::bigint[])
+         AS w(login, key_id, file_subject, service, budget, win, amount, len)
+), clock AS (
+  SELECT COALESCE($9::float8, extract(epoch FROM clock_timestamp())::float8) AS t
+)
+UPDATE budget_counters c SET units = c.units - 1
+  FROM want w CROSS JOIN clock
+ WHERE c.service = w.service AND c.budget = w.budget AND c.\"window\" = w.win
+   AND ((w.login IS NOT NULL AND c.user_id = (SELECT u.id FROM users u WHERE u.login = w.login))
+     OR (w.key_id IS NOT NULL AND c.key_id = w.key_id)
+     OR (w.file_subject IS NOT NULL AND c.file_subject = w.file_subject))
+   AND c.window_start = (floor(clock.t / w.len)::bigint) * w.len
+   AND c.units > 0";
+
 impl Pg {
+    /// Gives back the unit that `count_use` took from each counter, when the window of the counter is still the
+    /// current window. A counter that has no row, or whose window ended, stays as it is.
+    pub fn refund_use(&self, counters: &[Counter], clock: Option<f64>) -> Result<(), String> {
+        let mut columns = Columns::default();
+        for counter in counters {
+            columns.push(&counter.owner, &counter.id, counter.amount);
+        }
+        let mut conn = self.counters.get()?;
+        let done = conn.execute(
+            REFUND_USE,
+            &[
+                &columns.login,
+                &columns.key,
+                &columns.file,
+                &columns.service,
+                &columns.budget,
+                &columns.window,
+                &columns.amount,
+                &columns.length,
+                &clock,
+            ],
+        );
+        match done {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                if conn.is_closed() || error.code() != Some(&SqlState::QUERY_CANCELED) {
+                    conn.discard();
+                }
+                Err(db(error))
+            }
+        }
+    }
+
     pub fn count_use(
         &self,
         counters: &[Counter],
