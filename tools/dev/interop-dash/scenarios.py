@@ -685,7 +685,7 @@ def s8(sc):
     loc = CTX.get("last_location", "")
     text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", re.sub(r"<script.*?</script>", "", page, flags=re.S)))
     sc.check(key is None, "the form of a key refuses confirm on mcp.session: no key is made (HTTP %s %s)" % (s_, loc), text[:300])
-    sc.check("bad_grant" in loc or "bad_grant" in text or "grant" in (loc + text).lower(), "the refusal names a bad grant", (loc, text[:300]))
+    sc.check("bad_confirm" in loc or "bad-confirm" in loc or "bad_confirm" in text or "confirm" in (loc + text).lower(), "the refusal names the lock confirm", (loc, text[:300]))
     model = editor_model(admin, "alice")
     svc = next((x for x in model.get("services", []) if x.get("id") == SERVICE), {})
     locks = {a["name"]: a.get("approval") for a in svc.get("actions", [])}

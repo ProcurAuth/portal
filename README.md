@@ -2493,8 +2493,8 @@ Version 5.5.0 aligns the portal with the ProcurAuth specification of 2026-11-13.
 - A question with `context.permission_only` set to `true` marks a permission that is not the action of the use. The PDP ignores `confirm` for it. A marker with `context.usage`, with `context.approval` or with another value gives HTTP 400. Put `confirm` on the action of the use, for example `query.export` for `export_query`.
 - The largest value of a limit is now 9007199254740991 (2^53 - 1). Before, it was 1,000,000,000. A value that was valid stays valid.
 - The metadata of the PDP now has `procurauth_idle_max_seconds`, `procurauth_evaluations_max_bytes`, `procurauth_evaluations_max_items` and `procurauth_usage_max_seconds`. The default of `pdp.max_evaluations` is now 128. It was 64.
-- The portal counts the use first and then consumes the approval. If the consumption fails, the units go back. The metric `portal_budget_refunds_total` counts these refunds. The portal never loses an approval and never consumes it twice. A failure can leave one unit counted.
-- A missing right `keys.own.use` and a key over `max_key_lifetime` now give a plain `false` with no reason. The reason `unknown_subject` is only for an orphan.
+- The portal counts the use first and then consumes the approval. If the consumption fails, the portal gives the units again. The metric `portal_budget_refunds_total` counts these refunds. The portal never loses an approval and never consumes it twice. A failure can leave one unit counted.
+- A right `keys.own.use` that the owner lacks, and a key over `max_key_lifetime` now give a plain `false` with no reason. The reason `unknown_subject` is only for an orphan.
 - The edge of the keys no longer refuses a key because the actions document is old. The key keeps the right `access`.
 - The grant editor shows the lock `confirm` only when the file has the block `inbox.approvals`. It has no lock on `access` and on `mcp.session`.
 - The start now checks that `inbox.approvals.max_command_bytes` plus 2048 bytes is at most `pdp.max_body_bytes`.

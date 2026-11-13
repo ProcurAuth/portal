@@ -175,6 +175,8 @@ pub const BAD_INTERACTION: &str = "bad_interaction";
 pub const BAD_AGENTS: &str = "bad_agents";
 /// A right on a service, and no grant `access` on this service.
 pub const NEEDS_ACCESS: &str = "needs_access";
+/// A grant has `confirm`, and its service or its action cannot ask for an approval.
+pub const BAD_CONFIRM: &str = "bad_confirm";
 
 /// Checks the expiry date of a new key (portal 5.3, 5.3a).
 fn check_expiry(text: Option<&str>, ctx: &Context<'_>) -> Result<Option<i64>, &'static str> {
@@ -364,7 +366,7 @@ fn check_grants_apart(
         let confirm = raw.confirm.contains(&n);
         // The service `portal` and the action `access` have no approval.
         if confirm && crate::grants::confirm_refusal(&grant).is_some() {
-            return Err(BAD_GRANT);
+            return Err(BAD_CONFIRM);
         }
         // An external service has no document and no action. A key never holds a right on it. An account holds
         // `access` on the whole service and nothing else, whatever it held before.
@@ -1313,7 +1315,7 @@ mod tests {
         asking.sort();
         assert_eq!(asking, ["data.purge", "data.read"]);
         // The action `access` cannot ask, and a blank grant has no confirm.
-        assert_eq!(form(&[("confirm0", "1")]), Err(BAD_GRANT));
+        assert_eq!(form(&[("confirm0", "1")]), Err(BAD_CONFIRM));
         assert_eq!(form(&[("confirm5", "1")]), Err(BAD_GRANT));
         // The service `portal` cannot ask, even for an action that a key may hold.
         let alerts = run_api(
@@ -1324,7 +1326,7 @@ mod tests {
             ],
             None,
         );
-        assert_eq!(alerts, Err(BAD_GRANT));
+        assert_eq!(alerts, Err(BAD_CONFIRM));
         // The field has one value: 1. Another value is a bad request.
         for bad in ["0", "true", "", "yes", "2"] {
             assert!(
@@ -1469,12 +1471,13 @@ mod tests {
             };
             assert_eq!(
                 check_form(&asking("mcp.session on service:datastore")),
-                Err(BAD_GRANT),
+                Err(BAD_CONFIRM),
                 "{holder:?}"
             );
+            // The grant `access` itself has the lock.
             assert_eq!(
-                check_form(&asking("access on service:datastore")),
-                Err(BAD_GRANT),
+                check_form(&[("grant0", "access on service:datastore"), ("confirm0", "1")]),
+                Err(BAD_CONFIRM),
                 "{holder:?}"
             );
         }

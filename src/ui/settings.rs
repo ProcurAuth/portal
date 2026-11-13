@@ -209,6 +209,10 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             "A limit value is not valid for this grant: a whole number in the range of the limit, from the document of the service.",
             false,
         ),
+        "bad-confirm" => (
+            "The lock confirm is not valid for this permission: the action access, the action mcp.session and the service portal cannot ask for an approval. Remove the lock, then save.",
+            false,
+        ),
         "needs-access" => (
             "A permission on a service needs the switch Open on that service. Tick the switch, then save.",
             false,
@@ -3230,9 +3234,13 @@ mod tests {
             "password-reset",
             "user-updated",
             "unknown-grant",
+            "bad-confirm",
         ] {
             assert!(notice_for(code).is_some(), "{code}");
         }
+        // The refusal of a lock names the lock, so the person knows what to remove.
+        let text = notice_for("bad-confirm").unwrap().text;
+        assert!(text.contains("confirm") && text.contains("mcp.session"));
     }
 
     #[test]

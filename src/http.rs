@@ -3690,6 +3690,7 @@ fn account_grants(
                 GrantsError::Refused(match code {
                     key_forms::BAD_LIMITS => "bad-limits",
                     key_forms::NEEDS_ACCESS => "needs-access",
+                    key_forms::BAD_CONFIRM => "bad-confirm",
                     _ => unknown_code,
                 })
             })

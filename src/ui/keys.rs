@@ -202,6 +202,10 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             "A permission is not valid: its text, its action, its place in the tree of the service, or the number of permissions.",
             false,
         ),
+        "bad_confirm" => (
+            "The lock confirm is not valid for this permission: the action access, the action mcp.session and the service portal cannot ask for an approval.",
+            false,
+        ),
         "not_covered" => (
             "Your account does not hold a permission of this key.",
             false,
