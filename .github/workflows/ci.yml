@@ -36,8 +36,7 @@ jobs:
       - uses: actions/checkout@v4
       # The tests of the series D (the PDP) and E (the edge) of the protocol read the cases of the procurauth repository.
       # The step pins one commit, so a change of the protocol never breaks a run by itself.
-      # TODO(lot PS1, merge): the commit below is the tip of the branch lot/PS1 of procurauth. After the merge of this
-      # branch into main of procurauth, replace it with the commit of the merge. Never leave a commit that is not on main.
+      # The commit below is on main of procurauth. Never pin a commit that is not on main.
       - name: Check out the conformance cases of the protocol
         uses: actions/checkout@v4
         with:
