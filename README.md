@@ -2484,6 +2484,22 @@ Version 5.1.0 adds the agents of a key. Read these points before you upgrade fro
 - The Android app of 5.1.0 and the server of 5.1.0 go together. The app keeps its portals when it updates from an earlier build, and it drops its local items: they come back from the server at the next connection. A phone of an earlier build cannot read the new frames of the agents. Update the app and the server in one step.
 
 
+Version 5.5.0 aligns the portal with the ProcurAuth specification of 2026-11-13. It changes no table of the database. Read these points before you upgrade from 5.4.x:
+
+- The database has no change. No migration file is needed.
+- A view of an approval can now have no title, no fields and no body. The phone shows the name of the action as the title. A phone of 5.4.0 shows such a request as not valid. Install the APK of 5.5.0 before a service sends a view without members.
+- The `confirm` of the grant of a person has no effect on the own questions of that person. It applies to the keys and the agents of the person. The PDP never gives an approval to a person, and the approval API never gets one.
+- A grant with `confirm` on the action `mcp.session` is refused. The forms and the key forms refuse it. A file that has it stops at start. The PDP ignores it in the data of an older database.
+- A question with `context.permission_only` set to `true` marks a permission that is not the action of the use. The PDP ignores `confirm` for it. A marker with `context.usage`, with `context.approval` or with another value gives HTTP 400. Put `confirm` on the action of the use, for example `query.export` for `export_query`.
+- The largest value of a limit is now 9007199254740991 (2^53 - 1). Before, it was 1,000,000,000. A value that was valid stays valid.
+- The metadata of the PDP now has `procurauth_idle_max_seconds`, `procurauth_evaluations_max_bytes`, `procurauth_evaluations_max_items` and `procurauth_usage_max_seconds`. The default of `pdp.max_evaluations` is now 128. It was 64.
+- The portal counts the use first and then consumes the approval. If the consumption fails, the units go back. The metric `portal_budget_refunds_total` counts these refunds. The portal never loses an approval and never consumes it twice. A failure can leave one unit counted.
+- A missing right `keys.own.use` and a key over `max_key_lifetime` now give a plain `false` with no reason. The reason `unknown_subject` is only for an orphan.
+- The edge of the keys no longer refuses a key because the actions document is old. The key keeps the right `access`.
+- The grant editor shows the lock `confirm` only when the file has the block `inbox.approvals`. It has no lock on `access` and on `mcp.session`.
+- The start now checks that `inbox.approvals.max_command_bytes` plus 2048 bytes is at most `pdp.max_body_bytes`.
+- The CI runs the series D and E of the conformance cases. The script `tools/dev/interop-dash.sh` runs the real portal with the real ClickHouse Dash.
+
 Version 5.4.0 gives an external service a description and an icon of its own. It adds the block `external_service` to the file. It adds three columns to the database, and it makes the rule of the link stricter. Read these points before you upgrade from 5.3.x:
 
 - The block `external_service "<name>"` is new and optional. It has the keys `href` (mandatory), `description`, `icon` and `icon_path`. See "External services" and the reference of the block. Without the block, nothing changes in the file.
