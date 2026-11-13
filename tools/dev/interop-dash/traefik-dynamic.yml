@@ -1,0 +1,61 @@
+# The routes of the edge of tools/dev/interop-dash.sh. The file provider is the only provider: Traefik has no Docker socket.
+# The pages of Dash are under /dash. Traefik removes the prefix after the check, so Dash sees its own paths.
+http:
+  middlewares:
+    # The ForwardAuth of the persons: the session cookie.
+    portal-user:
+      forwardAuth:
+        address: "http://portal:4181/auth/verify"
+        trustForwardHeader: false
+        maxResponseBodySize: 4096
+        preserveLocationHeader: true
+        authRequestHeaders: ["Cookie", "User-Agent"]
+        authResponseHeaders: ["X-Identity-Token"]
+    # The ForwardAuth of the keys: the header Authorization.
+    portal-key:
+      forwardAuth:
+        address: "http://portal:4181/auth/verify-key"
+        trustForwardHeader: false
+        maxResponseBodySize: 4096
+        authRequestHeaders: ["Authorization"]
+        authResponseHeaders: ["X-Identity-Token"]
+    # Dash never sees the key.
+    drop-authorization:
+      headers:
+        customRequestHeaders:
+          Authorization: ""
+    portal-key-chain:
+      chain:
+        middlewares: ["portal-key", "drop-authorization"]
+    strip-dash:
+      stripPrefix:
+        prefixes: ["/dash"]
+  routers:
+    portal-auth:
+      rule: PathPrefix(`/auth/`) || Path(`/`)
+      entryPoints: [web]
+      priority: 50000
+      service: portal
+    # An agent: Authorization: Bearer mcp_... on the MCP endpoint and on the API of the pages.
+    dash-key:
+      rule: (Path(`/dash/mcp`) || PathPrefix(`/dash/api/`)) && HeaderRegexp(`Authorization`, `^Bearer mcp_`)
+      entryPoints: [web]
+      priority: 200
+      middlewares: [portal-key-chain, strip-dash]
+      service: dash
+    # A person: the session cookie.
+    dash-user:
+      rule: PathPrefix(`/dash`)
+      entryPoints: [web]
+      priority: 100
+      middlewares: [portal-user, strip-dash]
+      service: dash
+  services:
+    portal:
+      loadBalancer:
+        servers:
+          - url: "http://portal:4181"
+    dash:
+      loadBalancer:
+        servers:
+          - url: "http://dash:8080"

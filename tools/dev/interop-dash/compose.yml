@@ -1,0 +1,133 @@
+# The throwaway stack of tools/dev/interop-dash.sh. Do not start it by hand: the script makes the variables and the files.
+# Project, network, volumes and containers all start with x13. The stack opens ports on 127.0.0.1 only.
+name: ${X13_PROJECT}
+
+services:
+  # The database of ClickHouse Dash. It has no published port.
+  clickhouse:
+    image: ${X13_CH_IMAGE}
+    container_name: x13-clickhouse
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: x13admin
+      CLICKHOUSE_PASSWORD: ${X13_CH_ADMIN_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    volumes:
+      - ${X13_DIR}/init:/docker-entrypoint-initdb.d:ro
+      - ch_data:/var/lib/clickhouse
+    healthcheck:
+      # The probe uses the address of the container: the server listens on 127.0.0.1 only while it runs the init scripts.
+      # The marker database x13_ready exists after the last init script.
+      test: ["CMD-SHELL", "clickhouse-client --host \"$$(hostname)\" --user x13admin --password \"$$CLICKHOUSE_PASSWORD\" --query \"SELECT count() FROM system.databases WHERE name = 'x13_ready'\" | grep -q 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 90
+      start_period: 5s
+    networks: [net]
+
+  # The tap: the link of Dash to the PDP goes through it. It records each exchange (sidecar.py of tools/dev/pep-e2e).
+  tap:
+    image: ${X13_SIDECAR_IMAGE}
+    container_name: x13-tap
+    command: ["python3", "/side/sidecar.py", "tap"]
+    user: "10001:10001"
+    environment:
+      TARGET: portal:4182
+      TAP_LOG: /tap/tap.jsonl
+    volumes:
+      - ../pep-e2e/sidecar.py:/side/sidecar.py:ro
+      - ${X13_DIR}/tap:/tap
+    networks: [net]
+
+  # The fake Docker socket. It lists Dash, so the portal learns its path and its actions. The portal never sees another container.
+  sock:
+    image: ${X13_SIDECAR_IMAGE}
+    container_name: x13-sock
+    command: ["python3", "/side/fake_docker.py"]
+    user: "10001:10001"
+    environment:
+      SOCKET_PATH: /sock/docker.sock
+      SERVICE_ID: ${X13_SERVICE_ID}
+      ACTIONS_URL: http://dash:8080/.well-known/procurauth/actions
+    volumes:
+      - ./fake_docker.py:/side/fake_docker.py:ro
+      - ${X13_DIR}/sock:/sock
+    networks: [net]
+
+  # The real PDP and the gate: the portal, built from this checkout.
+  portal:
+    image: ${X13_PORTAL_IMAGE}
+    container_name: x13-portal
+    command: ["run", "--config", "/etc/portal/config.hcl"]
+    depends_on: [sock, tap]
+    volumes:
+      - ${X13_DIR}/portal.hcl:/etc/portal/config.hcl:ro
+      - ${X13_DIR}/creds:/run/creds:ro
+      - ${X13_DIR}/content:/run/content:ro
+      - ${X13_DIR}/sock:/sock:ro
+      - portal_data:/var/lib/portal
+    ports:
+      - "127.0.0.1:${X13_PORT_PORTAL}:4181"
+    networks: [net]
+
+  # The real Dash: the final static binary of ClickHouse Dash, mounted in a small image.
+  dash:
+    image: ${X13_DASH_IMAGE}
+    container_name: x13-dash
+    # The log goes to a file that the driver reads, and to the output of the container.
+    command: ["sh", "-c", "exec /chdash --config /etc/chdash/config.hcl 2>&1 | tee /logs/dash.log"]
+    depends_on:
+      clickhouse: {condition: service_healthy}
+      portal: {condition: service_started}
+    volumes:
+      - ${X13_DASH_BIN}:/chdash:ro
+      - ${X13_DIR}/dash.hcl:/etc/chdash/config.hcl:ro
+      - ${X13_DIR}/creds:/run/creds:ro
+      - ${X13_DIR}/logs:/logs
+    networks: [net]
+
+  # The edge: Traefik with the file provider only. It has no Docker socket.
+  traefik:
+    image: ${X13_TRAEFIK_IMAGE}
+    container_name: x13-traefik
+    command:
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      # The file never changes during a run. No watcher: a host with many containers can be out of inotify instances.
+      - --providers.file.watch=false
+      - --entrypoints.web.address=:80
+      - --accesslog=true
+      - --log.level=INFO
+    volumes:
+      - ./traefik-dynamic.yml:/etc/traefik/dynamic.yml:ro
+    ports:
+      - "127.0.0.1:${X13_PORT_EDGE}:80"
+    networks: [net]
+
+  # The scenarios: a Python container on the network of the stack. Only with the profile "driver".
+  driver:
+    profiles: [driver]
+    image: ${X13_SIDECAR_IMAGE}
+    container_name: x13-driver
+    command: ["python3", "-I", "/drv/scenarios.py"]
+    environment:
+      X13_ONLY: ${X13_ONLY:-}
+      X13_CH_ADMIN_PASSWORD: ${X13_CH_ADMIN_PASSWORD}
+    volumes:
+      - ./scenarios.py:/drv/scenarios.py:ro
+      - ${X13_DIR}/creds:/run/creds:ro
+      - ${X13_DIR}/logs:/logs:ro
+      - ${X13_DIR}/tap:/tap:ro
+      - ${X13_DIR}/out:/out
+    networks: [net]
+
+volumes:
+  ch_data:
+    name: x13-ch-data
+  portal_data:
+    name: x13-portal-data
+
+networks:
+  net:
+    name: x13-net

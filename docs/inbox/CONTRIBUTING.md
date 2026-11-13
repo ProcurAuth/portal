@@ -30,6 +30,7 @@ All commands run in Docker. The host needs only Docker.
 | Configuration files of `deploy/` | `tools/dev/check-configs.sh` |
 | Image and Compose stack | `tools/build.sh image` then `tools/dev/smoke.sh` |
 | Portal against the real reference PEP of ProcurAuth | `tools/dev/pep-e2e.sh` (see "End-to-end check with the real PEP") |
+| Portal against the real ClickHouse Dash | `INTEROP_DASH_BIN=<binary> tools/dev/interop-dash.sh` (see "Joint check with ClickHouse Dash") |
 
 Set `PORTAL_SLOT=<name>` to keep the build output of a worktree apart from the others. To regenerate the configuration reference, run `portal config-reference` and put the output between the markers of the root `README.md`. A test fails when the text is not the generated text.
 
@@ -105,6 +106,73 @@ Run `tools/dev/pep-e2e.sh` from the root of the checkout. The script needs Docke
 Set `PORTAL_SLOT` to keep the build volume of a worktree apart. Set `PEP_E2E_KEEP_BUILD=1` to keep the images and the build volume for the next run. Without it, the script removes them. The first build takes several minutes.
 
 The header of the script lists the other variables: the port base, the backend, `PEP_E2E_KEEP`, `PEP_E2E_SKIP_UNIT`, `PEP_E2E_SKIP_RUNNER` and `PEP_E2E_TEST_ARGS`. The run takes about two minutes when the images are in the cache. The test waits for real leases of 5 seconds, so it is slow by design.
+
+## Joint check with ClickHouse Dash
+
+The script `tools/dev/interop-dash.sh` runs the real portal and the real ClickHouse Dash together. The portal is the PDP and the gate. Dash is the PEP. The other tests never run the two products together. Run the script when you change the PDP, the approval gate, the action document or the edge for the keys.
+
+### What the script builds
+
+The script builds a throwaway Docker stack in the Compose project `portal-x13`. Each container, network and volume has a name that starts with `x13`. The script never touches another name. It never reads the Docker socket of the host. It opens ports on `127.0.0.1` only. It pushes no image to a registry.
+
+| Part | What it is |
+|---|---|
+| `portal` | The portal, built from this checkout with `docker/Dockerfile`. The Inbox has `inbox.approvals` with the web approval on, so no phone is needed. |
+| `dash` | The static binary of ClickHouse Dash that you name. The script mounts it read-only. It runs in the identity mode of MCP. |
+| `clickhouse` | A ClickHouse server with its own users and 1000 rows of data. The profile of one MCP user has `readonly = 1`. |
+| `traefik` | The edge. It has a route for the persons (ForwardAuth `/auth/verify`) and a route for the keys (ForwardAuth `/auth/verify-key`). It has no Docker socket. |
+| `tap` | A proxy on the PDP link of Dash. It records each question and each answer. It is the `sidecar.py` of `tools/dev/pep-e2e`. |
+| `sock` | A fake Docker socket. It lists Dash only, so the portal learns the path and the action document of Dash. |
+| `driver` | A Python container on the same network. It opens the sessions of the persons, calls the MCP endpoint as an agent, and prints the table. |
+
+Dash has 32 hosts, so the navigation needs 129 questions. Dash must split them into two batches.
+
+### Scenarios
+
+Each scenario prints its checks. The script prints one line for each scenario at the end. The exit code is 0 when each scenario passes and 1 when one fails. It is 2 when the setup fails.
+
+| Scenario | What it proves |
+|---|---|
+| 1 | The portal reads the action document of Dash. The editor shows the published actions, and no other. |
+| 2 | The portal publishes the metadata members. Dash logs `access.pdp_metadata`. A batch of more than 64 questions works. |
+| 3 | A person opens a session, sees the tile and opens a page through the gate. Dash accepts the identity token. |
+| 4 | An agent key calls `tools/list` and `run_query` with no `confirm`. |
+| 5 | The approval of a call: approve and run once, a second call asks again, deny, void, and a call that waits (`wait_s`). |
+| 6 | An operation with two permissions (`export_query`): only `confirm` on `query.export` asks. |
+| 7 | The `confirm` of a person never blocks that person. The same grant on the key of that person asks. |
+| 8 | The forms and the file refuse `confirm` on `mcp.session`. The tools use their own actions. |
+| 9 | A ceiling above 1e9 is accepted and applied. On a host with `readonly = 1`, Dash refuses it. |
+| 10 | A page route that needs an approval answers `403` with `approval_cannot_wait`. |
+| 11 | The budget `queries` of Dash is counted by the portal. |
+| 12 | No exchange between Dash and the PDP gets a 5xx or a 400. |
+
+### Run it
+
+The host needs Docker with Compose, `openssl` and `curl`. Give the path of a static Dash binary:
+
+```sh
+INTEROP_DASH_BIN=/path/to/chdash tools/dev/interop-dash.sh
+```
+
+The first run builds the image of the portal, and this takes several minutes. A later run takes about 90 seconds when the image is in the cache. The script removes its containers, network, volumes and files at the end. It also removes the image `x13-portal:dev`, unless `INTEROP_KEEP_BUILD=1`.
+
+| Variable | Use |
+|---|---|
+| `INTEROP_DASH_BIN` | The path of the Dash binary. This variable is required. |
+| `INTEROP_PORT_BASE` | The first of two ports on `127.0.0.1`: the edge and the portal. The default is 18500. |
+| `INTEROP_CH_IMAGE` | The ClickHouse image. The default is `clickhouse/clickhouse-server:26.8.34.13`. |
+| `INTEROP_ONLY` | Run only these scenarios, for example `5,6`. |
+| `INTEROP_KEEP` | Set it to 1 to keep the stack up. The script then prints how to remove it. |
+| `INTEROP_KEEP_BUILD` | Set it to 1 to keep the image of the portal. |
+| `INTEROP_EXTRA_HOSTS` | The number of extra hosts in Dash (default 30). |
+
+Run `tools/dev/interop-dash.sh clean` to remove the stack of an earlier run. The script stops at start when a name of the stack exists already.
+
+### What the check cannot show
+
+Dash retries a call that was approved with a control argument such as `lease_s`. Without it, Dash answers `invalid_argument` before it reads the approval. The agent must send the same arguments again, with the control argument.
+
+The log of Dash has no field for `context.permission_only`. The tap shows the question on the wire, so scenario 6 reads the tap.
 
 ## Pull requests
 
