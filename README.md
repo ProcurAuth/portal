@@ -2484,6 +2484,10 @@ Version 5.1.0 adds the agents of a key. Read these points before you upgrade fro
 - The Android app of 5.1.0 and the server of 5.1.0 go together. The app keeps its portals when it updates from an earlier build, and it drops its local items: they come back from the server at the next connection. A phone of an earlier build cannot read the new frames of the agents. Update the app and the server in one step.
 
 
+Version 5.5.1 changes only the text of one refusal. It changes no key, no table and no frame of the phone. Read this point before you upgrade from 5.5.0:
+
+- A grant with `confirm` on the action `access`, on the action `mcp.session` or on the service `portal` gets its own refusal. The key form gives the code `bad_confirm`, and the form of an account gives the notice `bad-confirm`. The text names the lock `confirm`. Before, the forms gave a general text about a grant that was not valid.
+
 Version 5.5.0 aligns the portal with the ProcurAuth specification of 2026-11-13. It changes no table of the database. Read these points before you upgrade from 5.4.x:
 
 - The database has no change. No migration file is needed.
