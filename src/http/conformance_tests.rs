@@ -10,7 +10,73 @@ use std::time::Duration;
 use super::cluster_tests::*;
 use super::pdp_rig::{app_of, seed_directory, InboxRig};
 use super::*;
-use crate::store::testing::{each_backend, Backend};
+use crate::store::testing::Backend;
+
+/// The reason to skip a case or a step, from its member `skip_if` and the table of the harness: the first condition
+/// that is `true` in the table. An unknown condition is an error, so a new condition of the cases needs a decision.
+fn skip_reason(item: &serde_json::Value, table: &[(&str, bool)]) -> Result<Option<String>, String> {
+    let Some(conditions) = item.get("skip_if").and_then(serde_json::Value::as_array) else {
+        return Ok(None);
+    };
+    for condition in conditions {
+        let name = condition.as_str().unwrap_or("");
+        match table.iter().find(|(known, _)| *known == name) {
+            Some((_, true)) => return Ok(Some(format!("skip_if {name}"))),
+            Some((_, false)) => {}
+            None => {
+                return Err(format!(
+                    "the condition {condition} of skip_if is not known to the harness"
+                ))
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The result of a series: the cases that passed, failed or were skipped, for each backend.
+#[derive(Default)]
+struct Tally {
+    /// (backend, passed, failed, skipped).
+    counts: Vec<(&'static str, usize, usize, usize)>,
+    skipped: Vec<String>,
+    failures: Vec<String>,
+}
+
+impl Tally {
+    /// Adds one case: `Ok` with its failures, or `Err` with the reason to skip it.
+    fn add(&mut self, backend: &'static str, id: &str, result: Result<Vec<String>, String>) {
+        if self.counts.last().is_none_or(|c| c.0 != backend) {
+            self.counts.push((backend, 0, 0, 0));
+        }
+        let count = self.counts.last_mut().unwrap();
+        match result {
+            Ok(found) if found.is_empty() => count.1 += 1,
+            Ok(found) => {
+                count.2 += 1;
+                self.failures
+                    .extend(found.into_iter().map(|f| format!("[{backend}] {f}")));
+            }
+            Err(reason) => {
+                count.3 += 1;
+                self.skipped.push(format!("[{backend}] {id}: {reason}"));
+            }
+        }
+    }
+
+    /// Prints the counts and the skipped cases, and fails on a failure.
+    fn finish(self, series: &str) {
+        for (backend, passed, failed, skipped) in &self.counts {
+            eprintln!(
+                "series {series} [{backend}]: {} cases, {passed} passed, {failed} failed, {skipped} skipped",
+                passed + failed + skipped
+            );
+        }
+        for line in &self.skipped {
+            eprintln!("skipped {line}");
+        }
+        assert!(self.failures.is_empty(), "\n{}", self.failures.join("\n"));
+    }
+}
 
 // The conformance cases of the series D (a PDP) --------------------------------------------------
 
@@ -19,6 +85,7 @@ use crate::store::testing::{each_backend, Backend};
 /// path of the directory `conformance/` in `PROCURAUTH_CONFORMANCE`. Without this variable, the test
 /// does nothing.
 mod conformance_d {
+    use super::conformance_e::matches;
     use super::*;
     use serde_json::Value;
     use sha2::{Digest, Sha256};
@@ -204,8 +271,21 @@ mod conformance_d {
         }
     }
 
-    /// Runs one case against a fresh node. Gives the failures, as text.
-    fn run_case(backend: &Backend, dir: &std::path::Path, case: &Value) -> Vec<String> {
+    /// The conditions of `skip_if` that the harness knows, with the answer for the portal (conformance README, section
+    /// "skip_if"). `true` skips the case. An unknown condition fails the run: a new condition needs a decision here.
+    const SKIP_CONDITIONS: &[(&str, bool)] = &[
+        // The portal gives approvals. The harness runs each case that cites section 17 with the block `inbox.approvals`.
+        ("no_approval_support", false),
+        // The harness gives a credential to each service of the data, so the PDP refuses a request without it.
+        ("no_pdp_credential", false),
+    ];
+
+    /// Runs one case against a fresh node. Gives the failures, as text, or the reason to skip the case.
+    fn run_case(
+        backend: &Backend,
+        dir: &std::path::Path,
+        case: &Value,
+    ) -> Result<Vec<String>, String> {
         let id = case["id"].as_str().unwrap();
         let given = &case["given"];
         let directory = match &given["directory"] {
@@ -238,16 +318,17 @@ mod conformance_d {
             .filter(|s| !s["id"].as_str().unwrap().contains(':'))
             .count();
         let pdp_port = free_port();
-        // A directory with approvals needs the inbox with its items and the block `inbox.approvals`. The documents of
-        // the servers declare the approval. The cases without approvals run as before, with no inbox.
-        let with_approvals = directory.get("approvals").is_some();
+        // A directory with approvals, and a case of section 17 (the condition `no_approval_support`), need the inbox
+        // with its items and the block `inbox.approvals`. The other cases run with no inbox.
+        let cites_approvals = case
+            .get("skip_if")
+            .and_then(Value::as_array)
+            .is_some_and(|c| c.iter().any(|c| c == "no_approval_support"));
+        let with_approvals = directory.get("approvals").is_some() || cites_approvals;
         let rig = if with_approvals {
             match InboxRig::new(backend, "5m") {
                 Some(rig) => Some(rig),
-                None => {
-                    eprintln!("INBOX_TEST_PG is not set: {id} is skipped on PostgreSQL");
-                    return Vec::new();
-                }
+                None => return Err("INBOX_TEST_PG is not set: the inbox has no PostgreSQL".into()),
             }
         } else {
             None
@@ -337,11 +418,23 @@ mod conformance_d {
         for (number, step) in case["steps"].as_array().unwrap().iter().enumerate() {
             let name = step.get("name").and_then(Value::as_str).unwrap_or("");
             let label = format!("{id} step {} ({name})", number + 1);
+            match skip_reason(step, SKIP_CONDITIONS) {
+                Ok(None) => {}
+                Ok(Some(_)) => continue,
+                Err(e) => {
+                    failures.push(format!("{label}: {e}"));
+                    continue;
+                }
+            }
             let request = &step["request"];
             let (method, path) = match request.get("endpoint").and_then(Value::as_str) {
                 Some("evaluation") => ("POST", "/access/v1/evaluation".to_string()),
                 Some("evaluations") => ("POST", "/access/v1/evaluations".to_string()),
                 Some("metadata") => ("GET", "/.well-known/authzen-configuration".to_string()),
+                // The submission route of the approval API (protocol 17.4).
+                Some("approval_requests") => {
+                    ("POST", crate::http::approval_api::PREFIX.to_string())
+                }
                 _ => (
                     request["method"].as_str().unwrap_or("POST"),
                     request["path"].as_str().unwrap_or("/").to_string(),
@@ -385,64 +478,32 @@ mod conformance_d {
                 .collect();
             let reply = send(pdp_port, method, &path, &header_refs, &body);
             let expect = &step["expect"];
+            let mut record = |what: &str, result: Result<(), String>| {
+                if let Err(reason) = result {
+                    failures.push(format!("{label}: {what} {reason}"));
+                }
+            };
             if let Some(matcher) = expect.get("status") {
-                check(
-                    &mut failures,
-                    &label,
-                    "status",
-                    &Value::from(reply.status),
-                    matcher,
-                );
+                record("status", matches(Some(&Value::from(reply.status)), matcher));
             }
             if let Some(pointers) = expect.get("json").and_then(Value::as_object) {
                 let parsed: Option<Value> = serde_json::from_str(&reply.body).ok();
                 for (pointer, matcher) in pointers {
                     let found = parsed.as_ref().and_then(|v| v.pointer(pointer));
-                    match found {
-                        Some(value) => check(&mut failures, &label, pointer, value, matcher),
-                        None => {
-                            if matcher.get("absent").is_none() {
-                                failures.push(format!(
-                                    "{label}: {pointer} is absent; expected {matcher}; body {}",
-                                    reply.body
-                                ));
-                            }
-                        }
-                    }
+                    record(
+                        pointer,
+                        matches(found, matcher).map_err(|e| format!("{e}; body {}", reply.body)),
+                    );
                 }
             }
             if let Some(matcher) = expect.get("body_text") {
-                check(
-                    &mut failures,
-                    &label,
+                record(
                     "body_text",
-                    &Value::from(reply.body.clone()),
-                    matcher,
+                    matches(Some(&Value::from(reply.body.clone())), matcher),
                 );
             }
         }
-        failures
-    }
-
-    fn check(failures: &mut Vec<String>, label: &str, what: &str, value: &Value, matcher: &Value) {
-        if let Some(expected) = matcher.get("equals") {
-            if value != expected {
-                failures.push(format!("{label}: {what} is {value}, expected {expected}"));
-            }
-        } else if matcher.get("absent").is_some() {
-            failures.push(format!("{label}: {what} is {value}, expected it absent"));
-        } else if matcher.get("present").is_some() {
-            // The value is there.
-        } else if let Some(pattern) = matcher.get("not_regex").and_then(Value::as_str) {
-            let text = value.as_str().unwrap_or("");
-            if super::conformance_e::regex::is_match(pattern, text) {
-                failures.push(format!("{label}: {what} matches {pattern}: {text}"));
-            }
-        } else {
-            failures.push(format!(
-                "{label}: the matcher {matcher} is not read by the harness"
-            ));
-        }
+        Ok(failures)
     }
 
     #[test]
@@ -458,11 +519,7 @@ mod conformance_d {
             .collect();
         paths.sort();
         let only = std::env::var("PROCURAUTH_CASES").ok();
-        let mut failures = Vec::new();
-        let mut run = 0;
-        each_backend(|backend| {
-            let _ = backend;
-        });
+        let mut tally = Tally::default();
         for backend in crate::store::testing::backends() {
             for path in &paths {
                 let case = read_json(path);
@@ -473,25 +530,20 @@ mod conformance_d {
                 {
                     continue;
                 }
-                run += 1;
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_case(&backend, &dir, &case)
-                }));
-                match result {
-                    Ok(found) => failures.extend(
-                        found
-                            .into_iter()
-                            .map(|f| format!("[{}] {f}", backend.name())),
-                    ),
-                    Err(_) => failures.push(format!(
-                        "[{}] {id}: the harness or the portal panicked",
-                        backend.name()
-                    )),
-                }
+                let result = match skip_reason(&case, SKIP_CONDITIONS) {
+                    Ok(Some(reason)) => Err(reason),
+                    Ok(None) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_case(&backend, &dir, &case)
+                    }))
+                    .unwrap_or_else(|_| {
+                        Ok(vec![format!("{id}: the harness or the portal panicked")])
+                    }),
+                    Err(e) => Ok(vec![format!("{id}: {e}")]),
+                };
+                tally.add(backend.name(), &id, result);
             }
         }
-        eprintln!("{run} cases run, {} failures", failures.len());
-        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+        tally.finish("D");
     }
 }
 
@@ -819,7 +871,7 @@ mod conformance_e {
         }
     }
 
-    fn matches(value: Option<&Value>, matcher: &Value) -> Result<(), String> {
+    pub(super) fn matches(value: Option<&Value>, matcher: &Value) -> Result<(), String> {
         if let Some(expected) = matcher.get("equals") {
             return if value == Some(expected) {
                 Ok(())
@@ -874,6 +926,20 @@ mod conformance_e {
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or(Value::Null)
     }
+
+    /// The conditions of `skip_if` that the harness knows, with the answer for the portal (conformance README, section
+    /// "skip_if"). `true` skips the case. An unknown condition fails the run.
+    const SKIP_CONDITIONS: &[(&str, bool)] = &[
+        // The edge serves the MCP path of the probe service (`mcp_path`).
+        ("no_mcp_endpoint", false),
+        // The key set of the portal holds one key. The harness still runs E13: each token of the portal has the `kid`
+        // of its key, so the case checks the same rule with one key.
+        ("single_key_set", false),
+        // The edge keeps the identity tokens (portal 8.1a).
+        ("no_token_cache", false),
+        // The portal gives approvals. The edge asks only `access`, and `confirm` has no effect on it (protocol 17.8).
+        ("no_approval_support", false),
+    ];
 
     fn run_case(backend: &Backend, case: &Value) -> Vec<String> {
         let id = case["id"].as_str().unwrap();
@@ -988,6 +1054,14 @@ mod conformance_e {
                 number + 1,
                 step.get("name").and_then(Value::as_str).unwrap_or("")
             );
+            match skip_reason(step, SKIP_CONDITIONS) {
+                Ok(None) => {}
+                Ok(Some(_)) => continue,
+                Err(e) => {
+                    failures.push(format!("{label}: {e}"));
+                    continue;
+                }
+            }
             let request = variables_in(&step["request"], &variables);
             let method = request["method"].as_str().unwrap_or("GET").to_string();
             let path = request["path"].as_str().unwrap().to_string();
@@ -1012,7 +1086,7 @@ mod conformance_e {
             let expect = variables_in(&step["expect"], &variables);
             let mut record = |what: &str, result: Result<(), String>| {
                 if let Err(reason) = result {
-                    failures.push(format!("[{}] {label}: {what} {reason}", backend.name()));
+                    failures.push(format!("{label}: {what} {reason}"));
                 }
             };
             if let Some(matcher) = expect.get("status") {
@@ -1089,27 +1163,23 @@ mod conformance_e {
             .filter(|p| p.extension().is_some_and(|e| e == "json"))
             .collect();
         paths.sort();
-        let mut failures = Vec::new();
-        let mut run = 0;
+        let mut tally = Tally::default();
         for backend in crate::store::testing::backends() {
             for path in &paths {
                 let case: Value =
                     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-                run += 1;
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_case(&backend, &case)
-                }));
-                match result {
-                    Ok(found) => failures.extend(found),
-                    Err(_) => failures.push(format!(
-                        "[{}] {}: the harness or the portal panicked",
-                        backend.name(),
-                        case["id"]
-                    )),
-                }
+                let id = case["id"].as_str().unwrap_or("").to_string();
+                let result = match skip_reason(&case, SKIP_CONDITIONS) {
+                    Ok(Some(reason)) => Err(reason),
+                    Ok(None) => Ok(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_case(&backend, &case)
+                    }))
+                    .unwrap_or_else(|_| vec![format!("{id}: the harness or the portal panicked")])),
+                    Err(e) => Ok(vec![format!("{id}: {e}")]),
+                };
+                tally.add(backend.name(), &id, result);
             }
         }
-        eprintln!("{run} cases run, {} failures", failures.len());
-        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+        tally.finish("E");
     }
 }
