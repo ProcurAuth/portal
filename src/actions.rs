@@ -51,12 +51,12 @@ pub const DEFAULT_MAX_DOCUMENT_BYTES: usize = 256 * 1024;
 const MAX_DESCRIPTION_CHARS: usize = 300;
 /// The largest number of types in the list of one action, and in the top-level list.
 const MAX_RESOURCE_TYPES: usize = 16;
-/// The most documents that the loop reads at the same time (portal 7.10).
+/// The most documents that the loop reads at the same time.
 const MAX_CONCURRENT_READS: usize = 64;
 /// How often the loop looks for a document that is due.
 const TICK: Duration = Duration::from_secs(5);
 
-/// The size that a document of a service can have (portal 7.9). A larger document is bad.
+/// The size that a document of a service can have. A larger document is bad.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Bounds {
     pub max_actions: usize,
@@ -149,7 +149,7 @@ impl Document {
         }
     }
 
-    /// The limits that a grant of `action` can hold (portal 3.2): on the action `access`, each
+    /// The limits that a grant of `action` can hold: on the action `access`, each
     /// budget that the document declares; on another action, each ceiling that the action lists.
     pub fn limit_inputs(&self, action: &str) -> Vec<crate::limits::Input> {
         let listed: Vec<&String> = if action == ACCESS {
@@ -262,7 +262,7 @@ struct Entry {
     /// URL makes it `false`.
     known: bool,
     read_at: Option<Instant>,
-    /// The time of the last good read: a good document (portal 10.3a, 10.3c).
+    /// The time of the last good read: a good document.
     good_at: Option<Instant>,
     /// The PDP asked for an early read. The next round reads the document, also when it is fresh.
     early: bool,
@@ -293,11 +293,11 @@ pub struct Registry {
     entries: RwLock<HashMap<String, Entry>>,
     /// Wakes the refresh loop before the end of its tick.
     wake: Notify,
-    /// The time of the start. A service with no good read counts its age from here (portal 10.3c).
+    /// The time of the start. A service with no good read counts its age from here.
     started: Instant,
-    /// `access.actions_max_age` (portal 10.3a).
+    /// `access.actions_max_age`.
     max_age: Duration,
-    /// The size of a document that the reads accept (portal 7.9).
+    /// The size of a document that the reads accept.
     bounds: Bounds,
     /// The document of the service `portal`. It is in the code: it holds the features that the
     /// file turns on (see [`crate::portal_actions`]).
@@ -343,7 +343,7 @@ impl Registry {
     }
 
     /// The time since the last good read of the document of a service. A service that has no good
-    /// read yet counts from the start of the program (portal 10.3c).
+    /// read yet counts from the start of the program.
     pub fn age(&self, service: &str) -> Duration {
         let good = self.read().get(service).and_then(|entry| entry.good_at);
         Instant::now().saturating_duration_since(good.unwrap_or(self.started))
@@ -378,7 +378,7 @@ impl Registry {
         }
     }
 
-    /// The age of the oldest document among `services` (portal 10.3a, 10.5).
+    /// The age of the oldest document among `services`.
     pub fn oldest_age<'a>(&self, services: impl Iterator<Item = &'a str>) -> Duration {
         services
             .filter(|service| self.internal(service).is_none())
@@ -402,7 +402,7 @@ impl Registry {
     /// a `404`. A `404` gives an empty document. `None`: the service is not in the catalogue, or
     /// no read has answered yet. The PDP fails closed on `None`.
     pub fn declared(&self, service: &str) -> Option<Arc<Document>> {
-        // The document of the service `portal` is in the code (portal 6.1).
+        // The document of the service `portal` is in the code.
         if let Some(document) = self.internal(service) {
             return Some(document);
         }
@@ -569,7 +569,7 @@ impl Registry {
     }
 
     /// Tells whether each service of the catalogue that has a document URL had a first read, good or
-    /// not (portal 7.3b).
+    /// not.
     pub fn first_reads_done(&self, catalog: &Catalog) -> bool {
         let wanted = wanted(catalog);
         let entries = self.read();
@@ -580,7 +580,7 @@ impl Registry {
     }
 
     /// Moves the next read of a service to a stable point of the `refresh` period, so that the
-    /// reads of all services come at equal intervals (portal 7.10). The point depends on the id
+    /// reads of all services come at equal intervals. The point depends on the id
     /// of the service. Only the first read of a service applies this; each next read keeps it.
     fn spread(&self, service: &str, refresh: Duration) {
         let mut entries = self.write();
@@ -680,7 +680,7 @@ struct RawResource {
 struct RawType {
     name: String,
     parent: String,
-    /// Mandatory and not empty (protocol 5.2, portal 12).
+    /// Mandatory and not empty (protocol 5.2).
     description: String,
 }
 

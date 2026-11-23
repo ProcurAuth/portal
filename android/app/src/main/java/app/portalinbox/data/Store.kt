@@ -173,7 +173,7 @@ class Store private constructor(private val appContext: Context) :
                     .edit().putBoolean(PREF_ENROLL_AGAIN, true).apply()
             }
         } else if (oldVersion < 10) {
-            // v10 (lot G4): the table `agents`, and the frame `request` names its agent (lot G2). A stored request of v9 has no
+            // v10: the table `agents`, and the frame `request` names its agent. A stored request of v9 has no
             // agent and the strict reader refuses it, so the tables of the items are made again. The portals stay. The
             // portal sends the open items again at the next `sync`. No migration.
             ItemSchema.drop(db)
@@ -341,7 +341,7 @@ class Store private constructor(private val appContext: Context) :
     }
 
     /**
-     * Changes the address of a portal ("Change address", proposal 3.4). The pinned key does not change: it still decides who
+     * Changes the address of a portal ("Change address"). The pinned key does not change: it still decides who
      * can answer. Returns false when the text is not an address. A new address that gives another key fails the handshake
      * and shows "Key changed".
      */
@@ -351,7 +351,7 @@ class Store private constructor(private val appContext: Context) :
     }
 
     /**
-     * Re-enrolls a portal in place (proposal 3.6): the row, the nickname, the color and the history stay. The device, the key,
+     * Re-enrolls a portal in place: the row, the nickname, the color and the history stay. The device, the key,
      * the address and the login come from the new enrollment. If the key is not the old one, the old fingerprint goes to
      * `prev_key_fp` and the time to `key_changed_ms`. The reason that stopped the connection is cleared. A key that another
      * portal holds is refused (returns false, nothing is written).
@@ -546,7 +546,7 @@ class Store private constructor(private val appContext: Context) :
 
     private fun readFilter(includeRead: Boolean) = if (includeRead) "" else " AND read_at_ms IS NULL"
 
-    /** The SQL and the argument of the filter on one portal (lot MP3). [serverId] null = every portal. */
+    /** The SQL and the argument of the filter on one portal. [serverId] null = every portal. */
     private fun portalFilter(serverId: Long?) = if (serverId == null) "" else " AND server_id = ?"
 
     private fun portalArgs(serverId: Long?): Array<String> = if (serverId == null) emptyArray() else arrayOf(serverId.toString())

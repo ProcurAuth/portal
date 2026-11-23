@@ -234,7 +234,7 @@ class ItemEngine(
             AnswerStatus.SUPERSEDED -> ItemState.SUPERSEDED
             AnswerStatus.EXPIRED -> ItemState.EXPIRED
             AnswerStatus.CANCELLED -> ItemState.CANCELLED
-            // `AGENT_LOCKED`: the agent is new and the server locks it. The item stays open (lot G4 shows the lock).
+            // `AGENT_LOCKED`: the agent is new and the server locks it. The item stays open (the screen shows the lock).
             AnswerStatus.CLOSED, AnswerStatus.EFFECT_MISMATCH, AnswerStatus.DEVICE_REVOKED,
             AnswerStatus.CUSTOM_NOT_ALLOWED, AnswerStatus.ASK_BACK_NOT_ALLOWED, AnswerStatus.AGENT_LOCKED -> null
         }
@@ -316,7 +316,7 @@ class ItemEngine(
     }
 
     /**
-     * Answers a question or a form (lot A4). The frame is built from the draft of the sheet with the rules of the server
+     * Answers a question or a form. The frame is built from the draft of the sheet with the rules of the server
      * ([AnswerSheet.build]). A question that the flags do not allow ([FlagsMatrix]) is never answered: the owner can decline it.
      * The caller asks for the local biometric check before it calls this.
      */
@@ -338,7 +338,7 @@ class ItemEngine(
         val item = repo.item(serverId, requestId) ?: return refused(Refusal.NOT_FOUND)
         if (!item.isOpen) return refused(Refusal.NOT_OPEN)
         if (!item.request.allowAskBack) return refused(Refusal.ASK_BACK_NOT_ALLOWED)
-        // The owner has one message at a time (DIAL 3): the next one waits for the result of this one.
+        // The owner has one message at a time: the next one waits for the result of this one.
         if (repo.pendingOutbox(serverId).any { it.requestId == requestId && it.type == OutboxType.REPLY }) return refused(Refusal.ALREADY_QUEUED)
         return queue(serverId, requestId, OutboxType.REPLY) { ReplyFrame(requestId, it, text) }
     }

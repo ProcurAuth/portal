@@ -23,7 +23,7 @@ import app.portalinbox.service.Registry
 import java.time.ZoneId
 
 /**
- * The settings of one portal (lot MP5, proposal 3.10). It only draws: [PrefsForm] decides what a value means, [PrefsSync] keeps an
+ * The settings of one portal. It only draws: [PrefsForm] decides what a value means, [PrefsSync] keeps an
  * edit as pending until the portal shows it in a `welcome`, [PrefsApply] plans "apply to all portals", [LocalRetention] gives the
  * days to keep.
  *

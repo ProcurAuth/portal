@@ -39,7 +39,7 @@ object Registry {
     fun setStatus(serverId: Long, state: LinkState, detail: String?) {
         val prev = statuses[serverId]
         // CONNECTING and DISCONNECTED are one period "not connected": each new attempt must not restart the clock, or a portal that
-        // stays down would never reach its offline threshold (lot MP3: the home list and the warning use `sinceMs`).
+        // stays down would never reach its offline threshold (the home list and the warning use `sinceMs`).
         val sameSpell = prev != null && (prev.state == state || (prev.state.notConnected && state.notConnected))
         val since = if (prev != null && sameSpell) prev.sinceMs else System.currentTimeMillis()
         statuses[serverId] = LinkStatus(state, since, detail)

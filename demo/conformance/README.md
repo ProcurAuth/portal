@@ -32,33 +32,33 @@ The script uses the image `portal-demo-notes` of the demo. It builds this image 
 
 The script gets the public key of the test edge from the private key at each run. It gives this key to `notes` in a temporary file. It gives the credential `crates/access-conformance/examples/pdp-credential.txt` to the two sides. The profile reads the ProcurAuth files at `../procurauth/`, the path that the script uses in the container of the runner.
 
-The values of the profile agree with `notes`: the service `notes`, the header `X-Identity-Token`, a maximum age of 300 seconds and a clock skew of 30 seconds. The `kid` is the RFC 7638 thumbprint of the test key, as the portal writes it.
+The values of the profile agree with `notes`. These are the service `notes`, the header `X-Identity-Token`, a maximum age of 300 seconds and a clock skew of 30 seconds. The `kid` is the RFC 7638 thumbprint of the test key, as the portal writes it.
 
 ## Result
 
-With `notes-profile.json`, the runner gave 34 passed, 0 failed and 65 skipped cases of the 99 cases that existed then. This result is out of date. The series U has 117 cases now (U100 to U117 for section 17). The demo service `notes` has not run them. Run the profile again before you use a count. The runner skips a case for these reasons:
+This directory keeps no count of passed cases, because the series U grows with the protocol. Run the profile to get the count for your checkout. The runner skips a case for these reasons:
 
-| Reason | Cases |
+| Reason | Skipped cases |
 | --- | --- |
-| `notes` has no MCP endpoint. | 24 |
-| `notes` has no use that needs two permissions. | 2 |
-| `notes` has no action without a budget (operation `use_plain`). | 36 |
-| `notes` has no use on the service itself (operation `use_service`). | 2 |
-| `notes` trusts one Ed25519 key only, so no token can use ES256. | 1 |
+| `notes` has no MCP endpoint. | The cases of the MCP binding. |
+| `notes` has no use that needs two permissions. | The cases of two permissions. |
+| `notes` has no action without a budget (operation `use_plain`). | Most cases of the identity token. |
+| `notes` has no use on the service itself (operation `use_service`). | The cases of the service node. |
+| `notes` trusts one Ed25519 key only, so no token can use ES256. | The case of ES256. |
 
 ## The refusal run
 
-Each action of `notes` lists the budget `requests`. Thus the profile cannot give the operation `use_plain`, and 36 cases skip. These cases hold most checks of the identity token (protocol 9.4).
+Each action of `notes` lists the budget `requests`. Thus the profile cannot give the operation `use_plain`, and many cases skip. These cases hold most checks of the identity token (protocol 9.4).
 
-The profile `notes-refusal-profile.json` maps `use_plain` to the read of a notebook, which is a use with a budget. The option `--refusal-cases` runs only the 21 cases whose steps expect a refusal: HTTP 401 before any question, HTTP 403, or HTTP 503. A budget does not change the result of such a step. The run gives 21 passed cases.
+The profile `notes-refusal-profile.json` maps `use_plain` to the read of a notebook, which is a use with a budget. The option `--refusal-cases` runs only the cases whose steps expect a refusal: HTTP 401 before any question, HTTP 403, or HTTP 503. A budget does not change the result of such a step. The script lists these cases in `run-conformance-u.sh`.
 
-This run does not replace a true action without a budget. The 15 other cases with `use_plain` expect a use that runs, so they stay untested.
+This run does not replace a true action without a budget. The other cases with `use_plain` expect a use that runs, so they stay untested.
 
 ## Limits of the result
 
 The series U does not test these points of `notes`:
 
-- The routes `/health` and `/notes/` answer without a token. Protocol 10.0 (step 2) refuses each route except the action document. The portal reads `/health` directly, without the edge.
+- The routes `/health` and `/notes/` answer without a token. Protocol 10.0 refuses each route except the action document. The portal reads `/health` directly, without the edge.
 - The route `/notes/api/whoami` asks the PDP no question (protocol 10.1).
 - The playground `/notes/api/pdp` takes the action and the chain from the client (protocol 4.5). It runs no use, and it does not show `context.reason`.
 - `notes` opens a new connection for each question (protocol 10.7, a SHOULD rule).

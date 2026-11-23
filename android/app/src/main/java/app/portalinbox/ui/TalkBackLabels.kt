@@ -5,7 +5,7 @@ import app.portalinbox.proto.ItemState
 import app.portalinbox.proto.RequestKind
 
 /**
- * The words that a screen reader says for the item rows and the thread (DIAL 4.8). Pure Kotlin.
+ * The words that a screen reader says for the item rows and the thread. Pure Kotlin.
  *
  * Rules: full words, no short forms ("3 minutes ago", not "3 min"); the age and the state are text, never a color only; a
  * hidden character shows as its mark, so the reader says what the eye would see; the text of a third party is introduced
@@ -16,7 +16,7 @@ object TalkBackLabels {
 
     /**
      * The label of a row of the home list: the portal, kind, sender, ages, state, number of choices. [portal] is the nickname
-     * of the portal (lot MP3). [reason] says that the portal is down ("Offline 3 h. answer waits").
+     * of the portal. [reason] says that the portal is down ("Offline 3 h. answer waits").
      */
     fun itemRow(item: Item, nowMs: Long, portal: String? = null, reason: String? = null, label: String? = null): String {
         val prefix = portal?.let { "Portal ${VisibleText.escapeLine(it)}. " } ?: ""
@@ -89,7 +89,7 @@ object TalkBackLabels {
     fun threadHeader(screen: ThreadState.Screen): String =
         listOfNotNull(screen.title, screen.senderLine, screen.chip?.word, screen.statusSpoken.ifEmpty { null }).joinToString(". ")
 
-    // ------------------------------------------------------------ the screen of a question (lot A4)
+    // ------------------------------------------------------------ the screen of a question
 
     /**
      * The label of the header of a question: "Question from the agent triage, asked 6 days ago, agent active 3 minutes ago, 3

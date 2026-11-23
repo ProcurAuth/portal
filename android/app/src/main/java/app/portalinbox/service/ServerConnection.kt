@@ -344,7 +344,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                                 if (frame.isNotEnabled) itemsEnabled = false
                                 onPrefsError(frame)
                             }
-                            // The agents (lot G4): the engine keeps an `agent` frame by `rev`, the receipt goes after the write, and an
+                            // The agents: the engine keeps an `agent` frame by `rev`, the receipt goes after the write, and an
                             // `agent_result` closes the entry of the outbox and gives a line for the snackbar.
                             is RequestFrame, is MessageFrame, is SettledFrame, is DigestFrame, is AnswerResultFrame,
                             is AgentFrame, is AgentResultFrame -> onItemFrame(frame)

@@ -1,5 +1,5 @@
 // Checks the web pages of the mode `enrolled` in a real browser: the form "Add agent", the page of the token, the button "Reset
-// token" and the line "Also asked by" (lot G6). Run it with tools/dev/ui-check.sh and UI_CHECK_SCRIPT=ui-check-agents-enrolled.js.
+// token" and the line "Also asked by". Run it with tools/dev/ui-check.sh and UI_CHECK_SCRIPT=ui-check-agents-enrolled.js.
 // The checks WRITE: they add agents and reset tokens. Use a server that the test `agents_enrolled_demo_for_the_eyes` of
 // tests/agents_web_e2e.rs starts (it writes demo.json with the values below). Never run it against a shared demo.
 //

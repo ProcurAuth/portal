@@ -1,4 +1,4 @@
-//! The page of one question in the tab "Inbox" (lot L14): the title, the box "From agent", the command, the explanation of
+//! The page of one question in the tab "Inbox": the title, the box "From agent", the command, the explanation of
 //! the agent, the form of the answer by the type of the input, the rows "Other answer" and "Ask the agent", the
 //! discussion, and the view of a question that is closed. The panel "Open items" and the History show a question with the
 //! code of `items.rs`.

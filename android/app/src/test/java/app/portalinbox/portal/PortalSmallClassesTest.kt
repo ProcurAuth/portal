@@ -13,7 +13,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** The small pure classes of the portal list and of the portal screen (lot MP2). */
+/** The small pure classes of the portal list and of the portal screen. */
 class PortalSmallClassesTest {
     // ------------------------------------------------------------ PortalRow
 

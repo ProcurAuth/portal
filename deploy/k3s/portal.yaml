@@ -223,4 +223,4 @@ spec:
 # Variant with SQLite (one active instance and standby instances), not made here. Replace the block `postgres` and
 # the block `inbox.cluster` of the configuration with a block `storage` that names a file on a volume, and add the
 # block `inbox.replica` with a ReadWriteMany volume that the instances share. Use a StatefulSet with one replica
-# for the owner of the lease. See the sections "Inbox" and "Storage" of README.md.
+# for the owner of the lease. See docs/inbox/README.md.

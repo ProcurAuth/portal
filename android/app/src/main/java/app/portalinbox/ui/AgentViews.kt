@@ -12,7 +12,7 @@ import app.portalinbox.proto.AgentKind
 import app.portalinbox.proto.AgentState
 
 /**
- * The view parts that the agent screens share (lot G4): the state chip, the box of hints, the header of a group. The decisions are in the
+ * The view parts that the agent screens share: the state chip, the box of hints, the header of a group. The decisions are in the
  * pure classes ([AgentGroups], [NewAgentCard], [AgentScreenModel], [FromAgentBox]); this file only draws. Each text that a client sent goes
  * through [UntrustedText] and `SpanApplier`: a hidden or look-alike character shows as a mark.
  */

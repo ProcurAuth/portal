@@ -8,7 +8,7 @@ import app.portalinbox.proto.SetPrefsFrame
 import app.portalinbox.service.LinkState
 
 /**
- * "Apply quiet hours and summary to all portals" (proposal 3.10, answer Q5). Pure Kotlin.
+ * "Apply quiet hours and summary to all portals". Pure Kotlin.
  *
  * `set_prefs` replaces the preferences of the account at one portal, so the phone sends it to each portal on its own. The sheet
  * of the settings screen shows one line for each other portal, and says what will happen to it before the user decides:

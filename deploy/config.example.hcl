@@ -4,7 +4,7 @@
 # program stops at start if one is missing, misspelled or out of range. Durations accept the
 # units ms, s, m, h and d. Secrets come from a file (`_file`) or from a variable (`_env`).
 # The keys of the portal that this example does not set have documented defaults: see the
-# configuration reference in README.md.
+# configuration reference in docs/configuration.md.
 
 server {
   # The portal: the pages (behind Traefik ForwardAuth where needed), and the inbox: the API for the senders and

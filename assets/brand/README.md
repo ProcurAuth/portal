@@ -1,7 +1,6 @@
 # Brand files of portal
 
-This folder holds the logo of portal. The logo is the direction P1, the Doorway: a heavy arch with a cyan dot in the doorway.
-The proposals and the build files are in `demo/design-proposals/logo/`.
+This folder holds the logo of portal. The logo is the Doorway: a heavy arch with a cyan dot in the doorway.
 
 ## Files
 
@@ -41,22 +40,24 @@ GitHub does not read the avatar or the social card from the repository. Upload t
 | Navy | `#03061A` | The word of the lockup on a white page. |
 | Deep navy | `#0A1A6B` | A dark blue for large areas. |
 
-The interface of the portal uses these colours as tokens. See "Brand tokens" in the main `README.md`.
+The interface of the portal uses these colours as tokens. See [Settings pages and history](../../docs/settings-and-history.md#brand-tokens-and-logo).
 
 ## Typeface of the word
 
-The word is Unbounded at weight 600, with a letter spacing of -0.03 em. The word is outlined to paths.
-Unbounded is a Google Fonts family, and the proposal files say that it is under the SIL Open Font License.
-This repository holds no copy of the font and no licence text of the font. The licence is therefore unverified here.
-Before a release, read the licence text of the font that was used to outline the word. Keep a copy of the text.
-The SVG files carry only the outlines of the glyphs, not the font. The OFL lets the shapes be used in a logo.
+The word is Unbounded at weight 600. The letter space is -0.03 em. The word is outlined to paths.
+
+Unbounded is a family of Google Fonts. Its publisher gives it under the SIL Open Font License 1.1.
+
+The SVG files carry the outlines of the glyphs and not the font. This repository holds no font file, so it holds no copy of the licence text.
+
+The licence does not restrict a logo that is made from outlines. Read the licence at the source of the family before you make a font file from it.
 
 ## Rules of use
 
 1. Keep the clear space. The space on each side of the lockup is at least the width of one leg of the arch.
 2. Keep the minimum size. The lockup is at least 80 pixels wide. The mark alone is at least 16 pixels wide.
 3. Do not change the colours. Use the colours in the table above only.
-4. Do not stretch, rotate, outline or add an effect to the logo.
+4. Do not stretch, rotate or outline the logo. Do not add an effect to it.
 5. Do not draw the dot out of the doorway and do not remove it.
 6. Use the white form on a dark or blue background. Use the full-colour form on a white background.
 7. Do not show the logo in the body of a page of the product. The logo is the icon of the browser tab only.

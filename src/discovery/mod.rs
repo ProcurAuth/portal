@@ -46,7 +46,7 @@ use crate::config::DiscoveryConfig;
 use docker::Docker;
 use kube::{Kube, PodSet};
 
-/// The most HTTP probes of services at the same time (portal 7.3c).
+/// The most HTTP probes of services at the same time.
 const MAX_CONCURRENT_CHECKS: usize = 64;
 
 /// The number of refreshes that a gate prefix keeps its last owner after the last snapshot that

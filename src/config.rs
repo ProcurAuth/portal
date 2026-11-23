@@ -43,10 +43,10 @@ pub struct Config {
     pub identity: Option<IdentityConfig>,
     /// `None` when the file has no `pdp` block: the PDP listener is off.
     pub pdp: Option<PdpConfig>,
-    /// `None` when the file has no `keys` block: the portal refuses every key (portal 10.1).
+    /// `None` when the file has no `keys` block: the portal refuses every key.
     pub keys: Option<KeysConfig>,
     /// The values of the block `keys`, or the defaults of the table without the block. The bounds
-    /// of the counter rows and of the grants apply also without the block (portal 10.1a).
+    /// of the counter rows and of the grants apply also without the block.
     pub key_limits: KeysConfig,
     pub users: UsersConfig,
     pub storage: StorageConfig,
@@ -84,21 +84,21 @@ pub struct AccessConfig {
     pub grants_mode: Mode,
     /// The `user` blocks: login to grants. Empty in the mode `dynamic`.
     pub configured_grants: BTreeMap<String, Vec<Grant>>,
-    /// The `user` blocks: the accounts of the file, with their keys (portal 3.4a).
+    /// The `user` blocks: the accounts of the file, with their keys.
     pub accounts: BTreeMap<String, FileAccount>,
     /// The blocks `external_service`: the external services of the file, in the order of the file.
     pub external_services: Vec<crate::catalog::external::ExternalEntry>,
     pub actions_timeout: Duration,
     pub actions_refresh: Duration,
-    /// The longest time that the last good document of a service stays valid (portal 10.3a).
+    /// The longest time that the last good document of a service stays valid.
     pub actions_max_age: Duration,
-    /// The longest wait for the first reads of the documents at start (portal 10.2c).
+    /// The longest wait for the first reads of the documents at start.
     pub start_read_deadline: Duration,
-    /// The size that the document of a service can have (portal 7.9).
+    /// The size that the document of a service can have.
     pub bounds: crate::actions::Bounds,
 }
 
-/// An account of the file (portal 3.4a): a block `user`.
+/// An account of the file: a block `user`.
 #[derive(Clone, Debug)]
 pub struct FileAccount {
     pub grants: Vec<Grant>,
@@ -107,12 +107,12 @@ pub struct FileAccount {
     pub keys: Vec<FileKey>,
 }
 
-/// A key of the file (portal 3.4c): a block `key` inside a block `user`. The program never holds
+/// A key of the file: a block `key` inside a block `user`. The program never holds
 /// the text of the key, only its SHA-256 digest.
 #[derive(Clone, Debug)]
 pub struct FileKey {
     pub name: String,
-    /// The local part of the subject id (portal 3.4c).
+    /// The local part of the subject id.
     pub id: String,
     pub digest: [u8; 32],
     /// The attribute `interaction` of the block.
@@ -120,7 +120,7 @@ pub struct FileKey {
     pub grants: Vec<Grant>,
 }
 
-/// The block `keys` (portal 10.2).
+/// The block `keys`.
 #[derive(Clone, Debug)]
 pub struct KeysConfig {
     pub default_lifetime: Duration,
@@ -129,9 +129,9 @@ pub struct KeysConfig {
     pub max_counter_rows: usize,
     pub max_directory_grants: usize,
     pub history_days: u32,
-    /// The kind `mcp` is on (portal 5.1, 10.2).
+    /// The kind `mcp` is on.
     pub mcp: bool,
-    /// The kind `api` is on (portal 5.1, 10.2).
+    /// The kind `api` is on.
     pub api: bool,
 }
 
@@ -148,7 +148,7 @@ impl KeysConfig {
     }
 }
 
-/// The identity token that `/auth/verify` gives to a service (contract 11.3).
+/// The identity token that `/auth/verify` gives to a service.
 #[derive(Clone, Debug)]
 pub struct IdentityConfig {
     /// The response header, in lower case.
@@ -157,7 +157,7 @@ pub struct IdentityConfig {
     pub token_ttl: Duration,
 }
 
-/// The AuthZEN PDP listener (contract 11.5).
+/// The AuthZEN PDP listener.
 #[derive(Clone, Debug)]
 pub struct PdpConfig {
     pub listen_address: SocketAddr,
@@ -165,9 +165,9 @@ pub struct PdpConfig {
     pub url: String,
     pub max_body_bytes: usize,
     pub max_evaluations: usize,
-    /// `true`: the URL can be `http` (portal 9.7a).
+    /// `true`: the URL can be `http`.
     pub plain_http: bool,
-    /// The database connections that count the uses (portal 7.7e).
+    /// The database connections that count the uses.
     pub counter_connections: usize,
 }
 
@@ -176,7 +176,7 @@ pub struct UsersConfig {
     /// `false`: the superadmin makes no account in the database (the route answers 404).
     pub allow_creation: bool,
     pub max_users: usize,
-    /// The largest number of grants of one user (portal 10.2d).
+    /// The largest number of grants of one user.
     pub max_grants: usize,
 }
 
@@ -505,7 +505,7 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
         );
     }
 
-    // Without the block, each key of the block gives its default (portal 10.1a).
+    // Without the block, each key of the block gives its default.
     let key_limits = KeysConfig {
         default_lifetime: r.duration("keys", "default_lifetime")?,
         directory_max_age: r.duration("keys", "directory_max_age")?,
@@ -518,7 +518,7 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
         api: r.bool("keys", "api")?,
     };
     let keys = if r.has_block("keys") {
-        // The five contradictions of the switches (portal 10.2e): each error names the key, the
+        // The five contradictions of the switches: each error names the key, the
         // expected value and the value found.
         if !key_limits.mcp && !key_limits.api {
             return Err("a block keys with both kinds off does nothing: keys.mcp is false and keys.api is false; expected one of them to be true, or no block keys".into());
@@ -732,7 +732,7 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
     }
     if let Some(pdp) = &config.pdp {
         // The two values must agree: an `http` URL needs `plain_http`, and `plain_http` needs an
-        // `http` URL (portal 10.2b).
+        // `http` URL.
         let http = pdp.url.starts_with("http://");
         if http && !pdp.plain_http {
             return Err(format!(
@@ -782,7 +782,7 @@ fn source_of(r: &Resolved, key: &str) -> String {
 }
 
 /// The superadmin passwords that the repository publishes as examples: `.env.example` of the
-/// repository root, `.env.example` and the quick start of this README. Anybody who reads the
+/// repository root, `.env.example` and the quick start of the documentation. Anybody who reads the
 /// repository knows them.
 const EXAMPLE_PASSWORDS: [&str; 2] = ["change-me-use-a-long-random-secret", "test1234"];
 /// The session secret that `.env.example` of the repository root publishes as an example.

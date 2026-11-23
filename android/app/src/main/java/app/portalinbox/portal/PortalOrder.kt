@@ -1,6 +1,6 @@
 package app.portalinbox.portal
 
-/** The order of the portals that the user sets by dragging (proposal 3.4). */
+/** The order of the portals that the user sets by dragging. */
 object PortalOrder {
     /**
      * The order to store. [current] are the ids of the portals now. [requested] is what the screen sends. An id that is not in

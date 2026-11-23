@@ -282,7 +282,7 @@
     <!-- Items: notifications -->
     <string name="notification_decline">Decline</string>
 
-    <!-- Home list with several portals (lot MP3) -->
+    <!-- Home list with several portals -->
     <string name="filter_all">All</string>
     <string name="filter_strip_description">Filter by portal</string>
     <string name="alarm_portal_description">Portal %1$s</string>

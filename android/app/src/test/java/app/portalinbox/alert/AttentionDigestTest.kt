@@ -10,7 +10,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** The digest inside the one notification (decision "one notification", lot MP5): a refresh with numbers, never a second notification. */
+/** The digest inside the one notification (decision "one notification"): a refresh with numbers, never a second notification. */
 class AttentionDigestTest {
     private val w = AttentionWorld()
     private val day = 86_400_000L

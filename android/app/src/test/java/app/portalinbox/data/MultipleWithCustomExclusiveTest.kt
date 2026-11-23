@@ -10,7 +10,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** DIAL 1.4.2: with `multiple` and `allow_custom`, the free answer excludes the ticks, and `min` and `max` count the ticks only. */
+/** With `multiple` and `allow_custom`, the free answer excludes the ticks, and `min` and `max` count the ticks only. */
 class MultipleWithCustomExclusiveTest {
     private fun opt(id: String) = JSONObject().put("id", id).put("label", id.uppercase())
 

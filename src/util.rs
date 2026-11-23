@@ -305,7 +305,7 @@ fn year_of(unix: i64) -> i64 {
         .unwrap_or(1970)
 }
 
-/// `2026-11-23T00:00:00Z`: the form of a date and a time in UTC of the form of a key (portal 5.8c).
+/// `2026-11-23T00:00:00Z`: the form of a date and a time in UTC of the form of a key.
 pub fn format_utc_instant(unix: i64) -> String {
     let text = format_utc_secs(unix);
     // `2026-10-10 14:03:27` becomes `2026-10-10T14:03:27Z`.

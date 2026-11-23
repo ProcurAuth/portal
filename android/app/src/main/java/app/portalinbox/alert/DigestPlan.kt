@@ -3,7 +3,7 @@ package app.portalinbox.alert
 import app.portalinbox.ui.Ages
 
 /**
- * The digest of several portals, as a part of the one notification (lot MP5, decision "one notification"). Pure Kotlin.
+ * The digest of several portals, as a part of the one notification. Pure Kotlin.
  *
  * A `digest` frame has numbers and an age, never a body. Each portal sends its own frame on its own schedule. The phone does not
  * post a notification for a frame. It keeps the last frame of each portal in a [Memory], turns it into a [Waiting] with

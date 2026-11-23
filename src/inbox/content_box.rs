@@ -246,7 +246,7 @@ impl ContentBox {
 
     /// The value that the database keeps to tell whether a key is the key of its contents. It reveals nothing
     /// about the key. `None` when the id is not in the file.
-    #[allow(dead_code)] // the PDP of lot L6 reads it
+    #[allow(dead_code)] // the PDP reads it
     pub fn check_value(&self, kid: &str) -> Option<[u8; 32]> {
         self.keys.iter().find(|k| k.id == kid).map(|k| k.check)
     }
@@ -263,7 +263,7 @@ impl ContentBox {
     }
 
     /// The key of the `evaluation_id` of the key `kid`. `None` when the id is not in the file.
-    #[allow(dead_code)] // the submission API of lot L7 checks the `evaluation_id` with it
+    #[allow(dead_code)] // the submission API checks the `evaluation_id` with it
     pub fn evaluation_key_of(&self, kid: &str) -> Option<&[u8; 32]> {
         self.keys
             .iter()
@@ -509,13 +509,16 @@ mod tests {
         assert!(error.contains("content-purge"), "the way out: {error}");
     }
 
-    /// The README and `SECURITY.md` must say that the seal is not end-to-end encryption, what it covers, and what
-    /// it does not cover (SPEC 5.11.1, 5.11.12, 5.11.13).
+    /// The page `docs/inbox/README.md` and the page `docs/inbox/SECURITY.md` must say that the seal is not end-to-end
+    /// encryption, what it covers, and what it does not cover (SPEC 5.11.1, 5.11.12, 5.11.13).
     #[test]
     fn the_documents_say_what_the_seal_covers_and_does_not_cover() {
-        let readme = include_str!("../../README.md");
+        let readme = include_str!("../../docs/inbox/README.md");
         let security = include_str!("../../docs/inbox/SECURITY.md");
-        for (name, text) in [("README.md", readme), ("SECURITY.md", security)] {
+        for (name, text) in [
+            ("docs/inbox/README.md", readme),
+            ("docs/inbox/SECURITY.md", security),
+        ] {
             assert!(
                 text.contains("**This is not end-to-end encryption.**"),
                 "{name} says that the seal is not end-to-end encryption"

@@ -19,7 +19,7 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** DIAL 1.6 and 4.3 (mock 3c): the screen of an automatic system that holds no conversation. */
+/** The screen of an automatic system that holds no conversation. */
 class OneShotScreenStateTest {
     private val server = 1L
     private val created = 1_788_000_000_000L
@@ -31,7 +31,7 @@ class OneShotScreenStateTest {
     private fun opt(id: String, description: String? = null) =
         JSONObject().put("id", id).put("label", id).also { if (description != null) it.put("description", description) }
 
-    /** The decision of mock 3c: three teams, a suggestion with 62 %. */
+    /** Three teams, a suggestion with 62 %. */
     private fun decision(): Item {
         engine.onRequest(
             server,

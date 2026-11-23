@@ -3,7 +3,7 @@ package app.portalinbox.portal
 import app.portalinbox.net.ServerAddress
 
 /**
- * What the confirmation screen of an enrollment shows and what it lets the user do (proposal 3.5 and 3.6). Pure Kotlin. The
+ * What the confirmation screen of an enrollment shows and what it lets the user do. Pure Kotlin. The
  * screen holds the code, the way it came, the portals of the phone and what the user typed so far. It calls [plan] after each
  * change and draws the [Plan]. The screen decides nothing.
  *

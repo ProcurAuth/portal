@@ -1,4 +1,4 @@
-//! The questions: an agent asks a question to the owner of its key (lot L13, DIAL 1.3 to 1.6, 3 and 5.1).
+//! The questions: an agent asks a question to the owner of its key.
 //!
 //! The tool `ask` of the MCP endpoint and the route `POST /api/v1/questions` call [`ask`]. The functions `supersede`
 //! and the `say` of a thread are in this module and in `mcp_tools.rs`. The module holds the rules that are special to
@@ -211,7 +211,7 @@ fn bad_command_char(c: char) -> bool {
         || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
-/// The matrix of the flags (DIAL 1.4.2) and the rules of the `interaction` of the key (DIAL 1.6).
+/// The matrix of the flags and the rules of the `interaction` of the key.
 ///
 /// - A key `one_shot` sets no flag and asks `choice` or `confirm` only: `interaction_not_allowed`.
 /// - `text`: `allow_custom` is refused, because the text is the answer already.
@@ -1100,7 +1100,7 @@ mod tests {
         build(a, &limits(), interaction, 1_000_000, &r)
     }
 
-    /// DIAL 1.4.2: the valid combinations of the flags for each type of input. The `choice` and the `confirm` take every
+    /// The valid combinations of the flags for each type of input. The `choice` and the `confirm` take every
     /// combination, the `text` takes `allow_ask_back` only, and the type `none` takes no flag.
     #[test]
     fn flags_matrix_all_valid_combinations_per_type() {

@@ -3,7 +3,7 @@ package app.portalinbox.data
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * The difference between the clock of each server and the clock of the phone (DIAL 4.8: the age of an item counts with
+ * The difference between the clock of each server and the clock of the phone (the age of an item counts with
  * `server_time_ms`). A `welcome` frame gives the server time. The offset is `server time - phone time` at that moment.
  * Without an offset (a server never seen since the start) the phone clock stands alone.
  */

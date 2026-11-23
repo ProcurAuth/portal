@@ -4,7 +4,7 @@
 //! because it rotates. The cluster CA is the only trusted root. The required RBAC is `get` and
 //! `list` on `ingressroutes` and `pods`.
 //!
-//! The source reads two lists, page by page: the IngressRoutes and all the pods (portal 7.3c). It
+//! The source reads two lists, page by page: the IngressRoutes and all the pods. It
 //! finds the pods of each selector in memory. The number of ready pods gives up or down. The
 //! readiness probes of the containers give the runtime health. The pod list holds the spec of
 //! each pod, so the runtime health needs no other request and no other RBAC verb.

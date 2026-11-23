@@ -6,9 +6,9 @@ import java.net.URI
 import java.util.Locale
 
 /**
- * The look-alike checks of an enrollment (proposal 2, attackers B and C; proposal 3.5). Pure Kotlin. They compare the
+ * The look-alike checks of an enrollment. Pure Kotlin. They compare the
  * portal that the user is about to add with the portals that the phone holds. The result is a [Finding]. The screen of the
- * enrollment (lot MP2) turns it into a banner and into the required tick.
+ * enrollment turns it into a banner and into the required tick.
  *
  * The checks, from the strongest finding to the weakest:
  * 1. [Finding.SameKey]: the pinned key is the key of a portal that the phone holds. The address does not matter.

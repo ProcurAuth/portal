@@ -47,7 +47,7 @@ object Prefs {
         if (app.portalinbox.data.LocalRetention.isOption(days)) prefs(c).edit().putInt("local_retention_days", days).apply()
     }
 
-    /** The groups of "To answer" that the owner folded (lot G4). Local to the phone: see [AgentCollapse]. */
+    /** The groups of "To answer" that the owner folded. Local to the phone: see [AgentCollapse]. */
     fun agentCollapse(c: Context): AgentCollapse = AgentCollapse.decode(prefs(c).getString("agent_folded", null))
 
     fun setAgentCollapse(c: Context, v: AgentCollapse) = prefs(c).edit().putString("agent_folded", v.encode()).apply()

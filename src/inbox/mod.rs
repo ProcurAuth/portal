@@ -354,7 +354,7 @@ async fn bind_content_keys(db: &Store, content: &content_box::ContentBox) -> Res
             ids.iter().map(|id| format!("{id:?}")).collect::<Vec<_>>().join(", ")
         )),
         db::KeyBind::NoTable => Err(
-            "the inbox database was made by a version before 5.1.0 and has no table content_key_check: this portal has no migration for it; make a new database, or add the table by hand (see README, Upgrades, version 5.1.0)".into(),
+            "the inbox database was made by a version before 5.1.0 and has no table content_key_check: this portal has no migration for it; make a new database, or add the table by hand (see docs/operations.md, Upgrades, version 5.1.0)".into(),
         ),
     }
 }

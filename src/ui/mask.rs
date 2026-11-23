@@ -16,7 +16,7 @@
 //!    no combinator that depends on the structure (`>`, `+`, `~`, `:first-child`). A test checks it.
 //!
 //! This is obscurity, not security. A reader of the page can still see the form, the text and
-//! the behavior. See `docs/login-hardening.md`. The settings pages keep the plain names: they
+//! the behavior. See `docs/design/login-hardening.md`. The settings pages keep the plain names: they
 //! need a session, and they load their own files.
 
 use super::{asset_path, assets, Assets};

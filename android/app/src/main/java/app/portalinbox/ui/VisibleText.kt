@@ -5,7 +5,7 @@ import app.portalinbox.render.SpanStyle
 import app.portalinbox.render.StyledText
 
 /**
- * Makes the characters that the eye cannot see visible (CONF 4.9, plan R5). Pure Kotlin: no Context.
+ * Makes the characters that the eye cannot see visible. Pure Kotlin: no Context.
  *
  * Nothing is removed and nothing is refused. A control, bidi, zero-width or space character of the
  * range that follows is replaced on the screen by a mark like `<U+202E>`. The text that the owner

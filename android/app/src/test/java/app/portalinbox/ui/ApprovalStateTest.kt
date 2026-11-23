@@ -198,7 +198,7 @@ class ApprovalStateTest {
         assertTrue(r is app.portalinbox.data.Submit.Queued)
     }
 
-    // ------------------------------------------------------------ the link to the portal (lot MP4)
+    // ------------------------------------------------------------ the link to the portal
 
     private fun linked(i: Item, link: ApprovalState.Link) =
         ApprovalState.of(ApprovalState.Input(i, now, read, false, AnswerProgress.None, true, true, link, "Homelab"))

@@ -638,7 +638,7 @@ def s5(sc):
     sc.check((st.structured or {}).get("status") in ("void", "pending"), "the old request is void (or revived by the read: %s)" % (st.structured,), fmt(st))
 
 
-@scenario(6, "Several permissions: export_query = query.export + query.run.read (Q53)")
+@scenario(6, "Several permissions: export_query = query.export + query.run.read")
 def s6(sc):
     alice = CTX["alice"]
     # a) confirm on query.run.read only.
@@ -683,7 +683,7 @@ def s6(sc):
     sc.check(r.awaiting, "confirm on query.run.read still asks for run_query (the tool that uses it)", fmt(r))
 
 
-@scenario(7, "The own confirm of a person (Q51)")
+@scenario(7, "The own confirm of a person")
 def s7(sc):
     admin = CTX["admin"]
     grants = [(t, l, (c or (t.startswith("query.run.read on")))) for (t, l, c) in owner_grants()]

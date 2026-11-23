@@ -180,8 +180,8 @@ ALTER TABLE user_grants
   ADD PRIMARY KEY (user_id, action, resource_type, resource_id, resource_path);
 "#,
     "
--- Version 6: the keys of the users, their grants and their counters (portal 4, 5, 7 and 10.7). A
--- key belongs to one user, or to the superadmin: then owner_id is NULL (portal 3.7b). Deleting a
+-- Version 6: the keys of the users, their grants and their counters. A
+-- key belongs to one user, or to the superadmin: then owner_id is NULL. Deleting a
 -- user deletes the keys of the user with their grants and their counters. The id of a key is text
 -- that the program makes at random. The key table holds the SHA-256 digest of a key, never the
 -- key. A revoked key leaves one summary row in key_history. The column limits of a grant holds the
@@ -244,7 +244,7 @@ CREATE TABLE directory_version (
 INSERT INTO directory_version (id, version) VALUES (1, 0);
 ",
     "
--- Version 7: the kind of a key (portal 5.1). The kind is the prefix of the text of the key: mcp for an
+-- Version 7: the kind of a key. The kind is the prefix of the text of the key: mcp for an
 -- agent, api for a service. A key that exists before this version is an MCP key: no other kind
 -- existed.
 ALTER TABLE keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'mcp' CHECK (kind IN ('mcp', 'api'));
@@ -253,8 +253,8 @@ ALTER TABLE keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'mcp' CHECK (kind IN ('mc
 -- Version 8: the remembered sessions (\"Remember me\"). A remembered session has a longer life
 -- and a longer idle time. The history row keeps the flag for the list of the sessions. A session
 -- that exists before this version is not remembered.
--- The second factor (TOTP) is part of this version, with no step of its own: the portal has no deployment with
--- users, so the base schema changed in place. A database that was made by the version 8 before the second factor
+-- The second factor (TOTP) is part of this version, with no step of its own: this version has no
+-- migration step for it, so the base schema changed in place. A database that was made by the version 8 before the second factor
 -- lacks these objects: the check at the end of the migration refuses it. The column mfa of a session tells that
 -- the sign-in used the second factor. totp_credentials holds one row for each account that has it, keyed by
 -- login: the accounts of the file have no row in users. The secret is sealed with the key of the configuration.
@@ -299,7 +299,7 @@ CREATE TABLE external_services (
 -- The description and the icon of an external service (5.4.0) are part of this version too. description has 200
 -- characters at most. icon holds the bytes of the own icon, 32 KiB at most, and icon_type its media type: both are NULL
 -- when the service has no own icon. A database that the version 8 made before 5.4.0 lacks the three columns: the check
--- at the end of the migration refuses it. The file homelab-migration/5.3.0-to-5.4.0.sql adds them.
+-- at the end of the migration refuses it. The file deploy/migrations/5.3.0-to-5.4.0.sql adds them.
 -- The approvals (5.1.0) are part of this version too. user_grants.confirm and key_grants.confirm hold the property
 -- confirm of a grant. keys.interaction holds conversational or one_shot: a key of kind api that exists before gets
 -- one_shot, the others get conversational. A database that the version 8 made before the approvals lacks the three
@@ -509,14 +509,14 @@ impl Pool {
 
 pub struct Pg {
     pool: Pool,
-    /// The connections of the counter statements (portal 7.7): their own pool, with a short
+    /// The connections of the counter statements: their own pool, with a short
     /// statement timeout and the asynchronous commit.
     counters: Pool,
 }
 
-/// The default number of counter connections (`pdp.counter_connections`, portal 7.7e).
+/// The default number of counter connections (`pdp.counter_connections`).
 pub const DEFAULT_COUNTER_CONNECTIONS: usize = 2;
-/// The longest time of a counter statement and of the wait for a counter connection (portal 7.7).
+/// The longest time of a counter statement and of the wait for a counter connection.
 pub const COUNTER_TIMEOUT: Duration = Duration::from_millis(500);
 
 fn pool(config: postgres::Config, max: usize, wait: Duration) -> Pool {
@@ -535,7 +535,7 @@ fn pool(config: postgres::Config, max: usize, wait: Duration) -> Pool {
 }
 
 /// The configuration of a counter connection: the options of the main connections, but a statement
-/// timeout of 500 ms and the asynchronous commit (portal 7.7).
+/// timeout of 500 ms and the asynchronous commit.
 fn counter_config(config: &postgres::Config) -> postgres::Config {
     let mut counters = config.clone();
     // The later `-c` of an option wins, so the timeout of the main connections is replaced. The
@@ -691,7 +691,7 @@ impl Pg {
                 .get(0);
             if !complete {
                 return Ok(Err(format!(
-                    "the database was made by schema version {} before the second factor or before the column credential of sessions, and this portal has no migration for it: make a new database, or add the tables totp_credentials, totp_recovery and totp_key_check, the column mfa of sessions and sessions_log and the column credential (BYTEA NOT NULL) of sessions by hand (see docs/login-hardening.md)",
+                    "the database was made by schema version {} before the second factor or before the column credential of sessions, and this portal has no migration for it: make a new database, or add the tables totp_credentials, totp_recovery and totp_key_check, the column mfa of sessions and sessions_log and the column credential (BYTEA NOT NULL) of sessions by hand (see docs/authentication.md, Second factor, Schema)",
                     SCHEMA.len()
                 )));
             }
@@ -707,7 +707,7 @@ impl Pg {
                 .get(0);
             if !with_approvals {
                 return Ok(Err(format!(
-                    "the database was made by schema version {} before the approvals, and this portal has no migration for it: make a new database, or add the columns user_grants.confirm, key_grants.confirm and keys.interaction by hand (see README, Upgrades, version 5.1.0)",
+                    "the database was made by schema version {} before the approvals, and this portal has no migration for it: make a new database, or add the columns user_grants.confirm, key_grants.confirm and keys.interaction by hand (see docs/operations.md, Upgrades, version 5.1.0)",
                     SCHEMA.len()
                 )));
             }
@@ -721,7 +721,7 @@ impl Pg {
                 .get(0);
             if !with_agents {
                 return Ok(Err(format!(
-                    "the database was made by schema version {} before the agents, and this portal has no migration for it: make a new database, or add the column keys.agents by hand (see README, Upgrades, version 5.1.0)",
+                    "the database was made by schema version {} before the agents, and this portal has no migration for it: make a new database, or add the column keys.agents by hand (see docs/operations.md, Upgrades, version 5.1.0)",
                     SCHEMA.len()
                 )));
             }
@@ -730,7 +730,7 @@ impl Pg {
                 .get(0);
             if !with_externals {
                 return Ok(Err(format!(
-                    "the database was made by schema version {} before the external services, and this portal has no migration for it: make a new database, or add the table external_services by hand (see README, Upgrades, version 5.0.5)",
+                    "the database was made by schema version {} before the external services, and this portal has no migration for it: make a new database, or add the table external_services by hand (see docs/operations.md, Upgrades, version 5.0.5)",
                     SCHEMA.len()
                 )));
             }
@@ -745,7 +745,7 @@ impl Pg {
                 .get(0);
             if !with_icons {
                 return Ok(Err(format!(
-                    "the database was made by schema version {} before the description and the icon of the external services (5.4.0), and this portal has no migration for it: apply the migration file 5.3.0-to-5.4.0.sql, or add the columns external_services.description, external_services.icon_type and external_services.icon by hand (see README, Upgrades, version 5.4.0)",
+                    "the database was made by schema version {} before the description and the icon of the external services (5.4.0), and this portal has no migration for it: apply the migration file 5.3.0-to-5.4.0.sql, or add the columns external_services.description, external_services.icon_type and external_services.icon by hand (see docs/operations.md, Upgrades, version 5.4.0)",
                     SCHEMA.len()
                 )));
             }
@@ -1523,7 +1523,7 @@ impl Pg {
                     ],
                 )?;
             }
-            // The directory changed: the instances read it again (portal 10.7).
+            // The directory changed: the instances read it again.
             keys::bump(&mut tx)?;
             let session = tx.prepare(
                 "INSERT INTO sessions_log
@@ -1951,7 +1951,7 @@ mod tests {
              VALUES ('key2', NULL, 'x', '\\x00ff', 'cd34', 1)",
         );
         assert!(twice.is_err(), "the same digest cannot name two keys");
-        // A key of the superadmin has no owner row (portal 3.7b).
+        // A key of the superadmin has no owner row.
         admin
             .batch_execute(
                 "INSERT INTO keys (id, owner_id, name, digest, hint, created_at)
@@ -2487,7 +2487,7 @@ mod tests {
         );
     }
 
-    /// The table `user_grants` of portal 4.1.0 (schema version 4), with `rows`.
+    /// The table `user_grants` of version 4.1.0 (schema version 4), with `rows`.
     fn version_four(admin: &mut Client, rows: &str) {
         admin
             .batch_execute(&format!(

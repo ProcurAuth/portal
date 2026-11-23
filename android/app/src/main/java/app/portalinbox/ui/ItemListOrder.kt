@@ -8,7 +8,7 @@ import app.portalinbox.proto.RequestKind
 /**
  * The order of the home list. Pure Kotlin.
  *
- * Alice's rule (checkpoint C3): the alerts come first. The section "To answer" comes below them. Inside "To answer",
+ * The alerts come first. The section "To answer" comes below them. Inside "To answer",
  * the oldest request comes first: the one that waits longest is the first to read. [app.portalinbox.portal.ItemSort] sorts the rows.
  */
 object ItemListOrder {
@@ -17,7 +17,7 @@ object ItemListOrder {
     /** The sections that show, from the top. A section with no row does not show. Alerts are always above the new agents and the items. */
     fun sections(hasAlerts: Boolean, hasItems: Boolean, hasNewAgents: Boolean = false): List<Section> = buildList {
         if (hasAlerts) add(Section.ALERTS)
-        // The cards of the new agents sit above "To answer" and below the alerts (lot G4).
+        // The cards of the new agents sit above "To answer" and below the alerts.
         if (hasNewAgents) add(Section.NEW_AGENTS)
         if (hasItems) add(Section.TO_ANSWER)
     }
@@ -25,7 +25,7 @@ object ItemListOrder {
     // The order of the items across portals is in [app.portalinbox.portal.ItemSort]: it limits the time that a portal claims.
 
     /**
-     * The section "To answer" as groups, one for each agent of each portal (lot G4). [sorted] are the open items that
+     * The section "To answer" as groups, one for each agent of each portal. [sorted] are the open items that
      * [app.portalinbox.portal.ItemSort.toAnswer] sorted: the oldest first, across portals. The new agents come first, then the
      * groups by their oldest open item, the bucket last. Inside a group the items keep the order that they came in. The rules and
      * the model are in [AgentGroups].

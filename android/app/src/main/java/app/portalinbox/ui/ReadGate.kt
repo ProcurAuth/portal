@@ -1,7 +1,7 @@
 package app.portalinbox.ui
 
 /**
- * The gate "read to the end" of the command (CONF 5.3). Approve stays locked until the owner scrolled the
+ * The gate "read to the end" of the command. Approve stays locked until the owner scrolled the
  * command box to its end. Pure Kotlin: the screen gives the numbers of the scroll box.
  *
  * Rules:

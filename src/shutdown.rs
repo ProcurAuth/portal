@@ -1,4 +1,4 @@
-//! The stop of the server on SIGTERM (portal 7.3a).
+//! The stop of the server on SIGTERM.
 //!
 //! The instance serves 5 seconds more, so the cluster can remove it from the endpoints of its
 //! Service. Then it closes the listeners, tells each connection to close, and waits at most 10

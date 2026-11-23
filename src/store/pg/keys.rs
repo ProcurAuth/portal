@@ -1,10 +1,10 @@
 //! The keys, the directory version and the counter rows in PostgreSQL.
 //!
 //! Each write to the users, the grants or the keys first adds 1 to `directory_version` in its
-//! transaction (portal 10.7). This takes the lock of the one row, so two writes never run at the
-//! same time, and the counts of the write (portal 5.4, 7.2f, 10.7d) are exact. A write that adds
+//! transaction. This takes the lock of the one row, so two writes never run at the
+//! same time, and the counts of the write are exact. A write that adds
 //! a limit value makes the counter rows of the value in the same transaction, with the
-//! synchronous commit of the write (portal 7.2a, 7.7b).
+//! synchronous commit of the write.
 
 use postgres::{GenericClient, IsolationLevel, Transaction};
 
@@ -12,7 +12,7 @@ use super::*;
 use crate::decision::{Counter, CounterOwner};
 use crate::grants::{counter_ids, CounterId};
 
-/// The most rows that one insert statement makes (portal 7.7b).
+/// The most rows that one insert statement makes.
 const ROWS_PER_STATEMENT: usize = 1_000;
 
 /// Who owns the counters of a write.
@@ -59,7 +59,7 @@ pub(super) fn insert_counter_rows(
     Ok(())
 }
 
-/// The bounds of portal 7.2f and 10.7d, checked after the write inserted its rows. The caller
+/// The bounds, checked after the write inserted its rows. The caller
 /// drops the transaction when this answers `false`.
 fn within_capacity(tx: &mut Transaction<'_>, caps: &KeyCaps) -> Result<bool, postgres::Error> {
     let counters: i64 = tx
@@ -129,7 +129,7 @@ impl Columns {
     }
 }
 
-/// One statement counts one use on all its counters (portal 7.2b). It locks the rows in the order
+/// One statement counts one use on all its counters. It locks the rows in the order
 /// of their id, computes the window start, the reset and the room from the locked values and from
 /// the clock of the database, and it changes the rows only when each counter has room.
 const COUNT_USE: &str = "
@@ -285,7 +285,7 @@ impl Pg {
                 columns.push(owner, id, 0);
             }
             // The statement is a transaction of its own, with the synchronous commit: a crash or a
-            // failover cannot lose a counter row (portal 7.7b).
+            // failover cannot lose a counter row.
             made += self.run(|c| {
                 let mut tx = c.transaction()?;
                 tx.batch_execute("SET LOCAL synchronous_commit = on; SET LOCAL statement_timeout = 5000")?;
@@ -462,7 +462,7 @@ impl Pg {
     }
 
     /// The version, the users and the keys in one transaction with the isolation REPEATABLE READ
-    /// (portal 10.7).
+    ///.
     pub fn load_directory(&self) -> Result<DirectorySnapshot, String> {
         let (version, user_rows, key_rows, grant_rows, externals) = self.run(|c| {
             let mut tx = c

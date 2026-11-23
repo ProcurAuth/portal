@@ -1,9 +1,9 @@
-//! The keys, the directory version and the counter rows in SQLite (portal 10.4a).
+//! The keys, the directory version and the counter rows in SQLite.
 //!
 //! One instance is the only writer of the file, so a write needs no row lock: the connection is
 //! behind a mutex, and each write is one transaction. Each write to the users, the grants or the
-//! keys adds 1 to `directory_version` in its transaction (portal 10.7). A write that adds a limit
-//! value makes the counter rows of the value in the same transaction (portal 7.2a, 10.4a).
+//! keys adds 1 to `directory_version` in its transaction. A write that adds a limit
+//! value makes the counter rows of the value in the same transaction.
 
 use rusqlite::{params, Transaction};
 
@@ -60,7 +60,7 @@ fn total(tx: &Transaction<'_>, sql: &str) -> rusqlite::Result<i64> {
     tx.query_row(sql, [], |row| row.get(0))
 }
 
-/// The bounds of portal 7.2f and 10.7d, checked after the write inserted its rows. The caller
+/// The bounds, checked after the write inserted its rows. The caller
 /// drops the transaction when this answers `false`.
 fn within_capacity(tx: &Transaction<'_>, caps: &KeyCaps) -> rusqlite::Result<bool> {
     let counters = total(tx, "SELECT COUNT(*) FROM budget_counters")?;
@@ -288,7 +288,7 @@ impl Sqlite {
         clock: Option<f64>,
     ) -> Result<CountOutcome, String> {
         let mut conn = self.conn();
-        // The write lock of the file replaces the row locks (portal 7.2b, 10.4a).
+        // The write lock of the file replaces the row locks.
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(db)?;

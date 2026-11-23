@@ -85,7 +85,7 @@ object ItemSchema {
                 PRIMARY KEY (server_id, client_msg_id))"""
         )
         db.execSQL("CREATE INDEX outbox_request ON outbox(server_id, request_id)")
-        // One row for each portal and agent (lot G4). `frame` is the last `agent` frame with the highest `rev`.
+        // One row for each portal and agent. `frame` is the last `agent` frame with the highest `rev`.
         db.execSQL(
             """CREATE TABLE agents (
                 server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,

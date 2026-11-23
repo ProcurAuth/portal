@@ -164,7 +164,7 @@ pub struct AppState {
     /// Slow bodies cannot take every connection that ForwardAuth needs.
     pub login_body_gate: Arc<Semaphore>,
     /// The bodies of the forms of the keys that the server reads at the same time: at most 4
-    /// (portal 5.8c). A fifth request gets the status 503.
+    ///. A fifth request gets the status 503.
     pub key_body_gate: Arc<Semaphore>,
 
     pub metrics: Metrics,
@@ -181,7 +181,7 @@ pub struct AppState {
     pub signer: Option<Signer>,
     /// The actions that each service publishes.
     pub actions: Arc<actions::Registry>,
-    /// The options of the forms of grants: the children that a service lists (portal 3.1a).
+    /// The options of the forms of grants: the children that a service lists.
     pub options: crate::options::Options,
     /// The servers that can ask the PDP. Each server has the hash of its token.
     pub pdp_clients: pdp::Clients,
@@ -189,22 +189,22 @@ pub struct AppState {
     /// A fault that a test asks the approval gate to play (see `pdp::approval`).
     #[cfg(test)]
     pub pdp_fault: std::sync::atomic::AtomicU8,
-    /// The key checks that passed, not yet written to the database (portal 5.5a).
+    /// The key checks that passed, not yet written to the database.
     pub key_checks: crate::keyauth::KeyChecks,
-    /// The count of the key checks of the edge, by result (portal 10.5).
+    /// The count of the key checks of the edge, by result.
     pub key_stats: crate::keyauth::CheckStats,
-    /// The limit of the lines of the failed key checks (portal 10.5a).
+    /// The limit of the lines of the failed key checks.
     pub key_failure_log: crate::keyauth::FailureLog,
-    /// The count of the uses of the budgets, with the refusal memo (portal 7.2b, 7.6).
+    /// The count of the uses of the budgets, with the refusal memo.
     pub counting: crate::counting::Counting,
-    /// The counters whose rows this instance made or found (portal 7.2a).
-    /// The number of limit values that the documents do not declare (portal 7.8).
+    /// The counters whose rows this instance made or found.
+    /// The number of limit values that the documents do not declare.
     pub undeclared_values: std::sync::atomic::AtomicU64,
-    /// The stop on SIGTERM: the live connections and the signal that closes them (portal 7.3a).
+    /// The stop on SIGTERM: the live connections and the signal that closes them.
     pub stop: crate::shutdown::Stop,
     /// The inbox. It runs without a session of the portal.
     pub inbox: crate::inbox::Slot,
-    /// True when the portal serves its own routes: the catalogue is complete (portal 7.3b). With the
+    /// True when the portal serves its own routes: the catalogue is complete. With the
     /// block `inbox`, the listener opens before that moment and serves the API of the inbox only,
     /// so that an alert never waits for the catalogue. Every other route answers 503 until then.
     pub serving: std::sync::atomic::AtomicBool,
@@ -451,7 +451,7 @@ const START_TICK: std::time::Duration = std::time::Duration::from_millis(50);
 /// How often the start says that it waits for the catalogue.
 const START_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Waits for the tasks that must end before the ports open (portal 7.3b): the complete list of
+/// Waits for the tasks that must end before the ports open: the complete list of
 /// the services, then the first reads of their documents, at most `access.start_read_deadline`.
 /// The directory is loaded when the state exists. Gives `false` when the stop came first.
 async fn wait_ready(
@@ -503,7 +503,7 @@ async fn wait_ready(
     }
 }
 
-/// Runs the server until `stop` ends (portal 7.3a, 7.3b).
+/// Runs the server until `stop` ends.
 async fn serve_until(
     state: Arc<AppState>,
     stop: impl std::future::Future<Output = ()> + Send + 'static,
@@ -539,7 +539,7 @@ async fn serve_until(
 
     // With the block `inbox`, the listener opens now and serves the API of the inbox only. The
     // inbox must take alerts while the catalogue is not complete. Without the block, the
-    // ports open when the catalogue is complete (portal 7.3b).
+    // ports open when the catalogue is complete.
     let mut accepting = Vec::new();
     let mut listener = None;
     if state.config.inbox.is_some() {
@@ -1098,7 +1098,7 @@ fn handle_verify(state: &AppState, headers: &HeaderMap, client: &Client) -> Http
                 state
                     .tracker
                     .service_hit(viewer.session.sid, &id, ip_text(client), now);
-                // The identity token of the service (contract 11.3). Traefik copies it to the
+                // The identity token of the service. Traefik copies it to the
                 // request with `authResponseHeaders`.
                 if let (Some(signer), Some(identity)) = (&state.signer, &state.config.identity) {
                     let token = signer.token(viewer.session.sid, &viewer.login, &id, now);
@@ -1978,7 +1978,7 @@ fn inbox_groups(state: &AppState) -> Vec<ui::access::GroupLine> {
 }
 
 /// The groups of the inbox that the grants put an account in: `inbox.receive` on the group, or on
-/// the whole service (portal 15). One group chip for each group.
+/// the whole service. One group chip for each group.
 fn groups_of(state: &AppState, grants: &[Grant]) -> Vec<String> {
     let Some(inbox) = state.config.inbox.as_ref() else {
         return Vec::new();
@@ -2753,7 +2753,7 @@ async fn handle_login_post(
     // the answer of an expired anti-CSRF token. Any other failure of the check (no token, a
     // damaged token, a submit that is too fast, a filled trap) must look exactly like a wrong
     // password: it goes the whole way of a sign-in, Argon2 check and limiters included, and it
-    // is refused at the end. See `docs/login-hardening.md`.
+    // is refused at the end. See `docs/design/login-hardening.md`.
     let form_state = check_form_token(&state.signing_secret, &csrf, &form_token, unix_millis());
     if form_state == FormToken::Expired {
         return stale_page(state);
@@ -3195,7 +3195,7 @@ fn identify(state: &AppState, typed: &str) -> Who {
     // The caller reads the accounts of the shared database before, for every login: see `handle_login_post`.
     let found = match state.users.get(&login) {
         Some(record) => Some((record, Source::Database)),
-        // An account of the file has a password only when its block gives the digest (portal 3.4b).
+        // An account of the file has a password only when its block gives the digest.
         None => state
             .config
             .access
@@ -3671,7 +3671,7 @@ enum GrantsError {
 
 /// The grants of a form of an account: the fields of the editor of grants, `grant<n>` and
 /// `limit<n>.<name>[.<window>]`. Each grant follows the document of its service, and each limit
-/// value follows the declaration of the document (portal 3.2).
+/// value follows the declaration of the document.
 fn account_grants(
     state: &AppState,
     fields: std::collections::HashMap<String, String>,
@@ -3813,7 +3813,7 @@ async fn handle_users_add(
         if ticked.len() > state.config.users.max_grants {
             return rejected("grant-limit");
         }
-        // Each action of the portal features needs the actions that it needs (portal 6.3a).
+        // Each action of the portal features needs the actions that it needs.
         if crate::portal_actions::check_user_grants(&state.config.portal_features(), &ticked)
             .is_err()
         {
@@ -3823,7 +3823,7 @@ async fn handle_users_add(
     } else {
         Vec::new()
     };
-    // The file holds this login: an account comes from one source (portal 3.4a).
+    // The file holds this login: an account comes from one source.
     if state.users.get(&login).is_some() || state.config.access.accounts.contains_key(&login) {
         return rejected("exists");
     }
@@ -4284,7 +4284,7 @@ async fn handle_users_update(
         if next.len() > state.config.users.max_grants {
             return rejected("grant-limit");
         }
-        // Each action of the portal features needs the actions that it needs (portal 6.3a).
+        // Each action of the portal features needs the actions that it needs.
         if crate::portal_actions::check_user_grants(&state.config.portal_features(), &next).is_err()
         {
             return rejected("keys-needs");

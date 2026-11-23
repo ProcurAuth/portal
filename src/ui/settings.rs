@@ -446,12 +446,12 @@ pub struct UserCard {
     pub created_at: Option<i64>,
     pub superadmin: bool,
     /// The account comes from the configuration file. The pages show it and change none of it
-    /// (portal 3.4a).
+    ///.
     pub file: bool,
     /// The keys that the account owns.
     pub keys: usize,
     /// The ids of the groups of the inbox that the account belongs to: it holds `inbox.receive` on
-    /// them (portal 15). Empty without the block `inbox`.
+    /// them. Empty without the block `inbox`.
     pub groups: Vec<String>,
     pub activity: AccountActivity,
 }
@@ -470,7 +470,7 @@ pub struct ServiceActions {
     pub document: std::sync::Arc<Document>,
     /// The service answered: its actions and its resource types are known.
     pub known: bool,
-    /// The portal can ask the service for the children of a node (portal 3.1a): the service has
+    /// The portal can ask the service for the children of a node: the service has
     /// an address for its documents, and the portal makes identity tokens.
     pub fetch: bool,
     /// The ids of the groups of the inbox that are critical. Only the service `portal` has any.

@@ -9,7 +9,7 @@
 //! an unknown subject (protocol 3.7).
 
 /// The prefix of the id of a key. The local part that follows is made by the program at random
-/// (portal 4.7).
+///.
 pub const KEY_PREFIX: &str = "key:";
 
 /// The separator that no login can have.

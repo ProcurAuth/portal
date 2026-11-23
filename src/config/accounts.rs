@@ -1,5 +1,5 @@
 //! The accounts and the keys of the file: the blocks `user` and the blocks `key` inside them
-//! (portal 3.4a to 3.4d).
+//!.
 //!
 //! An account of the file has grants and, optionally, the digest of a password. Its keys come only
 //! from the file. The module checks each block when the program starts. It never changes a value.
@@ -29,7 +29,7 @@ pub struct Rules {
     pub max_keys_per_user: usize,
 }
 
-/// A key holds at most 512 grants, at any value of `users.max_grants` (portal 4.1b).
+/// A key holds at most 512 grants, at any value of `users.max_grants`.
 pub const MAX_KEY_GRANTS: usize = 512;
 
 /// The limit values of the object `limits` of a grant. The form is the form of the database: a
@@ -97,7 +97,7 @@ fn grants_of(items: Vec<GrantItem>, what: &str) -> Result<Vec<Grant>, String> {
             .map_err(|e| format!("invalid {what}.grants: item {:?}: {e}", item.text))?;
         let limits = limits_of(&item.limits)
             .map_err(|e| format!("invalid {what}.grants: item {:?}: {e}", item.text))?;
-        // A budget value is only on the grant `access` on a service (portal 3.2, 3.4c).
+        // A budget value is only on the grant `access` on a service.
         if limits
             .iter()
             .any(|(_, value)| matches!(value, crate::limits::Value::Budget(_)))
@@ -164,7 +164,7 @@ pub fn build(r: &Resolved, rules: &Rules) -> Result<BTreeMap<String, FileAccount
                 rules.max_grants
             ));
         }
-        // A key of an account of the file comes only from the file (portal 3.4c).
+        // A key of an account of the file comes only from the file.
         if grants.iter().any(|g| {
             g.service == portal_actions::SERVICE && g.action == portal_actions::KEYS_OWN_CREATE
         }) {

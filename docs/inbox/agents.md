@@ -1,6 +1,6 @@
 # Agents
 
-This chapter tells how an agent uses the portal. An agent is a program that asks a person to approve an action, or to answer. The root [`README.md`](../../README.md) has the generated reference of the configuration. [`SPEC.md`](SPEC.md) has the numbered requirements 3.8.1 to 3.8.25 and 5.12.6. [`configuration.md`](configuration.md) has the rules of the block `inbox.mcp`.
+This chapter tells how an agent uses the portal. An agent is a program that asks a person to approve an action, or to answer. The person is the owner of the key that the agent uses. The [configuration reference](../configuration.md) has the keys of the blocks `inbox.mcp`, `inbox.items`, `inbox.agents`, `inbox.approvals` and `inbox.questions`. [`SPEC.md`](SPEC.md) has the numbered requirements. [`configuration.md`](configuration.md) has the rules that the reference table cannot show.
 
 ## What goes where
 
@@ -24,7 +24,11 @@ The portal has one engine and two doors. Both doors give the same results.
 
 An `mcp_` key does not open the REST door. An `api_` key does not open the MCP endpoint. A key never reads or writes the item of another key. The portal answers `not_found` for such an item, as for an item that does not exist.
 
-The header is `Authorization: Bearer <key>`. A request with no valid key gets `401` with an empty body. A key of the kind `api` is `one_shot` by default, and it cannot talk. A key of the kind `mcp` is `conversational` by default. The owner of the key sets this value when the key is made.
+The header is `Authorization: Bearer <key>`.
+
+A request with no valid key gets `401`. The MCP door gives an empty body with the header `WWW-Authenticate`. The REST door gives the error object with the code `unauthorized`.
+
+The key has an attribute `interaction`. A key of the kind `api` is `one_shot` by default, and it cannot talk. A key of the kind `mcp` is `conversational` by default. The owner of the key sets this value when the key is made.
 
 ## An approval, step by step
 
@@ -62,19 +66,19 @@ The annotations of the tools are hints for the client. `get_answer` and `keepali
 
 The agent sets the wait in `approval_intent` with one of two arguments. Give one only. Two values, or none, give `422`. A value outside the limits gives `422`. The portal never changes a value.
 
-- `lease_s` is the number of seconds between two renewals. The lease of the item is three times this value from the last renewal. The range is `inbox.items.lease.min` to `lease.max`.
+- `lease_s` is the number of seconds between two renewals. The lease of the item is three times this value from the last renewal. The range is `inbox.items.lease.min` to `inbox.items.lease.max`.
 - `until` is a time in RFC 3339 form. The item ends at this time. It has no lease, and nothing needs a renewal.
 
-An item with a lease that the agent does not renew becomes `abandoned` after the lease and `lease.grace`. The person then sees that the agent does not answer. A call of the agent in `lease.revive_window` revives the item. This works three times at most. After the window, `keepalive` gives `item_abandoned`. Make a new request with `previous_id`.
+An item with a lease that the agent does not renew becomes `abandoned` after the lease and `lease.grace`. The person then sees that the agent does not answer. A call of the agent in `lease.revive_window` revives the item. This works `lease.max_revivals` times at most (the default is 3). After the window, or after the last revival, `keepalive` gives `item_abandoned`. Make a new request with `previous_id`.
 
 ### The explanation and the flags
 
-- `explanation` is plain text, or Markdown with `explanation_format` set to `markdown`. The portal shows it to the person as the text of the agent that is not verified. A text that is too long gets `explanation_too_long`.
+- `explanation` is plain text, or Markdown with `explanation_format` set to `markdown`. The portal shows it to the person as the text of the agent that is not verified. A text longer than `inbox.approvals.max_explanation_chars` (2000 by default) gets `explanation_too_long`. With `inbox.approvals.require_explanation` true, a request with no explanation gets `explanation_required`.
 - `explanation_format` is `plain` (the default) or `markdown`. It needs an `explanation`. See "Markdown and code color".
 - `language` colors the command of the service. It is one of `plain`, `sql`, `json`, `yaml`, `toml`, `bash`, `python`, `rust`, `javascript`, `typescript` and `diff`. It never changes the text.
 - `allow_custom` lets the person join a comment or a change request to a refusal.
 - `allow_ask_back` lets the person ask the agent a question. The agent answers with `say`.
-- `hint` has `suggested` and `source`, and an optional `confidence` from 0 to 1.
+- `hint` has `suggested` and `source`, and an optional `confidence` from 0 to 1. `suggested` and `source` are lines of 1 to 32 characters with no control character.
 - `previous_id` is the `request_id` of an earlier request of the same key that ended. The new request follows it.
 
 A key that is not conversational cannot set `allow_custom` or `allow_ask_back`. The portal gives `interaction_not_allowed`.
@@ -85,7 +89,9 @@ A key that is not conversational cannot set `allow_custom` or `allow_ask_back`. 
 
 | Member | Use |
 |---|---|
+| `request_id`, `kind` | The id of the item, and `approval` or `question` |
 | `status` | `pending`, `replied`, `answered`, `abandoned`, `expired`, `cancelled` or `superseded` |
+| `code` | The short code of an approval, as the person sees it |
 | `decision` | `approved` or `denied`, when the status is `answered` |
 | `consume_before` | The time after which the approval does not work. It is in the result of an approval that was not used. |
 | `consumed`, `lapsed` | The service used the approval, or the time passed |
@@ -93,9 +99,11 @@ A key that is not conversational cannot set `allow_custom` or `allow_ask_back`. 
 | `superseded_by` | The `request_id` of the item that replaced this one |
 | `revivable`, `revivable_until` | For an `abandoned` item: can a call revive it, and until when |
 | `last_seq` | The number of the last message of the thread. Give it as `after_seq` in the next call. |
-| `untrusted` | The comment and the messages of the person (see below) |
+| `created_at`, `lease_until` or `until`, `agent_seen_at`, `answered_at` | Times in RFC 3339 form. The item has `lease_until` or `until` only while it is open. |
+| `untrusted` | The comment and the messages of the person (see below). A result holds at most 20 messages and then sets `messages_more`. |
+| `text_truncated` | `true` when the portal cut a text of the person at 8000 characters |
 
-The result never has the login of the person, the device or the channel of the answer.
+The result of an approval never has the login of the person, the device or the channel of the answer. The answer of a question has the member `by`. It holds the login of the owner of the key, the only person who can answer.
 
 ## Who is the agent
 
@@ -164,7 +172,7 @@ A read goes by the key. A write goes by the agent.
 
 ### What the portal records
 
-The portal records hints about each agent: the label, the name of the client, the `User-Agent` and the address range of the client. The range is the first 24 bits of an IPv4 address, or the first 48 bits of an IPv6 address. The client name is `clientInfo` when the call has it, else the `User-Agent`. The portal seals the hints with the content keys. The owner sees them in a box "Not verified". Anyone who holds the key can send the same text, so the hints are no proof.
+The portal records hints about each agent: the label, the name of the client, the `User-Agent` and the address range of the client. The range is the first 24 bits of an IPv4 address, or the first 48 bits of an IPv6 address. The client name is `clientInfo` when the call has it, else the `User-Agent`. The portal seals the hints with the content keys. The owner sees them in a section "Observed, not verified". Anyone who holds the key can send the same text, so the hints are no proof.
 
 A change of the client name, of the `User-Agent` or of the address range sends no frame to the phones by itself. A caller that changes them at each call then cannot cause one frame for each call. The phones get the new hints with the next real change of the agent. The web pages show them at once.
 
@@ -314,11 +322,11 @@ A question asks the owner of the key to decide or to answer. The owner is the on
 | `explanation`, `explanation_format` | Your text for the person. 2000 characters at most. The person reads it as not verified. The format is `plain` or `markdown`. |
 | `command`, `command_label`, `language` | The exact text to run or to confirm. 16 KiB at most. It is plain text. The portal refuses a control character (except the line end and the tab) and a bidirectional control with `422 invalid_command_chars`. A zero-width character is accepted, and the screen shows it as a visible mark. |
 | `input` | The kind of answer (see below). |
-| `hint` | A suggestion: `suggested`, `source` and `confidence` from 0 to 1. The screen shows it as not verified. |
+| `hint` | A suggestion: `suggested`, `source` and `confidence` from 0 to 1. `suggested` and `source` are lines of 1 to 32 characters. The screen shows it as not verified. |
 | `as_of`, `urgency` | The time of the data, and `low`, `normal` or `high`. |
 | `lease_s` or `until` | How long you wait (see "The wait of an approval"). One is mandatory. |
 | `wait_s` | The call waits at most this time for the answer. The portal cuts it to its own limit. Then it gives the `request_id`. |
-| `idempotency_key` | The same key gives the same question. A repeat renews the lease. The same key with another question gives `409 idempotency_conflict`. |
+| `idempotency_key` | The same key gives the same question. A repeat renews the lease. The same key with another question gives `409 idempotency_conflict`. It is 1 to 128 printable ASCII characters. |
 | `previous_id` | A closed question of the same agent that this one follows. |
 | `agent_label`, `agent_token` | See "Who is the agent". |
 
@@ -452,6 +460,8 @@ A tool error is a result with `isError` set to `true`. Its `structuredContent` h
 | `idempotency_conflict` | 409 | The `idempotency_key` names another question of the key |
 | `chain_full` | 409 | The thread has the most items that the portal allows |
 | `forbidden` | 403 | The key has no permission `question.ask` or `question.cancel` |
+| `unauthorized` | 401 | The key is not valid (REST door) |
+| `invalid_query`, `invalid_idempotency_key` | 400 | A parameter of the query is not a whole number, or occurs two times, or holds a token. The header `Idempotency-Key` is not 1 to 128 printable ASCII characters. |
 | `text_too_long` | 422 | The text of `say` is longer than `inbox.approvals.max_explanation_chars`, or than 4000 characters for a question |
 | `use_service_tool` | 422 | The portal cannot replace an approval |
 | `not_found` | 404 | No such item, or the item belongs to another key |
@@ -460,7 +470,7 @@ A tool error is a result with `isError` set to `true`. Its `structuredContent` h
 | `item_closed`, `too_many_turns` | 409 | The item is not open, or the thread is full |
 | `item_abandoned` | 410 | The item is abandoned and cannot be revived |
 | `too_fast`, `rate_limited` | 429 | A limit. `retry_after` gives the seconds. `retryable` is `true`. |
-| `storage_degraded`, `unavailable`, `replication_unavailable` | 503 | The portal cannot write now. `retryable` is `true`. |
+| `storage_degraded`, `unavailable`, `replication_unavailable`, `directory_not_ready`, `rights_unavailable` | 503 | The portal cannot write, check the key or count the budget now. `retryable` is `true`. |
 
 The codes of the agents (`agent_unknown`, `agent_blocked`, `agent_token_required`, `agent_token_conflict`, `agent_mismatch`, `invalid_agent_label` and `agent_token_in_text`) are in "Who is the agent".
 
@@ -468,10 +478,14 @@ A tool that the key cannot see, and a tool that does not exist, give the JSON-RP
 
 ## The MCP endpoint
 
-The endpoint speaks JSON-RPC 2.0 over Streamable HTTP. It answers with JSON only. It has no session and no SSE, and it sends no request to the client. It supports the protocol version `2026-07-28` and the versions `2025-11-25` and `2025-06-18`.
+The endpoint speaks JSON-RPC 2.0 over Streamable HTTP. It answers with JSON only. It has no session and no SSE.
 
-- A request of the new version has `_meta["io.modelcontextprotocol/protocolVersion"]`. The headers `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` must agree with the message. A mismatch gives `400` and `-32020`. An unknown version gives `400` and `-32022` with `data.supported`. Each result has `resultType`. The method `server/discover` gives the name and the version of the server in `_meta`.
+It sends no request to the client. It supports the protocol version `2026-07-28` and the versions `2025-11-25` and `2025-06-18`.
+
+- A request of the new version has `_meta["io.modelcontextprotocol/protocolVersion"]`. The headers `MCP-Protocol-Version` and `Mcp-Method` must agree with the message. For `tools/call`, the header `Mcp-Name` must agree with the tool name too. A mismatch gives `400` and `-32020`. An unknown version gives `400` and `-32022` with `data.supported`.
+- Each result of the new version has `resultType`. The method `server/discover` gives the name and the version of the server in `_meta`.
 - A legacy client uses `initialize`. The portal makes no `Mcp-Session-Id` and ignores the one that the client sends. A notification gets `202` with no body.
+- The methods are `ping`, `initialize` (legacy version only), `server/discover` (new version only), `tools/list` and `tools/call`. Another method gives the JSON-RPC error `-32601`. A JSON-RPC error that follows a valid request has the HTTP status `200`.
 - The portal checks a request in this order. First the method and the `Origin`. Then the client address, the key and the rate of the key. Then the type and the size of the body. The message comes last.
 
 | Status | Cause | Body |
@@ -481,7 +495,9 @@ The endpoint speaks JSON-RPC 2.0 over Streamable HTTP. It answers with JSON only
 | 405 | The method is not `POST`. The header `Allow` has `POST`. | Empty |
 | 413 | The body is larger than `max_body_bytes` | Empty |
 | 415 | The `Content-Type` is not `application/json` | Empty |
+| 408 | The portal did not read the body in time | Empty |
 | 429 | The key or the client address is over its limit. `Retry-After` has the seconds. | Empty |
+| 503 | The portal cannot check keys yet. `Retry-After` is 2. | Empty |
 | 400 | The body is not JSON (`-32700`), is a batch or is not JSON-RPC 2.0 (`-32600`), or the version fails | JSON-RPC error |
 
 Each answer has `Cache-Control: no-store`. The binding of ProcurAuth gives an empty body to each refusal that comes before the portal reads the message, and the portal follows it.

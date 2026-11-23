@@ -1,11 +1,11 @@
-//! The keys of the tab Access and their addresses (portal 5.8a): `GET /auth/keys/new`,
+//! The keys of the tab Access and their addresses: `GET /auth/keys/new`,
 //! `GET /auth/keys/edit`, `POST /auth/keys/create`, `POST /auth/keys/edit` and
 //! `POST /auth/keys/revoke`. The list of the keys is a panel of the tab Access: `GET /auth/keys`
 //! does not exist.
 //!
 //! Each address needs a session. The list shows the keys of the user. A user with `keys.all.read`
 //! also sees the keys of all the users. A session that "Log in as" opens can read but never make,
-//! change or revoke a key (portal 3.7). The text of a new key is in the answer of the creation, one
+//! change or revoke a key. The text of a new key is in the answer of the creation, one
 //! time, with `Cache-Control: no-store`. The portal puts it in no address and in no log.
 
 use super::*;
@@ -24,11 +24,11 @@ use crate::users::KeyOwner;
 
 /// The purpose of the anti-forgery tokens of the forms of the keys.
 pub(super) const KEYS_TOKEN: &str = "keys";
-/// The lines that the list of the tab Access holds at most (portal 5.5).
+/// The lines that the list of the tab Access holds at most.
 const LIST_LIMIT: usize = 500;
 /// The lines that one read of the database gives.
 const PAGE_SIZE: usize = 100;
-/// The largest body of the forms of the keys (portal 5.8c): 512 grants of 12 KiB and their limits.
+/// The largest body of the forms of the keys: 512 grants of 12 KiB and their limits.
 pub(super) const MAX_FORM_BYTES: usize = 7 * 1024 * 1024;
 
 /// The rights that the viewer has on the page.
@@ -42,7 +42,7 @@ struct Rights {
     revoke: bool,
     read_all: bool,
     revoke_all: bool,
-    /// The viewer can make keys and cannot use them (portal 5.3b).
+    /// The viewer can make keys and cannot use them.
     cannot_use: bool,
 }
 
@@ -64,7 +64,7 @@ fn rights_of(state: &AppState, viewer: &Viewer) -> Rights {
                     .copied()
                     .filter(|kind| portal::effective_kind(grants, portal::KEYS_OWN_CREATE, *kind))
                     .collect();
-                // The viewer can make a kind of key and cannot use it (portal 5.3b).
+                // The viewer can make a kind of key and cannot use it.
                 let cannot_use = create_kinds
                     .iter()
                     .any(|kind| !portal::effective_kind(grants, portal::KEYS_OWN_USE, *kind));
@@ -79,7 +79,7 @@ fn rights_of(state: &AppState, viewer: &Viewer) -> Rights {
                 )
             }
         };
-    // A session that "Log in as" opens changes and revokes no key (portal 3.7, 3.7a).
+    // A session that "Log in as" opens changes and revokes no key.
     let browsing_as_user = viewer.session.impersonated;
     let create_kinds = if browsing_as_user {
         Vec::new()
@@ -99,7 +99,7 @@ fn rights_of(state: &AppState, viewer: &Viewer) -> Rights {
 }
 
 /// Whether the viewer fills a form that gives grants: the superadmin, and a user who makes or
-/// changes keys. These forms use the options of the services (portal 3.1a).
+/// changes keys. These forms use the options of the services.
 pub(super) fn may_fill_forms(state: &AppState, viewer: &Viewer) -> bool {
     let rights = rights_of(state, viewer);
     viewer.grants.is_none() || rights.create || rights.edit
@@ -140,7 +140,7 @@ fn owner_grants(state: &AppState, login: Option<&str>) -> Option<Vec<Grant>> {
     )
 }
 
-/// How the rights of the owner cover a grant of a key (portal 4.3).
+/// How the rights of the owner cover a grant of a key.
 fn cover_of(owner: Option<&[Grant]>, grant: &Grant) -> Cover {
     let Some(held) = owner else {
         return Cover::Full;
@@ -215,7 +215,7 @@ fn editor_for(
     )
 }
 
-/// The state of a key at `now` (portal 5.5): the first that applies in the order expired, too old,
+/// The state of a key at `now`: the first that applies in the order expired, too old,
 /// active.
 fn state_of(
     state: &AppState,
@@ -253,7 +253,7 @@ fn grant_lines(grants: &[Grant], owner: Option<&[Grant]>) -> Vec<GrantLine> {
         .collect()
 }
 
-/// The services where the key has a grant on a node and no grant `access` (portal 4.2b).
+/// The services where the key has a grant on a node and no grant `access`.
 fn without_access(grants: &[Grant]) -> Vec<String> {
     let mut out: Vec<String> = grants
         .iter()
@@ -449,7 +449,7 @@ pub(super) async fn list(
     let now = unix_now();
     let mine = me(state, viewer);
     // The keys of the file first, by login and then by name, then the keys of the database
-    // (portal 5.8).
+    //.
     let mut file_keys: Vec<Arc<crate::users::KeyRecord>> = state
         .users
         .keys()
@@ -561,7 +561,7 @@ pub(super) enum Page {
     Made,
 }
 
-/// `GET /auth/keys/new` and `GET /auth/keys/edit` (portal 5.8b). The page holds the form, with the
+/// `GET /auth/keys/new` and `GET /auth/keys/edit`. The page holds the form, with the
 /// editor of the grants that the owner can give. The list of the keys is in the tab Access.
 pub(super) async fn handle_keys(
     state: &Arc<AppState>,
@@ -721,7 +721,7 @@ async fn draw(
                 && same_kind
                 && rights.create_kinds.contains(&source.kind)
             {
-                // The form copies the grants and the limit values of the key (portal 4.1a).
+                // The form copies the grants and the limit values of the key.
                 ticked = source.grants.clone();
                 copy_name = source.name.clone();
                 kind = Some(source.kind);
@@ -833,7 +833,7 @@ async fn draw(
 }
 
 /// What the three forms have in common: the checks before the body, and the body with the token
-/// (portal 5.8c). The answer is the response when a check fails.
+///. The answer is the response when a check fails.
 #[allow(clippy::result_large_err)] // the error is the response, sent as is
 async fn form_request(
     state: &Arc<AppState>,
@@ -865,7 +865,7 @@ async fn form_request(
     if !allowed(&rights_of(state, &first)) {
         return Err(forbidden());
     }
-    // At most 4 such bodies at the same time (portal 5.8c).
+    // At most 4 such bodies at the same time.
     let Ok(_permit) = Arc::clone(&state.key_body_gate).try_acquire_owned() else {
         return Err(text_response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -969,14 +969,14 @@ fn caps(state: &AppState, now: i64, owner: Option<&[Grant]>) -> KeyCaps {
         max_counter_rows: limits.max_counter_rows,
         max_directory_grants: limits.max_directory_grants,
         now,
-        // A key older than the longest lifetime of its owner is not active (portal 5.5b).
+        // A key older than the longest lifetime of its owner is not active.
         created_not_before: owner
             .and_then(portal::max_key_lifetime_any)
             .map(|max| now - i64::try_from(max).unwrap_or(i64::MAX)),
     }
 }
 
-/// The code of a failed write (portal 5.8f). `None`: a failure of the database.
+/// The code of a failed write. `None`: a failure of the database.
 fn write_code(error: &KeyWriteError) -> Option<&'static str> {
     match error {
         KeyWriteError::TooManyKeys => Some("too_many_keys"),
@@ -987,12 +987,12 @@ fn write_code(error: &KeyWriteError) -> Option<&'static str> {
 }
 
 /// Reads the database again after a write, so this instance has the change at once. The other
-/// instances take it at their next round (portal 10.7).
+/// instances take it at their next round.
 fn refresh_after_write(state: &AppState) {
     blocking(|| crate::sync::directory_round(state));
 }
 
-/// `POST /auth/keys/create` (portal 5.8c).
+/// `POST /auth/keys/create`.
 pub(super) async fn handle_keys_create(
     state: &Arc<AppState>,
     request: Request<Incoming>,
@@ -1112,7 +1112,7 @@ pub(super) async fn handle_keys_create(
 }
 
 /// The key of the user that the form names, when the user can change it: an active key of the
-/// database that the user owns. The error is the code of portal 5.8f.
+/// database that the user owns. The error is a refusal code of the key form.
 fn editable_key(
     state: &AppState,
     id: &str,
@@ -1148,7 +1148,7 @@ fn editable_key(
     Ok(key)
 }
 
-/// `POST /auth/keys/edit` (portal 5.8d).
+/// `POST /auth/keys/edit`.
 pub(super) async fn handle_keys_edit(
     state: &Arc<AppState>,
     request: Request<Incoming>,
@@ -1232,7 +1232,7 @@ pub(super) async fn handle_keys_edit(
     refusal_redirect("edited")
 }
 
-/// `POST /auth/keys/revoke` (portal 5.8e).
+/// `POST /auth/keys/revoke`.
 pub(super) async fn handle_keys_revoke(
     state: &Arc<AppState>,
     request: Request<Incoming>,
@@ -1273,7 +1273,7 @@ pub(super) async fn handle_keys_revoke(
         "all" => true,
         _ => return bad_request(),
     };
-    // The right of the section (portal 5.8e).
+    // The right of the section.
     if (all && !rights.revoke_all) || (!all && !rights.revoke) {
         return forbidden();
     }
@@ -1317,7 +1317,7 @@ pub(super) async fn handle_keys_revoke(
             _ => return text_response(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable\n"),
         }
         refresh_after_write(state);
-        // The approvals that wait for this key can never be used: the key is gone (portal 3.7.16).
+        // The approvals that wait for this key can never be used: the key is gone.
         state.inbox.cancel_key_items(&id).await;
         log(
             state,

@@ -1336,7 +1336,7 @@ fn a_turn_of_the_agent_can_be_markdown_and_the_message_frame_says_so() {
 }
 
 /// The answers of a form reach the agent inside `untrusted`, under the notice. The creation of a question arrives with
-/// lot L13: the test writes the item through the store, as the engine will.
+/// The test writes the item through the store, as the engine will.
 #[test]
 fn get_answer_returns_the_answers_of_a_form_in_untrusted() {
     use crate::inbox::frames::OwnerAnswer;
@@ -1442,10 +1442,10 @@ fn get_answer_returns_the_answers_of_a_form_in_untrusted() {
     });
 }
 
-// The tests of lot L13: the questions.
+// The tests of the questions.
 #[path = "question_tests.rs"]
 mod questions;
 
-// The tests of lot G1b: the agent of a call.
+// The tests of the agent of a call.
 #[path = "agent_who_tests.rs"]
 mod who;

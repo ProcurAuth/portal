@@ -102,20 +102,20 @@ impl std::fmt::Debug for UserRow {
 }
 
 /// The two modes of a key that the form of the key changes: what the key can do when the portal asks a person, and what
-/// the portal does with the agents that share the key (lot G1b).
+/// the portal does with the agents that share the key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KeyModes {
     pub interaction: crate::keys::Interaction,
     pub agents: crate::keys::AgentsMode,
 }
 
-/// A key of the database, with its grants (portal 4, 5). The database keeps the SHA-256 digest of
+/// A key of the database, with its grants. The database keeps the SHA-256 digest of
 /// the text of the key, never the text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyRow {
-    /// 16 characters from `0-9` and `a-f` (portal 4.7).
+    /// 16 characters from `0-9` and `a-f`.
     pub id: String,
-    /// The login of the owner. `None`: the key of the superadmin (portal 3.7b).
+    /// The login of the owner. `None`: the key of the superadmin.
     pub owner: Option<String>,
     pub name: String,
     pub digest: [u8; 32],
@@ -125,17 +125,17 @@ pub struct KeyRow {
     pub expires_at: Option<i64>,
     pub last_check_at: Option<i64>,
     pub check_count: i64,
-    /// The kind of the key: the prefix of its text (portal 5.1).
+    /// The kind of the key: the prefix of its text.
     pub kind: crate::keys::KeyKind,
     /// What the key can do when the portal asks a person (design of the dialogue, 1.6).
     pub interaction: crate::keys::Interaction,
-    /// What the portal does with the agents of the key (lot G1b).
+    /// What the portal does with the agents of the key.
     pub agents: crate::keys::AgentsMode,
     /// Sorted.
     pub grants: Vec<Grant>,
 }
 
-/// The summary row of a revoked key (portal 5.4). It holds no grant and no counter.
+/// The summary row of a revoked key. It holds no grant and no counter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyHistoryRow {
     pub id: String,
@@ -147,7 +147,7 @@ pub struct KeyHistoryRow {
     pub check_count: i64,
 }
 
-/// What an instance reads in one directory round (portal 10.7): the version, the users and the
+/// What an instance reads in one directory round: the version, the users and the
 /// keys with their grants, all from one transaction.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DirectorySnapshot {
@@ -158,16 +158,16 @@ pub struct DirectorySnapshot {
     pub externals: Vec<ExternalEntry>,
 }
 
-/// The result of the count of one use (portal 7.2b).
+/// The result of the count of one use.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CountOutcome {
     /// Each counter had room: the statement took one unit from each.
     Counted,
     /// One counter or more had no room: the statement took nothing. Each refusal gives the index
     /// of the counter in the request and the seconds to the end of its window, by the clock of the
-    /// database (portal 7.6a).
+    /// database.
     Refused(Vec<Refusal>),
-    /// A counter has no row (portal 7.2b): the answer is HTTP 503.
+    /// A counter has no row: the answer is HTTP 503.
     RowMissing,
 }
 
@@ -177,7 +177,7 @@ pub struct Refusal {
     pub seconds_left: f64,
 }
 
-/// One line of the page of the keys (portal 5.5): a key, or the summary row of a revoked key.
+/// One line of the page of the keys: a key, or the summary row of a revoked key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyListItem {
     pub id: String,
@@ -212,7 +212,7 @@ pub enum KeyScope<'a> {
     Superadmin,
 }
 
-/// The checks of one key since the last write (portal 5.5a).
+/// The checks of one key since the last write.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyCheck {
     pub id: String,
@@ -220,7 +220,7 @@ pub struct KeyCheck {
     pub count: i64,
 }
 
-/// The bounds that a write of a key checks under its lock (portal 5.4, 7.2f, 10.7d).
+/// The bounds that a write of a key checks under its lock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KeyCaps {
     /// `keys.max_per_user`.
@@ -231,7 +231,7 @@ pub struct KeyCaps {
     pub max_directory_grants: usize,
     /// The time of the write. A key with an expiry date at or before this time is not active.
     pub now: i64,
-    /// A key created before this time is too old, so it is not active (portal 5.5b). `None`: the
+    /// A key created before this time is too old, so it is not active. `None`: the
     /// owner has no `max_key_lifetime`.
     pub created_not_before: Option<i64>,
 }
@@ -239,10 +239,10 @@ pub struct KeyCaps {
 /// Why the write of a key failed.
 #[derive(Debug, PartialEq, Eq)]
 pub enum KeyWriteError {
-    /// The owner has `max_per_user` active keys (portal 5.4).
+    /// The owner has `max_per_user` active keys.
     TooManyKeys,
     /// The write would put the counter rows above `keys.max_counter_rows`, or the grants of the
-    /// directory above `keys.max_directory_grants` (portal 5.8f `capacity`).
+    /// directory above `keys.max_directory_grants` (`capacity`).
     Capacity,
     /// The owner does not exist.
     UnknownOwner,
@@ -622,7 +622,7 @@ fn sqlite_pid_file(path: &Path) -> std::path::PathBuf {
 }
 
 /// Writes the process id of this portal next to its SQLite file. A command that writes to the
-/// file reads it (portal 10.4a).
+/// file reads it.
 pub fn mark_sqlite_instance(path: &Path) -> Result<(), String> {
     std::fs::write(sqlite_pid_file(path), format!("{}\n", std::process::id()))
         .map_err(|e| format!("cannot write {}: {e}", sqlite_pid_file(path).display()))
@@ -754,7 +754,7 @@ impl Store {
     // Directory and keys ------------------------------------------------------------------------
 
     /// The version of the directory: it grows with each write to the users, the grants, the keys and the
-    /// external services (portal 10.7).
+    /// external services.
     pub fn directory_version(&self) -> Result<i64, String> {
         backend!(self.directory_version())
     }
@@ -770,7 +770,7 @@ impl Store {
         backend!(self.insert_key(key, caps))
     }
 
-    /// Changes the name, the modes and the grants of a key (portal 5.8d). `owner` is the login
+    /// Changes the name, the modes and the grants of a key. `owner` is the login
     /// of the owner: the key must be his. `None` is the key of the superadmin.
     pub fn update_key(
         &self,
@@ -802,19 +802,19 @@ impl Store {
         backend!(self.revoke_keys(login, now))
     }
 
-    /// Adds the checks of the keys (portal 5.5a): the later time and the number of checks of each
+    /// Adds the checks of the keys: the later time and the number of checks of each
     /// key. A key that does not exist any more is ignored.
     pub fn write_key_checks(&self, checks: &[KeyCheck]) -> Result<(), String> {
         backend!(self.write_key_checks(checks))
     }
 
     /// Deletes the keys that expired more than `expired_before` seconds ago, and the summary rows
-    /// that are older than `history_before` (portal 5.4).
+    /// that are older than `history_before`.
     pub fn prune_keys(&self, expired_before: i64, history_before: i64) -> Result<(), String> {
         backend!(self.prune_keys(expired_before, history_before))
     }
 
-    /// Counts one use: takes one unit from each counter, or none (portal 7.2b). Each counter names
+    /// Counts one use: takes one unit from each counter, or none. Each counter names
     /// its owner, its budget, its window and its amount.
     ///
     /// `clock` replaces the clock of the database for the window of the counters, in seconds since
@@ -829,7 +829,7 @@ impl Store {
 
     /// Gives back the unit that [`Store::count_use`] took from each counter, when the window of the
     /// counter has not ended. The PDP uses it when it counted a use and then could not consume the
-    /// approval of the use (portal 7.7d). `clock` is as for `count_use`.
+    /// approval of the use. `clock` is as for `count_use`.
     pub fn refund_use(
         &self,
         counters: &[crate::decision::Counter],
@@ -838,7 +838,7 @@ impl Store {
         backend!(self.refund_use(counters, clock))
     }
 
-    /// Makes the counter rows that the table does not hold yet (portal 7.2a). Returns the number of
+    /// Makes the counter rows that the table does not hold yet. Returns the number of
     /// rows that it made.
     pub fn ensure_counter_rows(
         &self,
@@ -848,12 +848,12 @@ impl Store {
     }
 
     /// Deletes the counter rows of the subjects of the file that the file no longer has
-    /// (portal 3.4d, 7.2d). `keep` lists the subjects that the file still has.
+    ///. `keep` lists the subjects that the file still has.
     pub fn delete_file_counters(&self, keep: &[String]) -> Result<usize, String> {
         backend!(self.delete_file_counters(keep))
     }
 
-    /// The number of counter rows (portal 7.2f).
+    /// The number of counter rows.
     pub fn counter_rows(&self) -> Result<i64, String> {
         backend!(self.counter_rows())
     }
@@ -866,7 +866,7 @@ impl Store {
 
     /// One page of the keys and the summary rows of the revoked keys, newest first, after the
     /// cursor `after` (the creation time and the id of the last line of the page before). It gives
-    /// at most `limit` lines (portal 5.5).
+    /// at most `limit` lines.
     pub fn list_keys(
         &self,
         scope: KeyScope<'_>,
@@ -1318,7 +1318,7 @@ mod tests {
             assert_eq!(version(&store), 5);
             assert!(!store.remove_user("alice").unwrap());
             assert_eq!(version(&store), 5);
-            // The checks of the keys are not a change of the directory (portal 10.7b).
+            // The checks of the keys are not a change of the directory.
             store.insert_user(&user("bob", &[])).unwrap();
             store
                 .insert_key(&key("k2", Some("bob"), 2), &caps())
@@ -1755,7 +1755,7 @@ mod tests {
             let store = backend.fresh();
             store.insert_user(&user("alice", &[])).unwrap();
             store.insert_user(&user("bob", &[])).unwrap();
-            // An expired key and a too-old key are not active (portal 5.4, 5.5b).
+            // An expired key and a too-old key are not active.
             let mut expired = key("e1", Some("alice"), 11);
             expired.expires_at = Some(NOW - 1);
             let mut old = key("o1", Some("alice"), 12);
@@ -1854,7 +1854,7 @@ mod tests {
             let k1 = directory.keys.iter().find(|k| k.id == "k1").unwrap();
             assert_eq!((k1.name.as_str(), &k1.grants), ("renamed", &one));
             assert_eq!(k1.digest, [1; 32], "the digest does not change");
-            // The old counter rows of the key stay with the key (portal 7.2).
+            // The old counter rows of the key stay with the key.
             assert_eq!(store.count("budget_counters"), 4);
         });
     }
@@ -1983,7 +1983,7 @@ mod tests {
             assert_eq!(
                 history.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
                 ["s1"],
-                "the summary rows of the user go with the user (portal 5.7)"
+                "the summary rows of the user go with the user"
             );
         });
     }
@@ -2309,7 +2309,7 @@ mod tests {
                 store.count_use(&file, None).unwrap(),
                 CountOutcome::Refused(_)
             ));
-            // The file no longer has `carol` (portal 3.4d).
+            // The file no longer has `carol`.
             assert_eq!(
                 store
                     .delete_file_counters(&["key:34b1100f45b235ba".to_string()])

@@ -6,7 +6,7 @@
 //! each refusal that comes before the portal reads the message has an empty body (binding 5.2, 5.6a), and a limit
 //! that tells a wait gives `retry_after` in whole seconds (binding 5.3).
 //!
-//! # The sequence of the checks (contract 2.8)
+//! # The sequence of the checks
 //!
 //! The method, the `Origin`, the client address, the key, the rate of the key, the type and the size of the body, and
 //! only then the message. A request that fails a check gets its answer before the portal reads more of it.
@@ -104,7 +104,7 @@ impl McpState {
     }
 }
 
-/// An answer with no body. Each answer of the endpoint has `Cache-Control: no-store` (contract 2.11).
+/// An answer with no body. Each answer of the endpoint has `Cache-Control: no-store`.
 fn bare(status: StatusCode) -> Resp {
     let mut response = http::empty(status);
     response
@@ -763,7 +763,7 @@ async fn call_tool(
 }
 
 /// The members of a tool result, as the JSON text between the braces (the caller adds `resultType`): the content, the
-/// structured content and the flag of an error (contract 5.1, 6.1).
+/// structured content and the flag of an error.
 fn tool_result(outcome: Result<Value, AgentError>) -> String {
     match outcome {
         Ok(value) => {

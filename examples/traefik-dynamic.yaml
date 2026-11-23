@@ -45,7 +45,7 @@ http:
         authResponseHeaders:
           - X-Identity-Token
 
-    # The ForwardAuth of the keys (portal 8.1a, 8.2). Use it on a router of its own for the agents,
+    # The ForwardAuth of the keys. Use it on a router of its own for the agents,
     # for example PathPrefix(`/app/api/`) && HeaderRegexp(`Authorization`, `^Bearer mcp_`), with a
     # priority above the route of the persons. Never use `portal` on this router. The portal ignores
     # the cookies on this route. A route for keys is never in `portal.exclude`.

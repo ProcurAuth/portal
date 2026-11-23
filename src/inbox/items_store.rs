@@ -1036,7 +1036,7 @@ pub async fn start_checks(store: &Store, content: &ContentBox) -> Result<(), Str
         in_tx!(at, [], tx, tx.missing_table()).map_err(|e| format!("inbox storage: {e}"))?;
     if let Some(table) = missing {
         return Err(format!(
-            "the inbox database was made by a version before 5.1.0, or by a build of 5.1.0 before the agents, and has no table {table}: this portal has no migration for it; make a new database (see README, Upgrades, version 5.1.0)"
+            "the inbox database was made by a version before 5.1.0, or by a build of 5.1.0 before the agents, and has no table {table}: this portal has no migration for it; make a new database (see docs/operations.md, Upgrades, version 5.1.0)"
         ));
     }
     let counts = in_tx!(at, [], tx, tx.kid_counts()).map_err(|e| format!("inbox storage: {e}"))?;

@@ -9,7 +9,7 @@ import java.time.Instant
 import java.time.ZoneId
 
 /**
- * The card "New agent" above "To answer" (lot G4). Pure Kotlin. One card for each agent in state `new` that the phone holds. It
+ * The card "New agent" above "To answer". Pure Kotlin. One card for each agent in state `new` that the phone holds. It
  * names the facts, shows the hints in a box that says "Not verified", and gives the choices: name and allow, allow with the
  * name of the portal, block, merge.
  *

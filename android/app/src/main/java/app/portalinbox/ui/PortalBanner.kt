@@ -15,7 +15,7 @@ import app.portalinbox.portal.PortalLabels
 import app.portalinbox.portal.PortalPalette
 
 /**
- * The identity of the portal on the approval screen (proposal 3.7). Only drawing: the texts are in [PortalLabels]. The user
+ * The identity of the portal on the approval screen. Only drawing: the texts are in [PortalLabels]. The user
  * chose the nickname and the color. The portal cannot change them, so a look-alike portal cannot look like the real one.
  */
 object PortalBanner {

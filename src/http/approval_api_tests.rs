@@ -1,4 +1,4 @@
-//! The approval API for a service over HTTP, on SQLite and on PostgreSQL (portal-owned series A, CONF 9.3).
+//! The approval API for a service over HTTP, on SQLite and on PostgreSQL (portal-owned series A).
 //!
 //! The first tests are the recording client: it keeps every answer that the portal sends to the service, and it proves
 //! that the service learns the verdict, the id and the code of a request, and nothing of the text of the agent or of
@@ -2161,10 +2161,10 @@ mod agent_binding;
 #[path = "agent_frames_tests.rs"]
 mod agent_frames;
 
-// ---------------------------------------------------------------- the phone side of the thread (lot L8)
+// ---------------------------------------------------------------- the phone side of the thread
 //
 // These two tests run in the process: a comment of the owner and a question of the owner exist only for an item that
-// the agent made with an intent (`allow_custom`, `allow_ask_back`), and the agent channel is lot L9. The engine and the
+// the agent made with an intent (`allow_custom`, `allow_ask_back`), and the agent channel is separate. The engine and the
 // frames are the real ones. The end-to-end tests of the phone are in `tests/items_e2e.rs`.
 
 /// The frames that the phone of `device` gets from its queue, as the server builds them.

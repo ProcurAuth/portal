@@ -755,7 +755,7 @@ fn the_rate_cases_k07_and_k08() {
     assert_eq!(request(&s, "GET", &[], "").status, 405);
 }
 
-// ---------------------------------------------------------------- the agents of a key (lot G1b)
+// ---------------------------------------------------------------- the agents of a key
 
 /// The result of `approval_intent` of a key, with the extra headers.
 fn intent(s: &Server, key: &str, headers: &[(&str, String)], args: Value) -> (bool, Value) {

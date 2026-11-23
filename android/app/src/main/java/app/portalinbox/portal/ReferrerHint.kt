@@ -1,7 +1,7 @@
 package app.portalinbox.portal
 
 /**
- * The hint "Opened from: Chrome" of the confirmation screen (proposal 3.5). Android gives the referrer of an activity as a
+ * The hint "Opened from: Chrome" of the confirmation screen. Android gives the referrer of an activity as a
  * URI: `android-app://<package>` when another app opened the link, or a web URL. The referrer is a hint and never proof: an app
  * can set it. Pure Kotlin.
  */

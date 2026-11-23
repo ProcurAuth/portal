@@ -42,15 +42,15 @@ impl std::fmt::Debug for UserRecord {
 /// Whose key it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeyOwner {
-    /// The superadmin: the key has no owner row (portal 3.7b).
+    /// The superadmin: the key has no owner row.
     Superadmin,
     /// An account of the database, by login.
     User(String),
-    /// An account of the configuration file, by login (portal 3.4a).
+    /// An account of the configuration file, by login.
     File(String),
 }
 
-/// A key as the directory holds it (portal 4, 5). The directory never holds the text of a key.
+/// A key as the directory holds it. The directory never holds the text of a key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyRecord {
     pub id: String,
@@ -61,17 +61,17 @@ pub struct KeyRecord {
     pub created_at: i64,
     /// `None`: the key has no expiry date.
     pub expires_at: Option<i64>,
-    /// The kind of the key: the prefix of its text (portal 5.1).
+    /// The kind of the key: the prefix of its text.
     pub kind: crate::keys::KeyKind,
     /// What the key can do when the portal asks a person (design of the dialogue, 1.6).
     pub interaction: crate::keys::Interaction,
-    /// What the portal does with the agents that share the key (lot G1b).
+    /// What the portal does with the agents that share the key.
     pub agents: crate::keys::AgentsMode,
     pub grants: Vec<Grant>,
 }
 
 impl KeyRecord {
-    /// Whether the key comes from the configuration file (portal 3.4c).
+    /// Whether the key comes from the configuration file.
     pub fn is_from_file(&self) -> bool {
         matches!(self.owner, KeyOwner::File(_))
     }
@@ -81,7 +81,7 @@ impl KeyRecord {
         format!("{}{}", crate::subject_id::KEY_PREFIX, self.id)
     }
 
-    /// The owner of the counters of the key (portal 7.2d).
+    /// The owner of the counters of the key.
     pub fn counter_owner(&self) -> CounterOwner {
         if self.is_from_file() {
             CounterOwner::File(self.subject())
@@ -90,13 +90,13 @@ impl KeyRecord {
         }
     }
 
-    /// Whether the key is expired at `now` (portal 5.5).
+    /// Whether the key is expired at `now`.
     pub fn expired(&self, now: i64) -> bool {
         self.expires_at.is_some_and(|at| at <= now)
     }
 
-    /// Whether the key is too old at `now`, for a maximum lifetime of its owner (portal 5.5b). A
-    /// key of the file has no age (portal 3.4c).
+    /// Whether the key is too old at `now`, for a maximum lifetime of its owner. A
+    /// key of the file has no age.
     pub fn too_old(&self, now: i64, max_lifetime: Option<u64>) -> bool {
         !self.is_from_file()
             && max_lifetime.is_some_and(|max| {
@@ -124,7 +124,7 @@ fn key_record(row: KeyRow) -> KeyRecord {
     }
 }
 
-/// The grants of one subject by service, in the order of the grants (portal 10.7d). A question
+/// The grants of one subject by service, in the order of the grants. A question
 /// reads only the grants of its service and copies none.
 pub type GrantIndex = HashMap<String, Arc<[Grant]>>;
 
@@ -186,9 +186,9 @@ impl Inner {
 pub struct Directory {
     inner: RwLock<Inner>,
     /// The keys of the configuration file, with their accounts. They never change while the
-    /// program runs (portal 3.4d).
+    /// program runs.
     file_keys: HashMap<String, Arc<KeyRecord>>,
-    /// The grants of each account of the file by service (portal 10.7d).
+    /// The grants of each account of the file by service.
     file_index: HashMap<String, GrantIndex>,
     file_digests: HashMap<[u8; 32], String>,
     max_users: usize,
@@ -254,7 +254,7 @@ impl Directory {
         }
     }
 
-    /// Adds the grants of the accounts of the file, by service (portal 10.7d).
+    /// Adds the grants of the accounts of the file, by service.
     pub fn with_file_accounts<'a>(
         mut self,
         accounts: impl Iterator<Item = (&'a String, &'a [Grant])>,
@@ -265,7 +265,7 @@ impl Directory {
         self
     }
 
-    /// Adds the keys of the configuration file (portal 3.4c). A key of the file holds no database
+    /// Adds the keys of the configuration file. A key of the file holds no database
     /// row.
     pub fn with_file_keys(mut self, keys: Vec<KeyRecord>) -> Self {
         for key in keys {
@@ -278,7 +278,7 @@ impl Directory {
     /// Replaces the directory with what the database holds now, when the version changed. A
     /// change made here during the database read wins. The next refresh brings the rest. Returns
     /// `true` when it replaced. A refresh that finds the same version only marks the round as
-    /// successful (portal 10.7).
+    /// successful.
     pub fn refresh(&self, store: &Store) -> Result<bool, String> {
         let started = now_millis();
         self.refreshed_at.store(started, Ordering::Relaxed);
@@ -408,7 +408,7 @@ impl Directory {
     }
 
     /// The stored grants of an account on one service. `None` means that the account does not
-    /// exist. The grants are not copied (portal 10.7d).
+    /// exist. The grants are not copied.
     pub fn grants_on(&self, login: &str, service: &str) -> Option<Arc<[Grant]>> {
         let inner = self.read();
         inner.users.get(login)?;
@@ -495,7 +495,7 @@ impl Directory {
         let removed = inner.users.remove(login).is_some();
         inner.index.remove(login);
         if removed {
-            // The keys of the user go with the user (portal 5.7).
+            // The keys of the user go with the user.
             let gone: Vec<String> = inner
                 .keys
                 .values()
@@ -570,7 +570,7 @@ impl Directory {
 
     // Keys ------------------------------------------------------------------------------------
 
-    /// The key with this SHA-256 digest, from the database or from the file (portal 8.3).
+    /// The key with this SHA-256 digest, from the database or from the file.
     pub fn key_by_digest(&self, digest: &[u8; 32]) -> Option<Arc<KeyRecord>> {
         if let Some(id) = self.file_digests.get(digest) {
             return self.file_keys.get(id).cloned();
@@ -607,7 +607,7 @@ impl Directory {
         self.read().keys.len() + self.file_keys.len()
     }
 
-    /// The number of grants of the users and the keys of the database (portal 10.7d).
+    /// The number of grants of the users and the keys of the database.
     pub fn grant_count(&self) -> usize {
         let inner = self.read();
         inner.users.values().map(|u| u.grants.len()).sum::<usize>()
@@ -615,7 +615,7 @@ impl Directory {
     }
 
     /// The counters that the grants of the directory need: one for each window of each budget
-    /// value on a grant `access` (portal 7.2a). `file` gives the grants of the accounts of the
+    /// value on a grant `access`. `file` gives the grants of the accounts of the
     /// file. `active` tells whether a key of the database needs its counters: it never does for a
     /// revoked, expired or too-old key. A key of the file needs its counters always.
     pub fn counters_needed(
@@ -884,7 +884,7 @@ mod tests {
             file.counter_owner(),
             CounterOwner::File("key:34b1100f45b235ba".into())
         );
-        // A key of the file never expires and has no age (portal 3.4c).
+        // A key of the file never expires and has no age.
         assert!(!file.expired(i64::MAX));
         assert!(!file.too_old(i64::MAX, Some(1)));
         assert_eq!(dir.keys().len(), 1);
@@ -911,10 +911,7 @@ mod tests {
         assert!(!key.too_old(5_000, None), "no maximum: no age");
         assert!(!key.too_old(1_100, Some(100)), "the age equals the maximum");
         assert!(key.too_old(1_101, Some(100)));
-        assert!(
-            key.too_old(1_001, Some(0)),
-            "the value 0 refuses each key (portal 5.3a)"
-        );
+        assert!(key.too_old(1_001, Some(0)), "the value 0 refuses each key");
     }
 
     #[test]

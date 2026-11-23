@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- The screen of a question (lot A4). ASCII only. The sentences that depend on data are in the pure classes of the package ui
+    <!-- The screen of a question. ASCII only. The sentences that depend on data are in the pure classes of the package ui
          (QuestionState, QuestionHistory, AnswerSheet), so that a JVM test reads them. -->
     <string name="question_command">Command</string>
     <string name="question_command_from_agent">From the agent</string>

@@ -417,7 +417,7 @@ impl Sender<'_> {
     }
 }
 
-/// Finds who sends. The API of the inbox verifies the keys of the kind `api` only (portal 8.3a).
+/// Finds who sends. The API of the inbox verifies the keys of the kind `api` only.
 /// The text gets its form checked first: the prefix, the length, the characters and the checksum,
 /// before any lookup. A key of another kind gets the same answer as a text with a bad form: 401
 /// with no detail. A key of the file comes next: it never depends on the portal. A key that is not
@@ -788,7 +788,7 @@ async fn post_alert_inner(app: &App, request: Request<Incoming>) -> Result<Resp,
 /// The key of an agent on the REST door: `Authorization: Bearer api_...`, a key of the directory. A key of the kind `mcp`
 /// gets the same `401` as a text with a bad form. The routes of the items need the block `inbox.items`: without it the
 /// routes do not exist. The result holds what the transport shows about the agent: the header `Agent-Token` and the hints
-/// (lot G1b). A token in the query string is refused, because a query goes to the logs of the proxies.
+///. A token in the query string is refused, because a query goes to the logs of the proxies.
 fn agent_key(
     app: &App,
     uri: &Uri,

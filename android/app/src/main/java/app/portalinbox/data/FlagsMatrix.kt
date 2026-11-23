@@ -6,7 +6,7 @@ import app.portalinbox.proto.Interaction
 import app.portalinbox.proto.RequestFrame
 
 /**
- * The rows that the screen of a question shows under the options, from the two flags of the agent (DIAL 1.4.2, 1.6, 4.2).
+ * The rows that the screen of a question shows under the options, from the two flags of the agent.
  * One pure function decides: the screen draws what [Rows] says and nothing more.
  *
  * | `allow_custom` | `allow_ask_back` | Rows under the options |

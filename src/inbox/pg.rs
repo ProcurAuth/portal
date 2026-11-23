@@ -149,7 +149,7 @@ CREATE TABLE content_key_check (
     check_value BYTEA NOT NULL
 );
 
--- 5.1.0, in place: the agents of a key (lot G1a). An agent is what the owner wants to see in the Inbox: one program, or
+-- 5.1.0, in place: the agents of a key. An agent is what the owner wants to see in the Inbox: one program, or
 -- one conversation, that asks. The portal gives it a token; the table keeps only the SHA-256 digest of the token.
 -- The name is set by the owner only. `kind = 'bucket'` is the pseudo agent "Unattributed" of a key: no token, one for
 -- each key. For a bucket, `ordinal` is the last number that the key gave to an agent: the counter never goes back, so

@@ -3,6 +3,8 @@
 
 Usage: ste-check.py [--no-tables] FILE[:START-END] [FILE...]
 
+A file that ends with .html is reduced to its text first (each block element is one paragraph).
+
 The script needs only Python 3 and no other package. It reports:
   - a procedural sentence of more than 20 words;
   - a descriptive sentence of more than 25 words;
@@ -31,6 +33,8 @@ ING_OK = {
     "pending", "sibling", "bearing", "building", "warning", "binding", "bing", "sling", "swing", "sting",
     # The noun of the feature "agents": the grouping of the items by agent.
     "grouping",
+    # Technical names of this project: the page names "Getting started" and "Security model and hardening", and the routing of a proxy.
+    "getting", "hardening", "routing",
 }
 
 # First words of a procedural sentence (imperative mood).
@@ -117,6 +121,7 @@ LIST_PREFIX = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
 WORD = re.compile(r"[A-Za-z][A-Za-z0-9_'-]*|\d+")
 SPLIT = re.compile(r"(?<=[.!?:;])\s+(?=[A-Z0-9(])")
 TABLE_ROW = re.compile(r"^\s*\|")
+LINK_DEFINITION = re.compile(r"^\[[^\]]+\]:\s+\S+$")
 TABLE_RULE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
 
 
@@ -163,6 +168,16 @@ def word_problems(sentence):
                 f"{words[i]} {words[i + 1]} {words[i + 2]}"
 
 
+def html_to_text(raw):
+    """Reduce an HTML page to lines of text: one paragraph for each block element."""
+    import html as htmllib
+    raw = re.sub(r"(?is)<(script|style|svg|pre|head)\b.*?</\1>", "", raw)
+    raw = re.sub(r"(?i)</(p|li|h[1-6]|div|section|figcaption|td|th|summary|header|footer|nav|ul|ol|table|tr|a)>", "\n\n", raw)
+    raw = re.sub(r"(?i)<br\s*/?>", "\n\n", raw)
+    raw = re.sub(r"<[^>]*>", "", raw)
+    return htmllib.unescape(raw)
+
+
 def check_file(spec, check_tables):
     path, _, rng = spec.partition(":")
     first, last = 1, 10**9
@@ -170,7 +185,10 @@ def check_file(spec, check_tables):
         a, _, b = rng.partition("-")
         first, last = int(a), int(b)
     with open(path, encoding="utf-8") as handle:
-        lines = handle.read().split("\n")
+        raw = handle.read()
+    if path.endswith(".html"):
+        raw = html_to_text(raw)
+    lines = raw.split("\n")
     problems = []
     in_code = False
     paragraph = []  # list of (line number, text)
@@ -219,7 +237,7 @@ def check_file(spec, check_tables):
                         for kind, word in word_problems(sent):
                             problems.append(f"{path}:{no}: {kind}: {word}")
             continue
-        if stripped.startswith(("<!--", "-->")) or stripped == "---":
+        if stripped.startswith(("<!--", "-->")) or stripped == "---" or LINK_DEFINITION.match(stripped):
             flush()
             continue
         if LIST_PREFIX.match(stripped):

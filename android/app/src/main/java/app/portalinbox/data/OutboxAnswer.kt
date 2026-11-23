@@ -51,7 +51,7 @@ object OutboxAnswer {
 
     /**
      * The message for a result, or null when nothing needs to be said. [tooLate] results use the words
-     * "Too late" (mock 6b): the item ended before the answer arrived.
+     * "Too late": the item ended before the answer arrived.
      */
     fun resultLine(p: AnswerProgress.Done): String? = when (p.result) {
         AnswerStatus.ACCEPTED.wire -> if (p.action == Action.ACCEPT) "You approved this request." else "You declined this request."
@@ -97,7 +97,7 @@ object OutboxAnswer {
         }
     }
 
-    /** The text of a queued reply entry, if any (used by lot A3). */
+    /** The text of a queued reply entry, if any. */
     fun replyText(e: OutboxEntry): String? = (runCatching { e.toFrame() }.getOrNull() as? ReplyFrame)?.text
 
     fun declineText(e: OutboxEntry): String? = (runCatching { e.toFrame() }.getOrNull() as? AnswerFrame)

@@ -1,10 +1,10 @@
-//! The count of the uses of the budgets (portal 7.2b, 7.6, 7.7).
+//! The count of the uses of the budgets.
 //!
 //! One use takes one unit from each of its counters, or none. The database does the count, so
 //! several instances count each counter one time for all of them (protocol 6.8). This module adds
 //! the refusal memo: after `budget_exceeded`, an instance refuses each use of the same counter at
 //! once, with no statement, until the end of its window or the next version of the directory. The
-//! memo counts nothing: it only refuses (portal 7.6).
+//! memo counts nothing: it only refuses.
 //!
 //! A failed read or write of a counter fails only the use that needs it: the PDP answers HTTP 503
 //! and never a decision (protocol 6.9).
@@ -20,17 +20,17 @@ use crate::decision::{Counter, CounterOwner};
 use crate::grants::CounterId;
 use crate::store::{CountOutcome, Store};
 
-/// The most entries of the refusal memo, at any number of services (portal 7.6).
+/// The most entries of the refusal memo, at any number of services.
 pub const MEMO_ENTRIES: usize = 10_000;
 
 /// Why the PDP cannot count a use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unavailable {
-    /// A read or a write of the database failed (portal 10.5, cause `store_error`).
+    /// A read or a write of the database failed (cause `store_error`).
     StoreError,
-    /// A counter has no row (portal 7.2b, cause `row_missing`).
+    /// A counter has no row (cause `row_missing`).
     RowMissing,
-    /// The count did not end within 500 ms (portal 7.7).
+    /// The count did not end within 500 ms.
     WaitExceeded,
 }
 
@@ -50,7 +50,7 @@ pub enum Outcome {
     Unavailable(Unavailable),
 }
 
-/// The figures of the counts, for the metrics (portal 10.5).
+/// The figures of the counts, for the metrics.
 #[derive(Default)]
 pub struct Stats {
     pub counted: AtomicU64,
@@ -62,7 +62,7 @@ pub struct Stats {
     pub refunded: AtomicU64,
     /// The refunds that failed: one unit stays counted.
     pub refund_failed: AtomicU64,
-    /// The counter rows that the instance made (portal 7.2a).
+    /// The counter rows that the instance made.
     pub rows_made: AtomicU64,
     /// The statements that the instance sent to the database.
     pub statements: AtomicU64,
@@ -75,7 +75,7 @@ pub struct Counting {
     memo: Mutex<HashMap<(CounterOwner, CounterId), Instant>>,
     pub stats: Stats,
     /// A fixed clock in whole seconds since the Unix epoch. 0 is no fixed clock. Only a test sets
-    /// it: the program counts with the clock of the database (portal 7.2b).
+    /// it: the program counts with the clock of the database.
     clock: std::sync::atomic::AtomicI64,
 }
 
@@ -87,7 +87,7 @@ fn wait_exceeded(error: &str) -> bool {
 }
 
 impl Counting {
-    /// Removes the memo. A new version of the directory can change the amounts (portal 7.6).
+    /// Removes the memo. A new version of the directory can change the amounts.
     pub fn clear(&self) {
         self.memo.lock().unwrap_or_else(|p| p.into_inner()).clear();
     }

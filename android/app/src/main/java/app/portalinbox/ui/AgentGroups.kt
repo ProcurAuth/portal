@@ -9,7 +9,7 @@ import app.portalinbox.proto.AgentState
 import app.portalinbox.proto.Observed
 
 /**
- * The section "To answer", grouped by agent (lot G4). Pure Kotlin: the list gives the open items that [app.portalinbox.portal.ItemSort]
+ * The section "To answer", grouped by agent. Pure Kotlin: the list gives the open items that [app.portalinbox.portal.ItemSort]
  * sorted (the oldest first, across portals), the directory of the agents, and the folded groups. The result is what the screen draws.
  *
  * Rules:

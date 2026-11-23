@@ -1,5 +1,5 @@
 //! The quiet hours and the digest on the phone side, with the real engine and the real frame builder, on SQLite and on
-//! PostgreSQL (lot L11). The clock is the one of the inbox: each test moves it by hand. The pages and the frames of a real
+//! PostgreSQL. The clock is the one of the inbox: each test moves it by hand. The pages and the frames of a real
 //! phone are in `tests/prefs_e2e.rs`.
 
 use super::*;

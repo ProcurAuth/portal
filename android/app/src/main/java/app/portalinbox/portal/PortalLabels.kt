@@ -4,7 +4,7 @@ import app.portalinbox.data.Server
 import app.portalinbox.ui.VisibleText
 
 /**
- * The texts of the identity banner and of the footer of the approval screen (proposal 3.7). Pure Kotlin.
+ * The texts of the identity banner and of the footer of the approval screen. Pure Kotlin.
  *
  * The nickname, the color and the key come from the phone. The login is what the portal says about the account, so it goes
  * through [VisibleText.escapeLine]. The host comes from the address that the user enrolled.

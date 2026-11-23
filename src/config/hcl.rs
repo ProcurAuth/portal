@@ -1,7 +1,7 @@
 //! The small HCL subset of the configuration file: blocks of `key = value` lines.
 //!
 //! A block has a name (`server { ... }`), or a name and a label (`user "alice" { ... }`). A value
-//! is a scalar or a list of quoted strings (`["a", "b"]`).
+//! is a scalar or a list of quoted strings (`["a", "b"]`). The list of grants can also hold objects.
 //!
 //! The parser keeps the written form of each scalar (quoted text, bare number or bare word), so
 //! the typed layer can refuse a number in quotes and a word without quotes.
@@ -729,7 +729,7 @@ mod tests {
         ] {
             assert!(parse(bad, BLOCKS).is_err(), "{bad}");
         }
-        // The same name in two users is permitted (portal 3.4c).
+        // The same name in two users is permitted.
         assert!(parse(
             r#"user "a" { key "x" { } } user "b" { key "x" { } }"#,
             BLOCKS

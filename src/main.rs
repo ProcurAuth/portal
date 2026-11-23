@@ -89,7 +89,7 @@ fn real_main() -> Result<(), String> {
                 inbox::Boot::Ready(booted) => Some(booted),
             };
             let store = Arc::new(open_store(&config, &secrets)?);
-            // A command that writes to the SQLite file reads this mark (portal 10.4a).
+            // A command that writes to the SQLite file reads this mark.
             if let StorageBackend::Sqlite(path) = &config.storage.backend {
                 store::mark_sqlite_instance(path)?;
             }
@@ -207,7 +207,7 @@ fn real_main() -> Result<(), String> {
         // Revokes the keys of the database of one user, or all the keys of the database (portal
         // 5.6). It makes no key and does not revoke a key of the file. A running portal takes the
         // change within one round of the directory. With a SQLite file, the command writes only when
-        // the portal does not run (portal 10.4a).
+        // the portal does not run.
         "revoke-keys" => {
             let (config_path, who) = parse_revoke_args(args.collect())?;
             let (config, secrets) = Config::load(&config_path)?;

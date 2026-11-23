@@ -3,7 +3,7 @@ package app.portalinbox.portal
 import kotlin.math.pow
 
 /**
- * The 10 colors of the portals (proposal 3.1). Pure Kotlin. The order is the order in which the app proposes a free color:
+ * The 10 colors of the portals. Pure Kotlin. The order is the order in which the app proposes a free color:
  * violet, teal, pink, sand, sky, lime, slate, coral, moss, rose. The index in this list is the value of the column `color`.
  *
  * Each color has a value for the dark theme and one for the light theme. Each was checked for a contrast of at least

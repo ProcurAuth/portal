@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Several portals on one phone (lot MP2). The names of the portals are chosen by the user and are never taken from the portal. -->
+    <!-- Several portals on one phone. The names of the portals are chosen by the user and are never taken from the portal. -->
 
     <!-- Enrollment: the code step -->
     <string name="enroll_continue">Continue</string>
@@ -102,7 +102,7 @@
     <string name="portal_address_saved">Address changed</string>
     <string name="portal_reenroll">Enroll again</string>
     <string name="portal_reenroll_help">Use a new code of this portal. The name, the color and the history stay.</string>
-    <!-- Settings of one portal (lot MP5): local switches, the preferences of the account at the portal, the apply-to-all sheet. -->
+    <!-- Settings of one portal: local switches, the preferences of the account at the portal, the apply-to-all sheet. -->
     <string name="portal_settings">Settings of this portal</string>
     <string name="portal_settings_help">Mute, lock screen, quiet hours, summary and how long to keep finished requests.</string>
     <string name="portal_prefs_only">Settings for this portal only</string>

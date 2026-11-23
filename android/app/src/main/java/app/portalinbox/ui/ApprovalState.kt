@@ -11,7 +11,7 @@ import app.portalinbox.proto.RequestKind
 /**
  * What the approval screen lets the owner do. Pure Kotlin: the Activity gives the facts and draws the answer.
  *
- * Rules of Approve (CONF 5.3, decided with Alice):
+ * Rules of Approve:
  * - Approve is shown only for an open approval whose effect the phone checked.
  * - Approve is locked until the command was read to the end ([ReadGate]).
  * - Past `stale_after`, Approve also needs the box "I know this request is N days old".
@@ -22,11 +22,11 @@ import app.portalinbox.proto.RequestKind
 object ApprovalState {
     /**
      * The age at which a request counts as old. The phone gets no value from the server: this is the default
-     * of the server key `inbox.approvals.stale_after` (24 h, CONF 6.7).
+     * of the server key `inbox.approvals.stale_after` (24 h).
      */
     const val STALE_AFTER_MS = 24L * 3_600_000
 
-    /** Longest text of a decline (CONF 4.10). The field of the screen stops at this length: nothing is cut later. */
+    /** Longest text of a decline. The field of the screen stops at this length: nothing is cut later. */
     const val MAX_DECLINE_CHARS = 2000
 
     enum class Mode {
@@ -47,7 +47,7 @@ object ApprovalState {
     enum class Lock { READ_COMMAND, CONFIRM_STALE, NO_SCREEN_LOCK, SENDING, PORTAL_BLOCKED, AGENT_LOCKED }
 
     /**
-     * What the phone can do with an answer for this portal now (proposal 3.11). [ONLINE]: it goes at once. [OFFLINE]: the outbox
+     * What the phone can do with an answer for this portal now. [ONLINE]: it goes at once. [OFFLINE]: the outbox
      * holds it until the portal is back, and the server decides then. [BLOCKED]: the key of the portal changed or the portal
      * revoked this device. Nothing can be sent, so Approve and Decline are off.
      */
@@ -75,13 +75,13 @@ object ApprovalState {
         val answer: AnswerProgress,
         /** The phone can ask for a biometric or a device credential. */
         val canAuthenticate: Boolean,
-        /** Lot A3 gives the discussion screen. Without it the button "Ask the agent" does not show. */
+        /** The caller gives the discussion screen. Without it the button "Ask the agent" does not show. */
         val askAvailable: Boolean,
         /** The state of the link to the portal of the item. */
         val link: Link = Link.ONLINE,
         /** The nickname of the portal, for the offline line. */
         val portal: String = "this portal",
-        /** The agent of the item is new and the portal locks the new agents (lot G4): Approve stays off until the owner allows the agent. */
+        /** The agent of the item is new and the portal locks the new agents: Approve stays off until the owner allows the agent. */
         val agentLocked: Boolean = false,
     )
 

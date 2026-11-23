@@ -1,7 +1,7 @@
 package app.portalinbox.service
 
 /**
- * The "key changed" state of a portal (proposal 3.6). Pure Kotlin.
+ * The "key changed" state of a portal. Pure Kotlin.
  *
  * A portal is in this state when the Noise handshake does not end with the pinned key of the portal, or when the server closes
  * the session with 4401. The connection then stops: nothing is sent to that address until the user starts a re-enrollment from

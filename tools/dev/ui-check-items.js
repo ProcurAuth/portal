@@ -14,7 +14,7 @@
 //   UI_CHECK_IDS         the JSON object `ids` of demo.json
 //   UI_CHECK_SHOTS       a directory for the screenshots (optional)
 //
-// The questions (lot L14): when UI_CHECK_IDS holds the key `both`, the script checks the web pages of the questions
+// The questions: when UI_CHECK_IDS holds the key `both`, the script checks the web pages of the questions
 // instead. Start the server with the test `questions_demo_for_the_eyes` of tests/questions_web_e2e.rs (it writes
 // demo-questions.json). The pages are checked at 390 and 1440 px, dark and light, with JavaScript off.
 const { chromium } = require("playwright");
@@ -70,7 +70,7 @@ const noSideways = (page) =>
     return [document.documentElement.scrollWidth - document.documentElement.clientWidth, main ? main.scrollWidth - main.clientWidth : 0];
   });
 
-// The pages of the questions (lot L14).
+// The pages of the questions.
 async function questions(browser, owner, root) {
   const Q = INBOX + "/items/";
   const pages = [

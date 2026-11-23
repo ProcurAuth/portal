@@ -11,7 +11,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** DIAL 1.4.2 and 1.6: the rows under the options come from the two flags, for every combination and every type of input. */
+/** The rows under the options come from the two flags, for every combination and every type of input. */
 class FlagsMatrixRowsTest {
     private val conv = Interaction.CONVERSATIONAL
     private val shot = Interaction.ONE_SHOT

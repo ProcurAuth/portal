@@ -4156,7 +4156,7 @@ input.keyText {
 }
 
 /* The pages of the items: the panel "Open items", the History, one request and the limits ---------
-   The look is the look of the approved mock screens. Every colour, size and radius is a token of portal.css. */
+   The look follows the design of the settings pages. Every colour, size and radius is a token of portal.css. */
 .page { display: grid; gap: 12px; align-content: start; min-width: 0; }
 .page--narrow { max-width: 1100px; }
 .crumbs { display: flex; align-items: center; gap: 6px; min-height: var(--control); color: var(--muted); font-size: var(--fs-m); }
@@ -4244,7 +4244,7 @@ pre.code-block .ln::before { counter-increment: ln; content: counter(ln); positi
 .exp__more { font-style: normal; font-size: var(--fs-s); }
 .exp__more a { color: var(--accent-text); }
 
-/* Visible control characters (rule R5): never removed, always shown. */
+/* Visible control characters: never removed, always shown. */
 .vis { display: inline-block; margin: 0 1px; padding: 0 3px; border: 1px solid color-mix(in srgb, var(--danger) 55%, transparent); border-radius: 3px; background: var(--danger-bg); color: var(--danger); font-family: var(--font-mono); font-size: 11px; line-height: 1.35; font-style: normal; font-weight: 700; vertical-align: baseline; white-space: nowrap; }
 .vis--na { border-color: color-mix(in srgb, var(--warning) 55%, transparent); background: var(--warning-bg); color: var(--warning); }
 
@@ -4304,7 +4304,7 @@ textarea.uiInput { height: auto; min-height: 64px; padding: 6px 8px; resize: ver
 .sep { color: var(--muted); font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; text-align: center; display: flex; align-items: center; gap: 10px; }
 .sep::before, .sep::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
 
-/* Question (lot L14) ----------------------------------------------------------------------
+/* Question ----------------------------------------------------------------------
    The answer form of a question: the options, the row "Other answer", the row "Ask the agent", the blocks of a form and the
    view of an answer. Every colour, size and radius is a token of the theme. */
 .opts, .qopts { display: grid; gap: 0; border: 1px solid var(--border); border-radius: var(--radius-compact); background: var(--panel); overflow: hidden; margin: 8px 10px; }
@@ -4641,7 +4641,7 @@ textarea.uiInput { height: auto; min-height: 64px; padding: 6px 8px; resize: ver
   -webkit-user-select: none;
 }
 
-/* Inbox preferences (lot L11) ---------------------------------------------------------------------- */
+/* Inbox preferences ---------------------------------------------------------------------- */
 .page--prefs { max-width: 860px; }
 .radios--col { flex-direction: column; gap: 8px; }
 .radios--col label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
@@ -4652,9 +4652,9 @@ textarea.uiInput { height: auto; min-height: 64px; padding: 6px 8px; resize: ver
 .note--row { padding-top: 4px; }
 .decide__row--form { padding: 10px; }
 
-/* Agents (lot G3) ---------------------------------------------------------------------------------
+/* Agents ---------------------------------------------------------------------------------
    The groups of the panel "Open items", the notice of a new agent, the page of an agent and the box "From agent". The look
-   is the look of the approved mock screens. Every colour, size and radius is a token of portal.css. */
+   follows the design of the settings pages. Every colour, size and radius is a token of portal.css. */
 .agGroups { display: grid; gap: 10px; min-width: 0; }
 .agrp { border: 1px solid var(--border-strong); border-radius: var(--radius-compact); background: var(--panel); min-width: 0; }
 .agrp > summary { list-style: none; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 8px 10px; cursor: pointer; background: var(--raised); border-radius: var(--radius-compact); }

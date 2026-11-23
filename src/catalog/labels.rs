@@ -85,7 +85,7 @@ pub fn parse(origin: &str, labels: &BTreeMap<String, String>) -> Result<Option<S
     if id.is_empty() {
         return Err(fail("id is empty after normalisation".into()));
     }
-    // The id `portal` is the id of the service of the portal itself (portal 6.1).
+    // The id `portal` is the id of the service of the portal itself.
     if id == crate::portal_actions::SERVICE {
         return Err(fail(
             "the id portal is the id of the service of the portal: set another portal.id".into(),

@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 500" width="1100" height="500" role="img" aria-label="Keys and limits: a key never goes beyond its owner, ceilings and budgets, two kinds of key">
+<title>The key and limits model of portal</title><desc>The rights of a key are the rights that the key holds and that its owner has now. A ceiling is a value that the service applies, and the lowest value wins. A budget is a count in a window that the PDP keeps for the key and for its owner. There are two kinds of key: mcp for agents and api for senders.</desc>
+<defs></defs>
+<rect width="1100" height="500" rx="20" fill="#12142a"/>
+<g font-family="Inter, 'Segoe UI', -apple-system, Helvetica, Arial, sans-serif">
+<text x="36" y="46" font-size="25" font-weight="700" fill="#ffffff">A key never goes beyond its owner</text>
+<text x="36" y="73" font-size="15" fill="#9ca3d4">The owner can lose a right at any time. The key loses it at the next decision.</text>
+<rect x="30" y="100" width="350" height="370" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="205" y="132" font-size="17" font-weight="700" fill="#a5b4fc" text-anchor="middle">Rights</text>
+<circle cx="140" cy="285" r="88" fill="#4338ca" fill-opacity="0.38" stroke="#818cf8" stroke-width="2.5"/>
+<circle cx="270" cy="285" r="88" fill="#0ea5e9" fill-opacity="0.30" stroke="#38bdf8" stroke-width="2.5"/>
+<path d="M205 208.3a88 88 0 0 1 0 153.4a88 88 0 0 1 0-153.4z" fill="#ffffff" fill-opacity="0.92"/>
+<text x="110" y="272" font-size="16" font-weight="700" fill="#e0e7ff" text-anchor="middle">Owner</text>
+<text x="110" y="293" font-size="13" fill="#c7d2fe" text-anchor="middle">rights now</text>
+<text x="300" y="272" font-size="16" font-weight="700" fill="#e0f2fe" text-anchor="middle">Key</text>
+<text x="300" y="293" font-size="13" fill="#bae6fd" text-anchor="middle">grants set</text>
+<text x="300" y="311" font-size="13" fill="#bae6fd" text-anchor="middle">for the agent</text>
+<text x="205" y="281" font-size="14" font-weight="800" fill="#312e81" text-anchor="middle">Rights</text>
+<text x="205" y="299" font-size="14" font-weight="800" fill="#312e81" text-anchor="middle">of the key</text>
+<text x="205" y="410" font-size="13" fill="#9ca3d4" text-anchor="middle">portal deletes the keys of an</text>
+<text x="205" y="429" font-size="13" fill="#9ca3d4" text-anchor="middle">account that the superadmin deletes.</text>
+<text x="205" y="452" font-size="13" fill="#9ca3d4" text-anchor="middle">Other instances follow within keys.directory_max_age.</text>
+<rect x="404" y="100" width="330" height="370" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="569" y="132" font-size="17" font-weight="700" fill="#a5b4fc" text-anchor="middle">Limits</text>
+<rect x="422" y="150" width="294" height="150" rx="12" fill="#4338ca" fill-opacity=".38" stroke="#818cf8" stroke-width="1.6"/>
+<text x="569.0" y="176.0" font-size="16" font-weight="700" fill="#e0e7ff" text-anchor="middle">Ceiling</text>
+<text x="438" y="204" font-size="13.5" fill="#e0e7ff" text-anchor="start">A value that the service applies.</text>
+<text x="438" y="225" font-size="13.5" fill="#e0e7ff" text-anchor="start">The lowest value wins.</text>
+<text x="438" y="246" font-size="13.5" fill="#e0e7ff" text-anchor="start">Example: max_rows 5000 on the</text>
+<text x="438" y="267" font-size="13.5" fill="#e0e7ff" text-anchor="start">key and 100 on the owner: 100.</text>
+<rect x="422" y="316" width="294" height="138" rx="12" fill="#0ea5e9" fill-opacity=".26" stroke="#38bdf8" stroke-width="1.6"/>
+<text x="569.0" y="342.0" font-size="16" font-weight="700" fill="#e0f2fe" text-anchor="middle">Budget</text>
+<text x="438" y="366" font-size="13.5" fill="#e0f2fe" text-anchor="start">A count per window: second,</text>
+<text x="438" y="385" font-size="13.5" fill="#e0f2fe" text-anchor="start">minute, hour or day. The PDP</text>
+<text x="438" y="404" font-size="13.5" fill="#e0f2fe" text-anchor="start">counts one use for the key and</text>
+<text x="438" y="423" font-size="13.5" fill="#e0f2fe" text-anchor="start">for its owner. Empty budget:</text>
+<text x="438" y="442" font-size="13.5" fill="#e0f2fe" text-anchor="start">budget_exceeded, retry_after.</text>
+<rect x="758" y="100" width="312" height="370" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="914" y="132" font-size="17" font-weight="700" fill="#a5b4fc" text-anchor="middle">Two kinds of key</text>
+<rect x="776" y="150" width="276" height="138" rx="12" fill="#4338ca" fill-opacity=".38" stroke="#818cf8" stroke-width="1.6"/>
+<text x="914.0" y="176.0" font-size="16" font-weight="700" fill="#e0e7ff" text-anchor="middle">mcp_  for agents</text>
+<text x="792" y="202" font-size="13.5" fill="#e0e7ff" text-anchor="start">Checked at /auth/verify-key.</text>
+<text x="792" y="223" font-size="13.5" fill="#e0e7ff" text-anchor="start">Holds grants on services.</text>
+<text x="792" y="244" font-size="13.5" fill="#e0e7ff" text-anchor="start">Gets an identity token.</text>
+<rect x="776" y="302" width="276" height="100" rx="12" fill="#34d399" fill-opacity=".22" stroke="#34d399" stroke-width="1.6"/>
+<text x="914.0" y="328.0" font-size="16" font-weight="700" fill="#d1fae5" text-anchor="middle">api_  for senders</text>
+<text x="792" y="354" font-size="13.5" fill="#d1fae5" text-anchor="start">Checked by the Inbox API.</text>
+<text x="792" y="375" font-size="13.5" fill="#d1fae5" text-anchor="start">Holds alert.send, alert.read.</text>
+<text x="914" y="428" font-size="12.5" fill="#9ca3d4" text-anchor="middle">53 characters. portal keeps only</text>
+<text x="914" y="446" font-size="12.5" fill="#9ca3d4" text-anchor="middle">the SHA-256 digest of the text.</text>
+</g>
+</svg>

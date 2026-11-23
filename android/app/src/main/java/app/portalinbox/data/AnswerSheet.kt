@@ -49,7 +49,7 @@ data class Sheet(val blocks: List<SheetBlock>, val isForm: Boolean)
 
 /**
  * What the owner entered in one block. A radio keeps at most one tick. With [otherOn] the free text [otherText] is the
- * answer and the block holds no tick: the free answer excludes the ticks (DIAL 1.4.2).
+ * answer and the block holds no tick: the free answer excludes the ticks.
  */
 data class BlockDraft(
     val ticked: List<String> = emptyList(),

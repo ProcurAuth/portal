@@ -1,4 +1,4 @@
-//! End-to-end tests of the questions (lot L13): the real binary, an agent that asks through `/mcp`, and a Rust phone that
+//! End-to-end tests of the questions: the real binary, an agent that asks through `/mcp`, and a Rust phone that
 //! speaks Noise to the session of the portal. The rig is the rig of the approvals with the block `inbox.questions`.
 //! Run them on PostgreSQL with `INBOX_E2E_BACKEND=postgres`.
 

@@ -1043,7 +1043,7 @@ fn an_evaluation_id_above_1024_bytes_is_never_given() {
     });
 }
 
-// ---------------------------------------------------------------- other permissions of an operation (spec Q53)
+// ---------------------------------------------------------------- other permissions of an operation
 
 /// A question with `context.permission_only` for a grant with `confirm`.
 fn marked(f: &Fixture, subject: &str, context: Value) -> Reply {

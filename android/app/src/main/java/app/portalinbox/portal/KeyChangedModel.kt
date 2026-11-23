@@ -4,7 +4,7 @@ import app.portalinbox.data.Server
 import app.portalinbox.service.KeyChange
 
 /**
- * The key-changed block of the portal screen (proposal 3.6, mock m9). Pure Kotlin.
+ * The key-changed block of the portal screen. Pure Kotlin.
  *
  * The phone cannot know the new key: a failed handshake gives no key. So the block shows the old fingerprint, says that the
  * new one shows after the user enters a new code, and offers the two choices: enter a new code (re-enrollment in place) or

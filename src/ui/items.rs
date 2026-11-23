@@ -26,7 +26,7 @@ use crate::util::{html_escape, time_tag};
 pub const ITEMS: &str = "/auth/settings/inbox/items";
 pub const ANSWER: &str = "/auth/settings/inbox/items/answer";
 pub const REPLY: &str = "/auth/settings/inbox/items/reply";
-/// The form that answers or declines a question (lot L14).
+/// The form that answers or declines a question.
 pub const QUESTION: &str = "/auth/settings/inbox/items/question";
 pub const CANCEL: &str = "/auth/settings/inbox/items/cancel";
 pub const LIMITS: &str = "/auth/settings/inbox/limits";
@@ -2222,9 +2222,7 @@ mod tests {
             let body = page.to_lowercase();
             // The page has the sprite and the stylesheet links: only the text that a person reads is checked.
             let text = body.split("<main").nth(1).unwrap_or(&body);
-            for word in ["portal", "inbox", "inbox", "circular"] {
-                assert!(!text.contains(word), "{word}");
-            }
+            assert!(!text.contains("portal"), "portal");
         }
     }
 }

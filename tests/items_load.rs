@@ -1,4 +1,4 @@
-//! Abuse and load tests of the questions (lot L15): the real binary, an agent that asks through `/mcp`, and a Rust phone
+//! Abuse and load tests of the questions: the real binary, an agent that asks through `/mcp`, and a Rust phone
 //! that speaks Noise to the session of the portal. Each test pushes a flood or a huge value at the portal and checks
 //! that the rows, the events and the frames stay inside the limits, and that nothing of a question leaks.
 //!
@@ -304,7 +304,7 @@ async fn a_flood_of_asks_with_and_without_agent_tokens_keeps_rows_events_and_fra
         .is_empty());
 }
 
-/// FINDING (reported to the coordinator, not fixed in lot L15): the hints of an agent keep the last `User-Agent` and
+/// KNOWN LIMIT (not fixed): the hints of an agent keep the last `User-Agent` and
 /// the last client. A caller that changes its `User-Agent` at each call changes the hints at each call, and each change
 /// raises `rev`, so the portal writes one row in `alerts` and one delivery for each phone for each call. No limit stops
 /// it: the key is valid, and the refused `ask` still updates the hints. Run this test with `--ignored` to see it fail.
@@ -737,7 +737,7 @@ async fn canary_for_question_bodies_in_every_place() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The web forms of the questions (lot L14): `POST /auth/settings/inbox/items/question` and `/items/reply`.
+// The web forms of the questions: `POST /auth/settings/inbox/items/question` and `/items/reply`.
 
 const WEB_QUESTION: &str = "/auth/settings/inbox/items/question";
 const WEB_REPLY: &str = "/auth/settings/inbox/items/reply";

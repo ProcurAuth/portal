@@ -242,7 +242,7 @@ pub struct ItemRow {
     pub previous_id: Option<String>,
     pub requester_key_id: String,
     pub requester_owner: String,
-    /// The agent of the item (lot G1a): a row of `agents` of the same key. The bucket of the key when no agent is
+    /// The agent of the item: a row of `agents` of the same key. The bucket of the key when no agent is
     /// known. A merge moves the item to another agent, so this value can change.
     pub agent_id: String,
     pub via: Via,
@@ -681,7 +681,7 @@ pub fn settle_due(l: &mut Loaded, now: i64, rules: &Rules, fx: &mut Effects) -> 
 
 /// The key of the requests of an approval: the hash of the service, the subject, the action, the path of the
 /// resource and the effect. Each part ends with a zero byte, so two different parts never give the same text. One
-/// non-final item exists for each value (CONF 3.10). The PDP and the submission API compute it the same way.
+/// non-final item exists for each value. The PDP and the submission API compute it the same way.
 pub fn approval_key_hash(
     service: &str,
     subject: &str,

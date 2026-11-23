@@ -7,7 +7,7 @@ import app.portalinbox.proto.AgentKind
 import app.portalinbox.proto.AgentState
 
 /**
- * The box "From agent" under the title of the approval screen (lot G4). Pure Kotlin.
+ * The box "From agent" under the title of the approval screen. Pure Kotlin.
  *
  * The name, the state and the key are text of the portal. The line "Not verified: Says it is ..." is text that the agent sent. It
  * goes through [UntrustedText] on the screen, like the explanation. A request that says another name than the agent said before

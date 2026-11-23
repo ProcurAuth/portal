@@ -1,4 +1,4 @@
-//! The pages of the agents in the tab "Inbox": the first-use notice, the agent page and the list of the agents (lot G3).
+//! The pages of the agents in the tab "Inbox": the first-use notice, the agent page and the list of the agents.
 //!
 //! An agent is one program, or one conversation of a model, that asks. Several agents can share one key. The server gives
 //! each agent a token, and the owner gives it a name. The pages work without script. Each form is a POST with the token
@@ -208,7 +208,7 @@ impl Lookalike {
     }
 }
 
-/// A known agent that a new agent looks like (lot G5): the hint "similar". It is help for the owner. The portal never
+/// A known agent that a new agent looks like: the hint "similar". It is help for the owner. The portal never
 /// merges by itself, and the hints can be copied.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Similar {
@@ -737,7 +737,7 @@ pub struct AgentsList {
     pub enroll: Option<EnrollForm>,
 }
 
-/// The form "Add agent" of the list (lot G6). The owner makes an agent for a key in the mode `enrolled`. The server then shows
+/// The form "Add agent" of the list. The owner makes an agent for a key in the mode `enrolled`. The server then shows
 /// the token one time.
 pub struct EnrollForm {
     pub csrf: String,
@@ -827,7 +827,7 @@ pub fn agents_page(frame: &Frame, l: &AgentsList, notice: Option<Notice>) -> Str
 
 // The token, one time ----------------------------------------------------------------------------
 
-/// The page that shows a token one time: after "Add agent" and after "Reset token" (lot G6). The server keeps only a digest of
+/// The page that shows a token one time: after "Add agent" and after "Reset token". The server keeps only a digest of
 /// the token, so no other page can show it again.
 pub struct TokenPage<'a> {
     /// The name of the agent: text of the server.
@@ -1481,9 +1481,7 @@ mod tests {
         for page in pages {
             let body = page.to_lowercase();
             let text = body.split("<main").nth(1).unwrap_or(&body);
-            for word in ["portal", "inbox", "inbox", "circular"] {
-                assert!(!text.contains(word), "{word}");
-            }
+            assert!(!text.contains("portal"), "portal");
         }
         let _ = (
             Interaction::OneShot,

@@ -1,4 +1,4 @@
-//! The operations of the agents, written once for both databases (lot G1a).
+//! The operations of the agents, written once for both databases.
 //!
 //! Each operation runs in one transaction, as the operations of the items do (`items_ops.rs`). The two databases
 //! implement [`AgentTx`], the few steps that touch SQL: SQLite in `agents_db.rs`, PostgreSQL in `agents_pg.rs`.
@@ -11,7 +11,7 @@
 //! - [`human_op`] is the core of the actions of the owner: rename, allow, block, unblock and merge. Each action
 //!   checks the owner, writes one row in `agent_events` and raises `rev`.
 //!
-//! Each change that raises `rev` also writes a message for the devices of the owner (lot G2): the phones get the frame
+//! Each change that raises `rev` also writes a message for the devices of the owner: the phones get the frame
 //! `agent` from the queue of deliveries, with a receipt, so the notice of a new agent is not lost. See [`agent_notice`].
 
 // The channel (G1b), the phones (G2) and the web (G3) call this API in the next lots.
@@ -871,7 +871,7 @@ pub async fn human_op<T: ItemTx>(
     Ok(Done { value: Ok(out), fx })
 }
 
-// ---------------------------------------------------------------- the mode `enrolled` (lot G6)
+// ---------------------------------------------------------------- the mode `enrolled`
 
 /// What `enroll` needs. The caller prepares the id and the token, so the transaction needs no random source.
 #[derive(Clone)]

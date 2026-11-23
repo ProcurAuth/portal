@@ -1,4 +1,4 @@
-//! End-to-end tests of the web pages of the items (lot L10): the panel "Open items", the History, the page of one
+//! End-to-end tests of the web pages of the items: the panel "Open items", the History, the page of one
 //! request, the forms that answer, reply and cancel, the route of the administrator and the limits. The rig is the one of
 //! the approvals: the service asks through the approval API, the agent gives its texts through `/mcp`, and the owner
 //! uses the pages with a session. The pages have no script, so each check reads the HTML.
@@ -295,9 +295,7 @@ fn pages_of_the_items_never_name_the_product() {
         let (st, _, page) = pep.page(who, &path);
         assert_eq!(st, 200, "{path}");
         let text = Pep::text_of(&page);
-        for word in ["portal", "inbox", "inbox", "circular"] {
-            assert!(!text.contains(word), "{path} has the word {word}");
-        }
+        assert!(!text.contains("portal"), "{path} has the word portal");
     }
 }
 

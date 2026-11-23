@@ -3,7 +3,7 @@ package app.portalinbox.portal
 import app.portalinbox.net.ServerAddress
 
 /**
- * The rules of "Change address" (proposal 3.4, question Q8). Pure Kotlin. A portal has one address. The pinned key does not
+ * The rules of "Change address". Pure Kotlin. A portal has one address. The pinned key does not
  * change: it still decides who can answer. A new address that leads to another key fails the handshake and shows "Key changed".
  * Two addresses of one portal are not kept: the second would be a second enrollment of one key.
  */

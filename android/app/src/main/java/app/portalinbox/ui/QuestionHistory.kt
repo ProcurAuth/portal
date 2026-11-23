@@ -15,7 +15,7 @@ import app.portalinbox.proto.ItemState
 import java.time.ZoneId
 
 /**
- * How a question ended, in words (DIAL 4.5, mocks 6a to 6d, 7e). Pure Kotlin.
+ * How a question ended, in words. Pure Kotlin.
  *
  * The `settled` frame of a question does not say what the answer was, nor that the owner declined: the server keeps the text
  * of an answer sealed, and `decision` is for approvals. The phone knows the answer that it sent itself (the frame in its outbox).
@@ -131,7 +131,7 @@ object QuestionHistory {
         return reasonLine(item, null, null) + ". The answer is not shown on this phone."
     }
 
-    /** The line for the late answer of mock 6b, and the other results. Null when nothing needs to be said. */
+    /** The line for the late answer, and the other results. Null when nothing needs to be said. */
     fun resultLine(p: AnswerProgress.Done): String? = when (p.result) {
         AnswerStatus.ACCEPTED.wire -> if (p.action == Action.ACCEPT) "Your answer was sent." else "You declined to answer."
         AnswerStatus.ALREADY_ANSWERED.wire -> "Already answered on another device."

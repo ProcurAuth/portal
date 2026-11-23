@@ -3,7 +3,7 @@ package app.portalinbox.service
 import kotlin.random.Random
 
 /**
- * The delay before a portal connection tries again (proposal 3.11). Pure Kotlin. One instance for each connection.
+ * The delay before a portal connection tries again. Pure Kotlin. One instance for each connection.
  *
  * The delay grows from 1 s and doubles at each failure. The cap is 30 s during the first hour of failures. After one hour
  * without a success the cap is 5 minutes: a portal that is down for long does not wake the radio every 30 s for ever. A

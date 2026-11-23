@@ -1,7 +1,7 @@
 package app.portalinbox.portal
 
 /**
- * The rules that decide if the phone takes one more portal (proposal 3.5 and 5, questions Q3 and Q8). Pure Kotlin.
+ * The rules that decide if the phone takes one more portal. Pure Kotlin.
  * `Store.addServer` runs [check] inside its transaction. The `UNIQUE` columns of the table `servers` are the second
  * guard: if both disagree, the database wins and the add fails.
  *

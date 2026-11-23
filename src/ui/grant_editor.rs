@@ -27,7 +27,7 @@ pub struct EditorAction {
     /// The types of the nodes where the action applies, below the service.
     pub types: Vec<String>,
     pub limits: Vec<Input>,
-    /// The actions that this action needs (portal 6.3): it counts only when the account holds
+    /// The actions that this action needs: it counts only when the account holds
     /// them. Only the actions of the service `portal` have any.
     pub needs: Vec<String>,
     /// The row of a ticked grant has a lock that sets `confirm`. It is true for each action of a
@@ -60,7 +60,7 @@ pub struct EditorService {
     /// The types of the document with their parents and descriptions: the types of the children of
     /// a node.
     pub types: Vec<(String, String, String)>,
-    /// The portal can ask the service for the children of a node (portal 3.1a).
+    /// The portal can ask the service for the children of a node.
     pub fetch: bool,
     /// Where the document comes from and how old the copy is. The service `portal` is always
     /// `Absent`: its document is in the code, and the script says so.
@@ -590,7 +590,7 @@ impl EditorData {
 ///   can give. `None`: the form has no part for the features.
 /// - `owner`: the grants that the holder of the form can give. `None`: each grant. A right on a
 ///   service counts only when the owner also holds `access` on it: without it the right does not
-///   work, so the editor does not offer it (portal 4.2b).
+///   work, so the editor does not offer it.
 /// - `offered`: whether a grant can be ticked at all.
 /// - `ticked`: the grants that the form has at the start.
 /// - `keep_extras`: show a grant of the owner or a ticked grant that the documents do not
@@ -633,7 +633,7 @@ pub fn build(
         person: false,
     };
     if keep_extras {
-        // Each grant of the owner, and each grant of the key, can be ticked (portal 4.2).
+        // Each grant of the owner, and each grant of the key, can be ticked.
         let held: Vec<Grant> = owner
             .unwrap_or_default()
             .iter()
@@ -999,7 +999,7 @@ mod tests {
 
     #[test]
     fn an_owner_without_access_on_a_service_cannot_give_a_right_on_it() {
-        // The right of a key works only when the owner can open the service too (portal 4.2b): the
+        // The right of a key works only when the owner can open the service too: the
         // editor offers no service, no node and no right that the owner holds without `access`.
         let services = [datastore()];
         let rights = vec![grant("data.read on service:db/host:prod")];

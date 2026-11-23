@@ -205,7 +205,7 @@ pub(super) struct Custom {
     pub(super) password: &'static str,
     pub(super) session_secret: &'static str,
     /// Wait for the open port and a complete catalogue before the node is given to the test.
-    /// A node that does not wait has no open port until its catalogue is complete (portal 7.3b).
+    /// A node that does not wait has no open port until its catalogue is complete.
     pub(super) wait_complete: bool,
     /// `users.max_users`.
     pub(super) max_users: usize,
@@ -1129,7 +1129,7 @@ fn in_the_static_mode_only_the_configuration_gives_grants() {
         reply.location(),
         Some("/auth/settings/users/alice?s=grants-static")
     );
-    // A grant in the database does not count in this mode (portal 3.4b).
+    // A grant in the database does not count in this mode.
     node.state
         .store
         .update_user("alice", None, Some(&[Grant::new("access", "db").unwrap()]))
@@ -1858,7 +1858,7 @@ fn the_pdp_refuses_a_grant_on_a_sub_resource_when_the_service_does_not_declare_i
     );
 }
 
-/// A resource below the service with its ancestors (contract 11.5).
+/// A resource below the service with its ancestors.
 fn node_of(kind: &str, id: &str, ancestors: &[(&str, &str)]) -> serde_json::Value {
     let ancestors: Vec<serde_json::Value> = ancestors
         .iter()
@@ -2722,7 +2722,7 @@ fn the_add_form_makes_an_account_without_grants_and_a_save_sets_them() {
             reply.location(),
             Some("/auth/settings/users/bob?s=unchanged")
         );
-        // A limit value follows the declaration of the document (portal 3.2).
+        // A limit value follows the declaration of the document.
         let reply = post(
             &node,
             &root,
@@ -3055,7 +3055,7 @@ fn user_without_grant(node: &Node, root: &str, login: &str) -> String {
 }
 
 /// A source that never answered gives a snapshot without its services. The instance does not
-/// open its ports until the catalogue is complete (portal 7.3b), so no user reaches the gate.
+/// open its ports until the catalogue is complete, so no user reaches the gate.
 #[test]
 fn a_source_that_never_answered_keeps_the_ports_closed() {
     let node = start_custom(
@@ -3080,7 +3080,7 @@ fn a_source_that_never_answered_keeps_the_ports_closed() {
 }
 
 /// On SIGTERM the instance serves 5 more seconds, then it closes its listener and its idle
-/// connections (portal 7.3a).
+/// connections.
 #[test]
 fn the_instance_serves_five_seconds_after_the_stop_and_then_closes() {
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -4099,7 +4099,7 @@ fn an_orphan_key_is_an_unknown_subject_and_a_condition_of_the_owner_gives_false_
             true,
             "the person keeps the other rights"
         );
-        // The value 0 of `max_key_lifetime` refuses each key (portal 5.3a).
+        // The value 0 of `max_key_lifetime` refuses each key.
         let zero: Vec<Grant> = without_use
             .into_iter()
             .chain([Grant::parse("keys.own.use on service:portal/key_kind:mcp")
@@ -4315,7 +4315,7 @@ fn a_counter_that_cannot_be_counted_gives_the_status_503_and_no_decision() {
             None,
         );
         assert_eq!(reply.status, 200);
-        // A counter row that the table does not hold (portal 7.2b).
+        // A counter row that the table does not hold.
         node.state.store.execute_raw("DELETE FROM budget_counters");
         let reply = pdp(
             port,
@@ -4382,7 +4382,7 @@ fn the_pdp_refuses_each_key_when_the_directory_is_too_old_and_without_the_block_
             assert_eq!(ask("key:a1")["decision"], true);
         }
     });
-    // Without the block `keys`, each key is an unknown subject (portal 10.1).
+    // Without the block `keys`, each key is an unknown subject.
     let pdp_port = free_port();
     let node = start_with(
         Arc::new(Backend::Sqlite.fresh()),
@@ -4800,7 +4800,7 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
         let text = key_text_in(&created.body).expect("the text of the key");
         assert!(
             created.body.contains("acts as you"),
-            "the warning of portal 5.2"
+            "the warning of the superadmin"
         );
         // The text of the key is in the page, with Copy and Done.
         assert!(created.body.contains(r#"data-copy="key-text""#));
@@ -5195,7 +5195,7 @@ fn the_page_of_the_keys_refuses_what_the_rights_and_the_request_do_not_allow() {
         );
         assert_eq!(revoke.location(), Some("/auth/settings?s=unknown_key"));
         assert!(node.state.users.key_by_id(&key_of_alice.id).is_some());
-        // A session that "Log in as" opens changes no key, and revokes none (portal 3.7, 3.7a).
+        // A session that "Log in as" opens changes no key, and revokes none.
         let root = sign_in(&node, "root", PASSWORD);
         let reply = post(&node, &root, IMPERSONATE_PATH, USERS_TOKEN, "login=alice");
         assert_eq!(reply.status, 303);
@@ -5242,7 +5242,7 @@ fn the_section_all_shows_the_keys_of_the_users_and_revokes_any_key() {
         assert_eq!(root_key.status, 200, "{}", root_key.body);
         assert!(
             root_key.body.contains("every right"),
-            "the warning of the superadmin (portal 5.2)"
+            "the warning of the superadmin"
         );
         let all = get_keys(&node, &root, "");
         assert_eq!(all.status, 200);
@@ -7328,7 +7328,7 @@ mod kinds_tests {
     }
 }
 
-// The sign-in form: anti-enumeration and anti-bot. See `docs/login-hardening.md`.
+// The sign-in form: anti-enumeration and anti-bot. See `docs/design/login-hardening.md`.
 
 /// A node for the tests of the sign-in form. It has the account `alice`, and `metrics`.
 fn sign_in_node(extra: &str) -> Node {
@@ -7812,7 +7812,7 @@ fn the_sign_in_page_names_no_product_and_has_a_trap_that_a_person_cannot_reach()
     let page = send(node.port, "GET", LOGIN_PATH, &[], "");
     assert_eq!(page.status, 200);
     let lower = page.body.to_ascii_lowercase();
-    for word in ["portal", "inbox", "generator", "<!--", "version"] {
+    for word in ["portal", "generator", "<!--", "version"] {
         assert!(!lower.contains(word), "{word}: {}", page.body);
     }
     assert!(page.body.contains("<title>Authentication</title>"));

@@ -18,7 +18,7 @@ import app.portalinbox.service.LinkState
 import app.portalinbox.service.Registry
 
 /**
- * The portal list (drawer entry "Portals", mock m2): one row per portal in the order of the user, with the monogram, the nickname, the
+ * The portal list (drawer entry "Portals"): one row per portal in the order of the user, with the monogram, the nickname, the
  * host and login, the start of the key, the state, the last sync and the open count. A drag handle changes the order. The home screen
  * puts this view in its body. Tapping a row opens the screen of the portal.
  */

@@ -1,10 +1,10 @@
 //! The approval API behind the HTTP routes: the submission of a service, the verdict that it reads, and the intent of
-//! an agent (CONF 3.1a, 3.2, 3.10, 5.4).
+//! an agent.
 //!
 //! The service (the PEP) learns the verdict and, at the submission, the id and the code of the request. The text of an
 //! agent (the explanation, the hint, a comment of the owner) never goes to the service: it lives in the sealed body of
 //! the item and in the sealed intent. The functions of this module return plain values. The HTTP layer
-//! (`http/approval_api.rs`) reads the request and writes the answer; the agent channel of lot L9 calls [`intent`].
+//! (`http/approval_api.rs`) reads the request and writes the answer; the agent channel calls [`intent`].
 //!
 //! # The limits that this module checks
 //!
@@ -13,7 +13,7 @@
 //! - One request is open for each effect (idempotence): a second submission gives the same id and renews nothing.
 //! - The creation limits (cap each hour, mute, deny time) run in the transaction of the creation, so two instances
 //!   cannot both pass them.
-//! - An item belongs to an agent (lot G1a). The intent resolves the agent of the call and keeps its id. A submission
+//! - An item belongs to an agent. The intent resolves the agent of the call and keeps its id. A submission
 //!   that names the intent gives its item to that agent. A submission with no intent goes to the bucket of the key. A
 //!   chain (`previous_id`, `supersedes`) stays inside one agent.
 
@@ -150,7 +150,7 @@ pub struct Requester {
     pub owner: String,
     pub interaction: Interaction,
     /// What the call tells about its agent: the mode of the key, the token and the hints. The agent channel fills it
-    /// (lot G1b). `Default` is a key in the mode `key`: no token, the bucket of the key.
+    ///. `Default` is a key in the mode `key`: no token, the bucket of the key.
     pub agent: AgentCall,
 }
 
@@ -540,7 +540,7 @@ pub async fn wait_verdict(
 
 // ---------------------------------------------------------------- the intent of an agent
 
-/// What an agent says about its next approval (CONF 3.2). It goes to the portal, never to the service.
+/// What an agent says about its next approval. It goes to the portal, never to the service.
 #[derive(Clone, Debug, Default)]
 pub struct IntentIn {
     pub lease_s: Option<i64>,

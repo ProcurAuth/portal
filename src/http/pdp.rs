@@ -97,7 +97,7 @@ const TOO_OLD: &str = "the directory is too old";
 /// The reason in the answer for a counter without room (protocol 11.1).
 const BUDGET_EXCEEDED: &str = "budget_exceeded";
 
-/// How a grant matches the resource (`context.match`, contract 11.5).
+/// How a grant matches the resource (`context.match`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Match {
     /// The default: a grant on the resource or on a node above it.
@@ -140,7 +140,7 @@ impl Match {
 pub type Clients = std::collections::HashMap<[u8; 32], Client>;
 
 /// Makes the map of the clients. Two clients with the same token stop the program at start
-/// (portal 9.5a).
+///.
 pub fn clients(list: Vec<Client>) -> Result<Clients, String> {
     let mut map = Clients::with_capacity(list.len());
     for client in list {
@@ -192,11 +192,11 @@ pub struct Stats {
     approvals: [AtomicU64; 7],
     unauthorized: AtomicU64,
     bad_request: AtomicU64,
-    /// The questions that got HTTP 503, by cause (portal 10.5). The wait that took more than 500
+    /// The questions that got HTTP 503, by cause. The wait that took more than 500
     /// ms has its own measure.
     unavailable_store: AtomicU64,
     unavailable_row: AtomicU64,
-    /// The requests that got HTTP 400 for `context.usage` (portal 10.5).
+    /// The requests that got HTTP 400 for `context.usage`.
     usage_rejected: AtomicU64,
 }
 
@@ -382,7 +382,7 @@ async fn handle(
 /// The longest time that the PDP takes to answer a question with `context.usage`, in whole seconds: it gives a decision
 /// or HTTP 503 within this time (protocol 6.9). The look at the approval, the count of the units and the consumption
 /// of the approval each end within 2 s at most, and the count within 1 s (the wait for a counter connection and the
-/// statement have 500 ms each, portal 7.7). The sum is 5 s.
+/// statement have 500 ms each). The sum is 5 s.
 pub(super) const USAGE_MAX_SECONDS: u64 = 5;
 
 /// The default of `keys.directory_max_age` in whole seconds. With PostgreSQL, the metadata publishes it when the file has
@@ -464,7 +464,7 @@ pub(super) fn client<'a>(state: &'a AppState, headers: &HeaderMap) -> Option<&'a
         return None;
     }
     let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    // One search by the digest, at any number of clients (portal 9.5a). The key is a SHA-256 of
+    // One search by the digest, at any number of clients. The key is a SHA-256 of
     // the token, so the time of the search tells nothing about the token.
     state.pdp_clients.get(&digest)
 }
@@ -979,7 +979,7 @@ fn decide(
 /// database.
 fn decide_person(state: &AppState, login: &str, q: &Question<'_>, ask: &Ask<'_>) -> Outcome {
     // The superadmin has every right and no limit. The PDP counts no use of the superadmin
-    // (portal 9.1).
+    //.
     if constant_time_eq(login.as_bytes(), state.superadmin_login.as_bytes()) {
         let mut outcome = Outcome::allow("superadmin");
         if ask.usage {
@@ -1000,7 +1000,7 @@ fn decide_person(state: &AppState, login: &str, q: &Question<'_>, ask: &Ask<'_>)
 
 /// The grants of a person on one service and whether the account comes from the file. When the
 /// directory does not know the login, the PDP reads the directory again at most once each second:
-/// the account can be a few seconds old (portal 10.7c). `None`: no such person.
+/// the account can be a few seconds old. `None`: no such person.
 fn known_person_grants(
     state: &AppState,
     login: &str,
@@ -1040,7 +1040,7 @@ fn decide_key(state: &AppState, id: &str, q: &Question<'_>, ask: &Ask<'_>) -> Ou
         }
         Err(_) => return Outcome::deny("the key is not valid", Some(UNKNOWN_SUBJECT)),
     };
-    // A key holds only the actions of the service `portal` that its kind lists (portal 6.5): the PDP
+    // A key holds only the actions of the service `portal` that its kind lists: the PDP
     // ignores any other.
     let key_grants: Vec<Grant> = key
         .grants
@@ -1225,7 +1225,7 @@ fn finish(state: &AppState, q: &Question<'_>, verdict: Verdict, ask: &Ask<'_>) -
     outcome
 }
 
-/// Counts one use on a thread that may block (portal 7.7).
+/// Counts one use on a thread that may block.
 fn count(state: &AppState, counters: &[Counter]) -> CountOutcome {
     crate::util::blocking(|| state.counting.count(&state.store, counters))
 }

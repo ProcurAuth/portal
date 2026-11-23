@@ -9,7 +9,7 @@ import app.portalinbox.R
 import app.portalinbox.portal.HomePortal
 
 /**
- * The views of the home list for the agents (lot G4): the header of a group and the card "New agent". They only draw. The facts come
+ * The views of the home list for the agents: the header of a group and the card "New agent". They only draw. The facts come
  * from [AgentGroups.Group] and [NewAgentCard.Model]. A tap on the header folds the group. A tap on "More" opens the agent screen.
  */
 

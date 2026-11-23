@@ -30,7 +30,7 @@ class ItemListOrderTest {
         return repo.item(server, Make.hex(0x50 + n))!!
     }
 
-    // ------------------------------------------------------------ the rule of Alice: alerts above the items
+    // ------------------------------------------------------------ alerts above the items
 
     @Test
     fun alertsComeAboveTheItemsToAnswer() {

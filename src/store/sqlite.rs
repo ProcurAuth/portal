@@ -131,12 +131,12 @@ CREATE TABLE user_grants_v5 (
 
 /// Schema version 6: the keys of the users, their grants and their counters (portal 4, 5, 7 and
 /// 10.7). A file at version 6 opens only with the programs that understand version 6. A key
-/// belongs to one user, or to the superadmin: then `owner_id` is NULL (portal 3.7b). Deleting a
+/// belongs to one user, or to the superadmin: then `owner_id` is NULL. Deleting a
 /// user deletes the keys of the user with their grants and their counters. The `id` of a key is
 /// text that the program makes at random. The key table holds the SHA-256 digest of a key, never
 /// the key. A revoked key leaves one summary row in `key_history`. The column `limits` of a grant
 /// holds the limit values as JSON. The row of `directory_version` counts the writes to the users,
-/// the grants and the keys. The tables have the form of PostgreSQL (portal 10.4a).
+/// the grants and the keys. The tables have the form of PostgreSQL.
 const KEYS_SCHEMA: &str = "
 ALTER TABLE user_grants ADD COLUMN limits TEXT NOT NULL DEFAULT '{}';
 CREATE TABLE keys (
@@ -194,7 +194,7 @@ CREATE TABLE directory_version (
 INSERT INTO directory_version (id, version) VALUES (1, 0);
 ";
 
-/// Schema version 7: the kind of a key (portal 5.1). The kind is the prefix of the text of the key:
+/// Schema version 7: the kind of a key. The kind is the prefix of the text of the key:
 /// `mcp` for an agent, `api` for a service. A key that exists before this version is an MCP key: no
 /// other kind existed.
 const KEY_KIND_SCHEMA: &str = "
@@ -204,8 +204,8 @@ ALTER TABLE keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'mcp' CHECK (kind IN ('mc
 /// Schema version 8: the history keeps whether a session had the remembered rule ("Remember
 /// me"). A session of an older file is not remembered. With SQLite the live sessions are in memory.
 ///
-/// The second factor (TOTP) is part of this version, with no step of its own: the portal has no deployment with
-/// users, so the base schema changed in place. A file that the version 8 made before the second factor lacks these
+/// The second factor (TOTP) is part of this version, with no step of its own: this version has no
+/// migration step for it, so the base schema changed in place. A file that the version 8 made before the second factor lacks these
 /// objects: [`Sqlite::init`] refuses it. The column `mfa` tells that the sign-in used the second factor.
 /// `totp_credentials` holds one row for each account that has it, keyed by login: the accounts of the file have no
 /// row in `users`. The secret is sealed with the key of the configuration. `last_step` is the last accepted time step:
@@ -222,7 +222,7 @@ ALTER TABLE keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'mcp' CHECK (kind IN ('mc
 /// 200 characters at most. `icon` holds the bytes of the own icon, at most 32 KiB, and `icon_type` its media type: both
 /// are NULL when the service has no own icon. The portal checks the bytes against the type when it reads the row. A file
 /// that the version 8 made before 5.4.0 lacks the three columns: [`Sqlite::init`] refuses it. The file
-/// `homelab-migration/5.3.0-to-5.4.0.sql` adds them.
+/// `deploy/migrations/5.3.0-to-5.4.0.sql` adds them.
 ///
 /// The approvals (5.1.0) are part of this version too. `user_grants.confirm` and `key_grants.confirm` hold the property
 /// `confirm` of a grant. `keys.interaction` holds `conversational` or `one_shot`: a key of kind `api` that exists before
@@ -507,12 +507,12 @@ impl Sqlite {
                 let found: i64 = conn.query_row(sql, [], |row| row.get(0)).map_err(db)?;
                 if found != 4 {
                     return Err(format!(
-                        "the database was made by schema version {SCHEMA_VERSION} before the second factor, and this portal has no migration for it: make a new database, or add the tables totp_credentials, totp_recovery and totp_key_check and the column sessions_log.mfa by hand (see docs/login-hardening.md)"
+                        "the database was made by schema version {SCHEMA_VERSION} before the second factor, and this portal has no migration for it: make a new database, or add the tables totp_credentials, totp_recovery and totp_key_check and the column sessions_log.mfa by hand (see docs/authentication.md, Second factor, Schema)"
                     ));
                 }
                 if !has_table(&conn, "external_services")? {
                     return Err(format!(
-                        "the database was made by schema version {SCHEMA_VERSION} before the external services, and this portal has no migration for it: make a new database, or add the table external_services by hand (see README, Upgrades, version 5.0.5)"
+                        "the database was made by schema version {SCHEMA_VERSION} before the external services, and this portal has no migration for it: make a new database, or add the table external_services by hand (see docs/operations.md, Upgrades, version 5.0.5)"
                     ));
                 }
                 if !(has_column(&conn, "user_grants", "confirm")?
@@ -520,12 +520,12 @@ impl Sqlite {
                     && has_column(&conn, "keys", "interaction")?)
                 {
                     return Err(format!(
-                        "the database was made by schema version {SCHEMA_VERSION} before the approvals, and this portal has no migration for it: make a new database, or add the columns user_grants.confirm, key_grants.confirm and keys.interaction by hand (see README, Upgrades, version 5.1.0)"
+                        "the database was made by schema version {SCHEMA_VERSION} before the approvals, and this portal has no migration for it: make a new database, or add the columns user_grants.confirm, key_grants.confirm and keys.interaction by hand (see docs/operations.md, Upgrades, version 5.1.0)"
                     ));
                 }
                 if !has_column(&conn, "keys", "agents")? {
                     return Err(format!(
-                        "the database was made by schema version {SCHEMA_VERSION} before the agents, and this portal has no migration for it: make a new database, or add the column keys.agents by hand (see README, Upgrades, version 5.1.0)"
+                        "the database was made by schema version {SCHEMA_VERSION} before the agents, and this portal has no migration for it: make a new database, or add the column keys.agents by hand (see docs/operations.md, Upgrades, version 5.1.0)"
                     ));
                 }
                 if !(has_column(&conn, "external_services", "description")?
@@ -533,7 +533,7 @@ impl Sqlite {
                     && has_column(&conn, "external_services", "icon")?)
                 {
                     return Err(format!(
-                        "the database was made by schema version {SCHEMA_VERSION} before the description and the icon of the external services (5.4.0), and this portal has no migration for it: apply the migration file 5.3.0-to-5.4.0.sql, or add the columns external_services.description, external_services.icon_type and external_services.icon by hand (see README, Upgrades, version 5.4.0)"
+                        "the database was made by schema version {SCHEMA_VERSION} before the description and the icon of the external services (5.4.0), and this portal has no migration for it: apply the migration file 5.3.0-to-5.4.0.sql, or add the columns external_services.description, external_services.icon_type and external_services.icon by hand (see docs/operations.md, Upgrades, version 5.4.0)"
                     ));
                 }
             }
@@ -1883,7 +1883,7 @@ mod tests {
             [],
         );
         assert!(orphan.is_err(), "a key needs an existing owner");
-        // A key of the superadmin has no owner row and no expiry date (portal 3.7b, 5.3).
+        // A key of the superadmin has no owner row and no expiry date.
         conn.execute(
             "INSERT INTO keys (id, owner_id, name, digest, hint, created_at)
              VALUES ('key4', NULL, 'root key', x'02', 'ef56', 1)",
@@ -2085,7 +2085,7 @@ CREATE TABLE user_roles (
         assert!(store.load_users().unwrap_err().contains("sub-resource"));
     }
 
-    /// A file of portal 4.1.0: schema version 4, with grants on one sub-resource.
+    /// A file of version 4.1.0: schema version 4, with grants on one sub-resource.
     fn version_four(conn: &Connection, rows: &str) {
         conn.execute_batch(&format!(
             "{SCHEMA} {LOGIN_SCHEMA} {GRANTS_SCHEMA} {SUB_RESOURCE_SCHEMA} PRAGMA user_version = 4;

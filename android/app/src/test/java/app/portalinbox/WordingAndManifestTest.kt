@@ -6,7 +6,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** The word "Portal" in the strings of the app (lot MP2), and the exports of the enrollment screens in the manifest. */
+/** The word "Portal" in the strings of the app, and the exports of the enrollment screens in the manifest. */
 class WordingAndManifestTest {
     private val files = listOf("src/main/res/values/strings.xml", "src/main/res/values/strings_portals.xml", "src/main/res/values/strings_agents.xml", "src/main/res/values/strings_questions.xml")
     private val entry = Regex("""<string name="([^"]+)"[^>]*>([^<]*)</string>|<item quantity="[a-z]+">([^<]*)</item>""")
@@ -29,7 +29,7 @@ class WordingAndManifestTest {
 
     @Test
     fun theTextsOfTheAgentsAreAsciiOnly() {
-        // Lot G4: no hidden, bidirectional or look-alike character can enter the screen through a resource.
+        // No hidden, bidirectional or look-alike character can enter the screen through a resource.
         val text = File("src/main/res/values/strings_agents.xml").readText()
         val bad = text.filter { it.code !in 0x20..0x7E && it != '\n' }
         assertEquals("only ASCII: <${bad.map { "U+%04X".format(it.code) }}>", "", bad)
@@ -37,7 +37,7 @@ class WordingAndManifestTest {
 
     @Test
     fun theTextsOfTheQuestionsAreAsciiOnly() {
-        // Lot A4: a resource of the question screens never holds a hidden, bidirectional or look-alike character.
+        // A resource of the question screens never holds a hidden, bidirectional or look-alike character.
         val text = File("src/main/res/values/strings_questions.xml").readText()
         val bad = text.filter { it.code !in 0x20..0x7E && it != '\n' }
         assertEquals("only ASCII: <${bad.map { "U+%04X".format(it.code) }}>", "", bad)
@@ -76,7 +76,7 @@ class WordingAndManifestTest {
         assertTrue(reenroll.contains("""android:exported="false""""))
         assertFalse(reenroll.contains("intent-filter"))
         assertTrue(activity(".ui.PortalActivity").contains("""android:exported="false""""))
-        // Lot G4: the screens of the agents act on an agent of the owner. Only the app opens them.
+        // The screens of the agents act on an agent of the owner. Only the app opens them.
         val agent = activity(".ui.AgentActivity")
         assertTrue(agent.contains("""android:exported="false""""))
         assertFalse(agent.contains("intent-filter"))

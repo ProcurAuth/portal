@@ -1,4 +1,4 @@
-//! The agents of a key: the model, the rules that need no storage, and the errors (lot G1a).
+//! The agents of a key: the model, the rules that need no storage, and the errors.
 //!
 //! The portal knows a key. Several programs, or several conversations of one model, can share one key. The owner
 //! wants to see them apart in the Inbox. The agent cannot name itself in a way that the portal can trust, so the
@@ -288,7 +288,7 @@ impl AgentRules {
     }
 }
 
-/// What the call tells the engine about the agent. The channel (lot G1b) fills it from the mode of the key, the token
+/// What the call tells the engine about the agent. The channel fills it from the mode of the key, the token
 /// and what it saw on the connection. `Default` is a call of a key in the mode `key`.
 #[derive(Clone, Default)]
 pub struct AgentCall {
@@ -690,7 +690,7 @@ pub enum SimilarWhy {
     ClientAndNet,
 }
 
-/// The known agent of the same key that a `new` agent looks like (lot G5, decision Q12). The rule is a hint for the owner
+/// The known agent of the same key that a `new` agent looks like. The rule is a hint for the owner
 /// and nothing else: the hints are text that a client sent, and anyone who holds the key can copy them. The portal never
 /// merges by itself.
 ///

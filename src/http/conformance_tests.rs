@@ -201,7 +201,7 @@ mod conformance_d {
             .filter(|s| !s["id"].as_str().unwrap().contains(':'))
         {
             let mut grants = grants_of(subject);
-            // The portal lets a person use keys only with this right (portal 5.3b).
+            // The portal lets a person use keys only with this right.
             grants.push(Grant::parse("keys.own.use on service:portal/key_kind:mcp").unwrap());
             grants.sort();
             store
@@ -553,7 +553,7 @@ mod conformance_d {
 /// and the portal behind it. The test acts as Traefik: it sends the headers of the request to
 /// `/auth/verify-key`, it returns a refusal as it is, and it forwards an accepted request to the
 /// service with the header of the identity token from the answer and without `Authorization`
-/// (portal 8.1, 8.1a). The test also acts as the service: it records the request that arrives.
+///. The test also acts as the service: it records the request that arrives.
 mod conformance_e {
     use super::*;
     use serde_json::Value;
@@ -935,7 +935,7 @@ mod conformance_e {
         // The key set of the portal holds one key. The harness still runs E13: each token of the portal has the `kid`
         // of its key, so the case checks the same rule with one key.
         ("single_key_set", false),
-        // The edge keeps the identity tokens (portal 8.1a).
+        // The edge keeps the identity tokens.
         ("no_token_cache", false),
         // The portal gives approvals. The edge asks only `access`, and `confirm` has no effect on it (protocol 17.8).
         ("no_approval_support", false),

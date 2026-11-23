@@ -9,7 +9,7 @@ fun interface FingerprintSource {
 }
 
 /**
- * The fingerprint of the pinned key of a portal (proposal 4.2). It is the first 80 bits of the SHA-256 digest of the
+ * The fingerprint of the pinned key of a portal. It is the first 80 bits of the SHA-256 digest of the
  * Noise public key of the server. The hash runs in `inbox-core` through JNI, so the rule exists once and is the same
  * as the one on the page that makes the enrollment code. This object does not hash: it checks the key, checks the
  * text that comes back, and gives the forms that the screens and the database use.

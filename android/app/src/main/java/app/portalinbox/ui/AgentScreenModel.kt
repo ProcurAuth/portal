@@ -11,7 +11,7 @@ import app.portalinbox.proto.ItemState
 import java.time.ZoneId
 
 /**
- * The agent screen (lot G4): what a tap on a group header shows. Pure Kotlin. The name, the key and the state are text of the
+ * The agent screen: what a tap on a group header shows. Pure Kotlin. The name, the key and the state are text of the
  * portal. The box of hints is text of a client, marked "Not verified". The actions are the actions that the portal accepts for the
  * state of the agent: see [AgentActions.available].
  */

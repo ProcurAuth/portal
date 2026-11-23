@@ -205,10 +205,10 @@ mod tests {
 
     #[test]
     fn the_level_of_an_alert_follows_its_target() {
-        let critical = |g: &str| g == "inbox";
+        let critical = |g: &str| g == "oncall";
         let group = |g: &str| Target::Group(g.into());
         assert_eq!(
-            Importance::of(&group("inbox"), critical),
+            Importance::of(&group("oncall"), critical),
             Importance::Critical
         );
         assert_eq!(Importance::of(&group("infra"), critical), Importance::Alert);

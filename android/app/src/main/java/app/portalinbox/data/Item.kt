@@ -76,7 +76,7 @@ data class Turn(val serverId: Long, val frame: MessageFrame, val receivedAtMs: L
 enum class OutboxType(val wire: String) {
     ANSWER("answer"), REPLY("reply"),
 
-    /** An action of the owner on an agent (lot G4). Its `request_id` column holds the id of the agent. */
+    /** An action of the owner on an agent. Its `request_id` column holds the id of the agent. */
     AGENT_DO("agent_do");
 
     companion object {

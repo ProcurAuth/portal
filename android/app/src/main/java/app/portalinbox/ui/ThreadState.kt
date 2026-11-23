@@ -15,7 +15,7 @@ import app.portalinbox.proto.RequestKind
 import java.time.ZoneId
 
 /**
- * What the discussion screen shows and lets the owner do (CONF 3.5, 3.6, DIAL 4.4, 4.5). Pure Kotlin: the Activity
+ * What the discussion screen shows and lets the owner do. Pure Kotlin: the Activity
  * gives the facts and draws the answer.
  *
  * Rules:
@@ -38,7 +38,7 @@ object ThreadState {
         /** `server time - phone time`: puts the time of a message of the outbox on the clock of the server. */
         val offsetMs: Long = 0L,
         val zone: ZoneId = ZoneId.systemDefault(),
-        /** The name of the agent from the table of the agents (lot G4), or null: then `from.label` of the frame is the name. */
+        /** The name of the agent from the table of the agents, or null: then `from.label` of the frame is the name. */
         val agentName: String? = null,
     )
 
@@ -114,7 +114,7 @@ object ThreadState {
         val agentLabel: String,
     )
 
-    /** The question that opens a thread. Its options show as chips that do not answer (the screen of questions is lot A4). */
+    /** The question that opens a thread. Its options show as chips that do not answer. */
     data class Opening(
         val whenText: String,
         val explanation: String?,

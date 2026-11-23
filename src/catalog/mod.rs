@@ -134,7 +134,7 @@ pub struct Catalog {
     /// The gate prefixes by their head. The search of the owner of a path looks for each head of
     /// the path, longest first, then for each length of a last segment under this head. It needs
     /// at most one search of a head for each segment of the path, at any number of services
-    /// (portal 8.3a).
+    ///.
     gate_index: HashMap<Segments, Tails>,
     /// True when the snapshot holds every service of every source. The snapshot of the start is
     /// not complete. Discovery sets the value for each round.

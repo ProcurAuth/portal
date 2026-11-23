@@ -25,7 +25,7 @@ import app.portalinbox.service.ServerClock
 import java.time.ZoneId
 
 /**
- * The screen of one agent, and the list of the agents of one portal (lot G4). It only draws: the facts are in [AgentScreenModel], the
+ * The screen of one agent, and the list of the agents of one portal. It only draws: the facts are in [AgentScreenModel], the
  * actions in [AgentActions]. The name, the key and the state are text of the portal. The box "Observed, not verified" is text of a client.
  * An action goes out as an `agent_do` frame: no biometric check, because an action on an agent never runs a command. The result of the
  * portal comes back as a line in a snackbar.

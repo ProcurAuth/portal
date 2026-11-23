@@ -1,15 +1,15 @@
 #!/bin/sh
-# End-to-end check of the portal against the REAL reference PEP of the ProcurAuth repository (lot L7b).
+# End-to-end check of the portal against the REAL reference PEP of the ProcurAuth repository.
 # It builds a throwaway Docker stack: the portal (built from this checkout), the reference service (a real PEP), a tap on the
 # link between them, a fake Docker socket for the discovery, and optionally PostgreSQL. It then runs two checks:
-#   1. tests/pep_e2e.rs (a Rust agent and a Rust phone with Noise): the scenarios of CONF 3 (approve and execute one time, a
+#   1. tests/pep_e2e.rs (a Rust agent and a Rust phone with Noise): the scenarios of the approval (approve and execute one time, a
 #      second call asks again, decline with a comment, abandon, renewal by get_action_status) and the PEP observation
 #      (the service saw the verdict, the request id and the code only), and the agent canary of SPEC 3.10.4: two agents of one
 #      key, a second agent for the same effect, and no token, label, client or id of an agent in any request, answer or log of
 #      the service.
 #   2. the series U of the ProcurAuth runner against the same reference service binary. The script shows the cases U30 and
 #      U100 to U117 (the approvals), U118 to U127 (ProcurAuth 1.1) and each case that did not pass.
-#      The runner is the PDP of its own cases. It cannot call the portal: see docs/inbox/CONTRIBUTING.md.
+#      The runner is the PDP of its own cases. It cannot call the portal: see docs/development.md.
 # Usage: tools/dev/pep-e2e.sh
 # Docker only. The host needs Docker (with Compose), openssl and POSIX sh. The script opens ports on 127.0.0.1 only. It never
 # touches another stack, it pushes no image, and it never writes in the ProcurAuth checkout (it is a read-only build context).
@@ -215,7 +215,7 @@ $pool
     max_requests_per_key_per_hour = 500
   }
   mcp {}
-  # The agents (lot G5): the key makes agents by its calls, and the canary test checks that the service never sees them.
+  # The agents: the key makes agents by its calls, and the canary test checks that the service never sees them.
   agents {}
   group "infra" {
     name        = "Infra"

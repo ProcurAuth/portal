@@ -19,7 +19,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.ZoneId
 
-/** How a question ended (DIAL 4.5, mocks 6a to 6d, 7e): answered, declined, abandoned, replaced, expired, cancelled. */
+/** How a question ended: answered, declined, abandoned, replaced, expired, cancelled. */
 class QuestionHistoryTest {
     private val server = 1L
     private val created = 1_788_000_000_000L
@@ -181,7 +181,7 @@ class QuestionHistoryTest {
         assertNull(QuestionHistory.banner(i, null, zone, now))
     }
 
-    // ------------------------------------------------------------ the late answer (mock 6b)
+    // ------------------------------------------------------------ the late answer
 
     @Test
     fun aLateAnswerGetsTheWordsOfMock6b() {

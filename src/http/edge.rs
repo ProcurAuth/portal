@@ -2,19 +2,19 @@
 //!
 //! Traefik calls this route with ForwardAuth for each request on a route for the keys. The route
 //! reads `Authorization` and the headers `X-Forwarded-*`. It never reads the body of the request.
-//! It checks the key in memory, in the order of portal 8.3, and it answers:
+//! It checks the key in memory, in a fixed order, and it answers:
 //!
 //! - 204 with the identity token of the key for the service, in the header that
 //!   `identity.header` names. Traefik copies the token to the request with `authResponseHeaders`.
 //!   The answer cannot clear the header `Authorization`: the middleware `drop-authorization` of
 //!   `examples/traefik-dynamic.yaml` does it after this check (protocol 9.1). Without it, the text of the key
-//!   reaches the service. The portal cannot see the setting of the proxy, so the README gives it as a duty of the
+//!   reaches the service. The portal cannot see the setting of the proxy, so docs/traefik.md gives it as a duty of the
 //!   deployment.
 //! - 401 with `WWW-Authenticate: Bearer` and an empty body for each failure. When the request has
 //!   no text of a key, the header has no error. Otherwise it has `error="invalid_token"`. The
 //!   answer never shows the cause (protocol 9.8). The cause is in the log and in the measures.
 //!
-//! A key check reads no database row and writes none (portal 8.3).
+//! A key check reads no database row and writes none.
 
 use super::*;
 use crate::decision::{self, Matching, Owner, Question};
@@ -116,7 +116,7 @@ fn check(state: &AppState, headers: &HeaderMap) -> Result<HttpResponse, Cause> {
     if state.config.keys.is_none() {
         return Err(Cause::KeysDisabled);
     }
-    // The form first, before any lookup. The key edge verifies the kind `mcp` only (portal 8.3).
+    // The form first, before any lookup. The key edge verifies the kind `mcp` only.
     match crate::keys::check_format(text) {
         Ok(crate::keys::KeyKind::Mcp) => {}
         Ok(_) => return Err(Cause::WrongKind),
@@ -124,7 +124,7 @@ fn check(state: &AppState, headers: &HeaderMap) -> Result<HttpResponse, Cause> {
     }
     let digest = crate::keys::digest(text);
     let key = state.users.key_by_digest(&digest).or_else(|| {
-        // The key can come from another instance, a few seconds ago (portal 10.7c).
+        // The key can come from another instance, a few seconds ago.
         refresh_directory_if_due(state)
             .then(|| state.users.key_by_digest(&digest))
             .flatten()
@@ -180,7 +180,7 @@ fn check(state: &AppState, headers: &HeaderMap) -> Result<HttpResponse, Cause> {
     state.key_checks.record(&key, now);
     state.key_stats.passed();
     if fresh {
-        // The edge logs a check that passed only when it signs a new token (portal 10.5a).
+        // The edge logs a check that passed only when it signs a new token.
         log(
             state,
             LogLevel::Info,
@@ -205,7 +205,7 @@ fn path_has_owner(catalog: &Catalog, uri: &str) -> bool {
     })
 }
 
-/// The answer 401 for each failure, with its measure and its line of the log (portal 10.5, 10.5d).
+/// The answer 401 for each failure, with its measure and its line of the log.
 fn refuse(state: &AppState, cause: Cause, client: &Client) -> HttpResponse {
     state.key_stats.failed(cause);
     let address = client.ip.map(|ip| ip.to_string()).unwrap_or_default();

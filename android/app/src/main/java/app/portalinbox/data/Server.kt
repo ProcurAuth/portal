@@ -5,8 +5,7 @@ package app.portalinbox.data
  *
  * Two kinds of fields exist. The identity fields (`nickname`, `colorIndex`, `keyFp`) are local: the user chose them and the
  * pinned key gives the fingerprint. A screen reads them through [app.portalinbox.portal.PortalIdentity]. `reportedName` is
- * what the portal calls itself: the portal chooses it, so it is never used to name the portal on a screen (proposal 2,
- * rule 1).
+ * what the portal calls itself: the portal chooses it, so it is never used to name the portal on a screen.
  */
 data class Server(
     val id: Long,
@@ -32,7 +31,7 @@ data class Server(
     val keyFp: String,
     /** The phone is muted for this portal until this time (local). Null = not muted. [Long.MAX_VALUE] = until the user unmutes. */
     val mutedUntilMs: Long?,
-    /** True: the lock screen text does not name the portal (local, proposal 3.8). The default is false: the name shows. */
+    /** True: the lock screen text does not name the portal (local). The default is false: the name shows. */
     val hideNameOnLock: Boolean,
     /** Days to keep finished items of this portal. Null = the global setting. */
     val retentionDays: Int?,
@@ -42,7 +41,7 @@ data class Server(
     val prevKeyFp: String?,
     /** When that re-enrollment happened (phone clock). */
     val keyChangedMs: Long?,
-    /** JSON of the account preferences that wait for the next `welcome` (lot MP5 uses it). */
+    /** JSON of the account preferences that wait for the next `welcome`. */
     val pendingPrefs: String?,
     /** When the user added this portal (phone clock): the "New" mark lasts 24 hours from it. */
     val addedAtMs: Long,

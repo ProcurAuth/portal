@@ -131,7 +131,7 @@ impl Authorizer for PortalAuthorizer {
         }
         let digest = crate::keys::digest(token);
         let key = state.users.key_by_digest(&digest).or_else(|| {
-            // The key can come from another instance, a few seconds ago (portal 10.7c).
+            // The key can come from another instance, a few seconds ago.
             refresh_directory_if_due(&state)
                 .then(|| state.users.key_by_digest(&digest))
                 .flatten()
@@ -179,7 +179,7 @@ impl Authorizer for PortalAuthorizer {
             return KeyCheck::NotReady;
         };
         // The key of the database that this door accepts has the kind `api`, and the file turns
-        // this kind on (portal 8.3a).
+        // this kind on.
         let door_open = state.config.keys.as_ref().is_some_and(|keys| keys.api);
         if !door_open || crate::keys::check_format(token) != Ok(crate::keys::KeyKind::Api) {
             return KeyCheck::NotAKey;
@@ -190,7 +190,7 @@ impl Authorizer for PortalAuthorizer {
         }
         let digest = crate::keys::digest(token);
         let key = state.users.key_by_digest(&digest).or_else(|| {
-            // The key can come from another instance, a few seconds ago (portal 10.7c).
+            // The key can come from another instance, a few seconds ago.
             refresh_directory_if_due(&state)
                 .then(|| state.users.key_by_digest(&digest))
                 .flatten()

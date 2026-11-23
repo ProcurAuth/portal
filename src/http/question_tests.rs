@@ -1,4 +1,4 @@
-//! The questions on the agent channel, on SQLite and on PostgreSQL (lot L13): the tool `ask`, the REST route, the rights and
+//! The questions on the agent channel, on SQLite and on PostgreSQL: the tool `ask`, the REST route, the rights and
 //! the budget, the thread, the replacement and the answer that the agent reads.
 //!
 //! This module is a child of `agent_channel_tests`: it uses its rig and its helpers.

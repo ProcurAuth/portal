@@ -1,4 +1,4 @@
-//! `GET /auth/options`: the children of a node for the forms of grants (portal 3.1a).
+//! `GET /auth/options`: the children of a node for the forms of grants.
 //!
 //! The editor of grants calls this address when a person opens a node that the action document
 //! does not list. The portal asks the service for the children, with the identity token of this

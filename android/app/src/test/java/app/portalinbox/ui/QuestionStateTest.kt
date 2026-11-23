@@ -18,7 +18,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** The screen of a question: which rows and buttons show, and why Send is off (DIAL 4.2, 4.3, 4.8). */
+/** The screen of a question: which rows and buttons show, and why Send is off. */
 class QuestionStateTest {
     private val server = 1L
     private val created = 1_788_000_000_000L

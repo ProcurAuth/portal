@@ -1,4 +1,4 @@
-//! The agents for the rest of the portal: the calls that the agent channel, the phones and the web use (lot G1a).
+//! The agents for the rest of the portal: the calls that the agent channel, the phones and the web use.
 //!
 //! The engine of the items (`items_store.rs`) seals what it writes and unseals what it serves. This file adds the
 //! calls of the agents: the resolution of a call, the check of the binding to an item, the reads for the screens and the
@@ -385,7 +385,7 @@ impl Items<'_> {
 
     // ------------------------------------------------------------ the mode `enrolled`
 
-    /// Makes an agent for the owner of a key in the mode `enrolled` (lot G6). The agent is `known`, with the given name.
+    /// Makes an agent for the owner of a key in the mode `enrolled`. The agent is `known`, with the given name.
     /// The result holds the token: the engine keeps only its digest, so this value is the only copy and the caller shows it
     /// once. The caller checks that the key belongs to `owner` and gives the mode of the key. A refusal writes nothing.
     pub async fn enroll_agent(
@@ -425,7 +425,7 @@ impl Items<'_> {
         }))
     }
 
-    /// Replaces the token of an agent that the owner made (lot G6). The old token is dead at once. The result holds the new
+    /// Replaces the token of an agent that the owner made. The old token is dead at once. The result holds the new
     /// token, which the caller shows once. The caller gives the mode of the key of the agent.
     pub async fn reset_agent_token(
         &self,

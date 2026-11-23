@@ -63,7 +63,7 @@ const ASSET_PREFIX: &str = "/auth/a/";
 
 /// The stylesheet and the script that every page loads, in the form that the server sends.
 /// The text is minified. The path has no name of the product, and it changes when the content
-/// changes. This is obscurity, not security: see `docs/login-hardening.md`.
+/// changes. This is obscurity, not security: see `docs/design/login-hardening.md`.
 pub struct Assets {
     pub css_path: String,
     pub css: String,
@@ -2160,7 +2160,7 @@ mod tests {
         let page = home_page(&Catalog::default(), &Icons::empty(), &ctx());
         assert!(page.contains("No services yet"));
         assert!(page.contains("Add the catalogue labels to a container or an IngressRoute"));
-        // The hint names no label key and no product word: the README documents the label names.
+        // The hint names no label key and no product word: docs/launcher.md documents the label names.
         body_words::assert_clean("empty launcher", &page);
         assert!(!page.contains(r#"class="rows""#));
     }

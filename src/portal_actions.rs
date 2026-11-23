@@ -1,4 +1,4 @@
-//! The service `portal`: the actions of the features of the portal itself (portal 6).
+//! The service `portal`: the actions of the features of the portal itself.
 //!
 //! The portal is one internal scope with its own action document: the settings pages call it
 //! "Server permissions". The code holds the document: no read of the catalogue replaces it, and the
@@ -21,8 +21,8 @@
 //!   alert to an account is never critical: it always counts.
 //!
 //! The actions of `keys.own` need `keys.own.read` to show their page, and the actions of
-//! `keys.all` need `users.read` (portal 6.3). The PDP treats an action as absent when the user
-//! does not have the action that it needs (portal 6.3a). A key never holds a `keys.*` action. An
+//! `keys.all` need `users.read`. The PDP treats an action as absent when the user
+//! does not have the action that it needs. A key never holds a `keys.*` action. An
 //! API key can hold `alert.send`, `alert.send_user` and `alert.read` (see [`KEY_ACTIONS`]).
 
 #![allow(dead_code)]
@@ -100,7 +100,7 @@ const INBOX_GROUP_ACTIONS: [&str; 12] = [
 ];
 
 /// The actions of the service `portal` that a key can hold, other than `access`. A key never holds
-/// a `keys.*` action (portal 6.5). The kind of the key limits the list (see [`key_actions`]).
+/// a `keys.*` action. The kind of the key limits the list (see [`key_actions`]).
 /// `question.read` is not in the list: a key reads its own questions with no permission, and the
 /// action gives an account the metadata of the questions of all the accounts.
 pub const KEY_ACTIONS: [&str; 5] = [
@@ -342,7 +342,7 @@ pub fn is_action(name: &str) -> bool {
     KEY_GROUP.contains(&name) || INBOX_GROUP_ACTIONS.contains(&name)
 }
 
-/// The actions that an action needs (portal 6.3).
+/// The actions that an action needs.
 pub fn needs(action: &str) -> &'static [&'static str] {
     match action {
         KEYS_OWN_CREATE | KEYS_OWN_EDIT | KEYS_OWN_REVOKE => &[KEYS_OWN_READ],
@@ -371,7 +371,7 @@ pub fn holds_kind(grants: &[Grant], action: &str, kind: KeyKind) -> bool {
 }
 
 /// Whether the action counts for these grants: the grants hold it on the service, and hold each
-/// action that it needs (portal 6.3a).
+/// action that it needs.
 pub fn effective(grants: &[Grant], action: &str) -> bool {
     holds(grants, action) && needs(action).iter().all(|need| holds(grants, need))
 }
@@ -415,7 +415,7 @@ pub fn max_key_lifetime_any(grants: &[Grant]) -> Option<u64> {
 }
 
 /// Checks the grants of one user of the file or of the database against the rules of the service
-/// `portal` (portal 6.3, 6.3a): each grant names an action of the document, is on a node where the
+/// `portal`: each grant names an action of the document, is on a node where the
 /// action applies, and each action has the actions that it needs. The grants of other services are
 /// not checked.
 pub fn check_user_grants(features: &Features, grants: &[Grant]) -> Result<(), String> {
@@ -481,7 +481,7 @@ pub fn check_user_grants(features: &Features, grants: &[Grant]) -> Result<(), St
     Ok(())
 }
 
-/// Checks the grants of a key of this kind (portal 6.5): a key holds no action of the service
+/// Checks the grants of a key of this kind: a key holds no action of the service
 /// `portal`, except the actions that its kind lists (see [`key_actions`]).
 pub fn check_key_grants(kind: KeyKind, grants: &[Grant]) -> Result<(), String> {
     match grants.iter().find(|g| {

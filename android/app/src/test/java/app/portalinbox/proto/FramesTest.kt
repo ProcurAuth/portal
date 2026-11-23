@@ -476,7 +476,7 @@ class FramesTest {
         assertEquals("cccccccccccccccccccccccccccccccc", (Fixtures.server("alert.json") as ServerAlertFrame).alertId)
     }
 
-    // ------------------------------------------------------------ markdown, language, forms (lot L3b)
+    // ------------------------------------------------------------ markdown, language, forms
 
     @Test
     fun theMarkdownAndLanguageMembersReadToTheTypedValues() {
@@ -657,7 +657,7 @@ class FramesTest {
         ServerFrames.decode(bytes)
     }
 
-    // ------------------------------------------------------------ agents (lot G2)
+    // ------------------------------------------------------------ agents
 
     private fun server(name: String): JSONObject = Fixtures.golden("server", name).json
 

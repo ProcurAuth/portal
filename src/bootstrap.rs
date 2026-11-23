@@ -1,5 +1,5 @@
 //! The checks and the work of the start of the program that need the database and the file
-//! together (portal 3.4a, 3.4d, 7.2a, 7.2d, 7.2f, 10.7d).
+//! together.
 //!
 //! The file and the database are two sources of accounts. An account and its keys come from one
 //! source: a login that both hold, or a key that both hold, stops the program. The counter rows of
@@ -17,7 +17,7 @@ use crate::store::{DirectorySnapshot, Store};
 use crate::users::{Directory, KeyOwner, KeyRecord};
 
 /// The keys of the file as the directory holds them. The key of the file has no creation date and
-/// no expiry date (portal 3.4c).
+/// no expiry date.
 pub fn file_keys(config: &Config) -> Vec<KeyRecord> {
     let mut out = Vec::new();
     for (login, account) in &config.access.accounts {
@@ -41,7 +41,7 @@ pub fn file_keys(config: &Config) -> Vec<KeyRecord> {
     out
 }
 
-/// Refuses a database that holds an account with the login of the superadmin (portal 3.4a). The program
+/// Refuses a database that holds an account with the login of the superadmin. The program
 /// recognises the superadmin by its login: the rights of the Inbox, the direct alerts, the PDP, the second
 /// factor and the identity token. The login therefore has one owner. The error does not show the login, because
 /// the configuration hides it.
@@ -60,7 +60,7 @@ pub fn check_superadmin_against_database(
 }
 
 /// Refuses a file that holds a login, a key id or a key digest that the database holds too
-/// (portal 3.4a, 3.4c). Each error names the login and, for a key, its name.
+///. Each error names the login and, for a key, its name.
 pub fn check_file_against_database(
     config: &Config,
     snapshot: &DirectorySnapshot,
@@ -89,7 +89,7 @@ pub fn check_file_against_database(
     Ok(())
 }
 
-/// Refuses a user of the database that holds more grants than `users.max_grants` (portal 10.2d).
+/// Refuses a user of the database that holds more grants than `users.max_grants`.
 /// The error names the login, the number of grants and the maximum.
 pub fn check_user_grants(config: &Config, snapshot: &DirectorySnapshot) -> Result<(), String> {
     let maximum = config.users.max_grants;
@@ -163,7 +163,7 @@ pub fn check_external_rows(snapshot: &DirectorySnapshot) -> Result<(), String> {
     Ok(())
 }
 
-/// The counters that the grants of the directory and of the file need (portal 7.2a).
+/// The counters that the grants of the directory and of the file need.
 pub fn needed_counters(
     config: &Config,
     directory: &Directory,
@@ -191,7 +191,7 @@ pub fn needed_counters(
 }
 
 /// The subjects of the file that hold counter rows: the logins of its accounts and the subject
-/// ids of its keys (portal 7.2d).
+/// ids of its keys.
 pub fn file_subjects(config: &Config) -> Vec<String> {
     let mut out = Vec::new();
     for (login, account) in &config.access.accounts {
@@ -205,8 +205,7 @@ pub fn file_subjects(config: &Config) -> Vec<String> {
 
 /// What the start does with the counters: it checks that the rows fit in `keys.max_counter_rows`
 /// and the grants in `keys.max_directory_grants`, makes the rows that the directory and the file
-/// need, and deletes the rows of the subjects that the file no longer has (portal 7.2a, 7.2d,
-/// 7.2f, 10.7d).
+/// need, and deletes the rows of the subjects that the file no longer has.
 pub fn prepare_counters(
     config: &Config,
     store: &Store,
@@ -251,7 +250,7 @@ pub fn prepare_counters(
 }
 
 /// Makes the counter rows that a new version of the directory needs and that the instance did not
-/// make yet (portal 7.2a). `ensured` holds the counters that the instance already has. Returns the
+/// make yet. `ensured` holds the counters that the instance already has. Returns the
 /// number of rows that the call asked the database to make.
 pub fn ensure_new_counters(
     config: &Config,

@@ -1,4 +1,4 @@
-//! Who is the agent: the token, the label and the hints on the agent channel, on SQLite and on PostgreSQL (lot G1b).
+//! Who is the agent: the token, the label and the hints on the agent channel, on SQLite and on PostgreSQL.
 //!
 //! Several agents share one key. The agent channel reads the token of an agent in the header `Agent-Token` or in the
 //! argument `agent_token`, and the text that the agent says about itself in `agent_label`. The tests prove the six codes
@@ -1570,7 +1570,7 @@ fn the_tools_carry_the_token_the_label_and_the_fixed_sentence() {
 
 // ---------------------------------------------------------------- a token in a text
 
-/// An agent must not leak its token into a text that a person or a phone reads (lot G5). The portal refuses an
+/// An agent must not leak its token into a text that a person or a phone reads. The portal refuses an
 /// explanation, a label or a message that holds a live token of an agent of the same owner, with the prefix or bare.
 #[test]
 fn explanation_with_a_live_token_is_refused() {

@@ -1,11 +1,11 @@
-//! The forms of the page "Keys": make a key and change a key (portal 5.8c, 5.8d, 4.1 to 4.2c).
+//! The forms of the page "Keys": make a key and change a key.
 //!
 //! The module reads the fields of a form, and it checks them against the rules of the keys. It has
 //! no input or output: the caller gives the grants of the owner, the documents of the services and
-//! the time. A refusal is a code of portal 5.8f. The page shows a fixed text for each code.
+//! the time. A refusal is a stable code. The page shows a fixed text for each code.
 //!
 //! The fields of a form:
-//! - `name`: the name of the key (portal 4.1);
+//! - `name`: the name of the key;
 //! - `expires_at`: a date and a time in UTC, or empty for no expiry date (only for a new key);
 //! - `grant<n>`: the text form of a grant. `<n>` is a whole number from 0, with no leading zero;
 //! - `limit<n>.<name>`: the value of a ceiling of the grant `<n>`;
@@ -30,11 +30,11 @@ use crate::keys::{AgentsMode, Interaction, KeyKind};
 use crate::limits::{Budget, Item, Limits, Value, Window};
 use crate::portal_actions;
 
-/// A key holds at most 512 grants (portal 4.1b).
+/// A key holds at most 512 grants.
 pub const MAX_GRANTS: usize = 512;
 /// The largest number of a grant field. The page makes numbers from 0 up.
 const MAX_FIELD_NUMBER: usize = 99_999;
-/// A grant text is at most 4 KiB after it is decoded (portal 5.8c).
+/// A grant text is at most 4 KiB after it is decoded.
 pub const MAX_GRANT_TEXT: usize = 4096;
 
 /// A limit field of a grant.
@@ -150,7 +150,7 @@ pub struct Context<'a> {
     pub now: i64,
     /// The grants of the owner. `None`: the owner is the superadmin, who has every right.
     pub owner_grants: Option<&'a [Grant]>,
-    /// The `max_key_lifetime` of the owner, in seconds (portal 5.3). `None`: no value.
+    /// The `max_key_lifetime` of the owner, in seconds. `None`: no value.
     pub max_lifetime: Option<u64>,
     /// The last good document of a service. `None`: the portal has none.
     pub document: &'a dyn Fn(&str) -> Option<Arc<Document>>,
@@ -163,7 +163,7 @@ pub struct Context<'a> {
     pub old_grants: Option<&'a [Grant]>,
 }
 
-/// The codes of portal 5.8f that the check gives.
+/// The refusal codes that the check gives.
 pub const BAD_NAME: &str = "bad_name";
 pub const BAD_EXPIRY: &str = "bad_expiry";
 pub const BAD_GRANT: &str = "bad_grant";
@@ -178,7 +178,7 @@ pub const NEEDS_ACCESS: &str = "needs_access";
 /// A grant has `confirm`, and its service or its action cannot ask for an approval.
 pub const BAD_CONFIRM: &str = "bad_confirm";
 
-/// Checks the expiry date of a new key (portal 5.3, 5.3a).
+/// Checks the expiry date of a new key.
 fn check_expiry(text: Option<&str>, ctx: &Context<'_>) -> Result<Option<i64>, &'static str> {
     let at = match text {
         None | Some("") => None,
@@ -190,7 +190,7 @@ fn check_expiry(text: Option<&str>, ctx: &Context<'_>) -> Result<Option<i64>, &'
         }
     }
     // With a maximum lifetime, a new key needs an expiry date, and its lifetime is at most the
-    // maximum. The value 0 refuses each new key (portal 5.3a).
+    // maximum. The value 0 refuses each new key.
     if let Some(max) = ctx.max_lifetime {
         let Some(at) = at else {
             return Err(BAD_EXPIRY);
@@ -271,7 +271,7 @@ pub fn limits_of(fields: &[LimitField]) -> Result<Limits, &'static str> {
 }
 
 /// Whether a value set only narrows the old one: each old ceiling has a new value that is as low,
-/// and each old budget window has a new amount that is as low (portal 4.2c).
+/// and each old budget window has a new amount that is as low.
 fn only_narrows(old: &Limits, new: &Limits) -> bool {
     old.iter()
         .all(|(name, old_value)| match (old_value, new.get(name)) {
@@ -285,7 +285,7 @@ fn only_narrows(old: &Limits, new: &Limits) -> bool {
 }
 
 /// Whether the rights of the owner cover the grant: a grant of the owner with the same action on
-/// the same service, on the node of the grant or above it (portal 4.2).
+/// the same service, on the node of the grant or above it.
 fn covered(owner: Option<&[Grant]>, grant: &Grant) -> bool {
     match owner {
         None => true,
@@ -301,7 +301,7 @@ fn covered(owner: Option<&[Grant]>, grant: &Grant) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Holder {
     /// A key of this kind. It holds `access` on the service `portal` and the actions of the service
-    /// `portal` that its kind lists (portal 6.5). An API key holds no grant on another service: the
+    /// `portal` that its kind lists. An API key holds no grant on another service: the
     /// API of the inbox verifies it, and no gate opens for it.
     Key(KeyKind),
     /// An account: the portal features are in the editor next to the services, so the form gives
@@ -311,7 +311,7 @@ pub enum Holder {
 
 /// The first service where `grants` give a right and no grant `access`. A right on a service works
 /// only when the holder can open the service, so the right alone is dead. The service `portal`
-/// has no gate: its rights work as they are (portal 4.2b).
+/// has no gate: its rights work as they are.
 pub fn service_without_access(grants: &[Grant]) -> Option<&str> {
     grants
         .iter()
@@ -626,7 +626,7 @@ mod tests {
         ] {
             assert_eq!(ok(refused), Err(BAD_GRANT), "{refused}");
         }
-        // The owner must cover the grant (portal 4.2).
+        // The owner must cover the grant.
         let weak = grants(&["alert.read on service:portal/inbox_group:infra"]);
         assert_eq!(
             run_api(
@@ -795,7 +795,7 @@ mod tests {
             ok(&[("name", "n"), ("expires_at", &in_days(31))], month),
             Err(BAD_EXPIRY)
         );
-        // The value 0 refuses each new key (portal 5.3a).
+        // The value 0 refuses each new key.
         assert_eq!(
             ok(&[("name", "n"), ("expires_at", &in_days(1))], Some(0)),
             Err(BAD_EXPIRY)
@@ -817,7 +817,7 @@ mod tests {
             "data.read on service:datastore",
             // A service that is not in the catalogue.
             "access on service:ghost",
-            // An action of the service portal (portal 6.5).
+            // An action of the service portal.
             "keys.own.read on service:portal",
         ] {
             assert_eq!(
@@ -860,7 +860,7 @@ mod tests {
         .is_ok());
     }
 
-    /// A form with many grant fields is refused at the first grant over the cap (portal 4.1b).
+    /// A form with many grant fields is refused at the first grant over the cap.
     /// The work does not grow with the square of the number of fields.
     #[test]
     fn a_form_with_too_many_grants_is_refused_without_a_quadratic_scan() {
@@ -1032,7 +1032,7 @@ mod tests {
             ),
             Err(NOT_COVERED)
         );
-        // Lower or add a value on a kept grant: no check (portal 4.2c). Remove it or raise it: the check.
+        // Lower or add a value on a kept grant: no check. Remove it or raise it: the check.
         let with_value = vec![Grant::parse("data.read on service:datastore/host:old")
             .unwrap()
             .with_limits(Limits::from_json(r#"{"max_rows":500}"#).unwrap())];

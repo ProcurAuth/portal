@@ -46,7 +46,7 @@ import java.time.ZoneId
  * The approval screen. It only draws. The decisions are in pure classes: [ApprovalState] (which buttons work), [ReadGate]
  * (the command was read to the end), [VisibleText] (hidden characters), [ExplanationText], [BiometricPolicy], [ItemTexts].
  *
- * Order (CONF 5.3, mock of checkpoint C3): the header, the zone COMMAND (the text of the service), the zone AGENT EXPLANATION
+ * Order: the header, the zone COMMAND (the text of the service), the zone AGENT EXPLANATION
  * (the text of a third party, other background and dashed edge), the context lines, the secondary buttons. Decline and Approve
  * sit in a fixed bottom bar. Approve stays locked until the command was read to the end, and then asks for the local biometric.
  */
@@ -62,7 +62,7 @@ class ApprovalActivity : BaseFragmentActivity() {
                 .putExtra(EXTRA_REQUEST, requestId)
     }
 
-    /** Lot A3 sets this to open the discussion screen. While it is null, the button "Ask the agent" does not show. */
+    /** The caller sets this to open the discussion screen. While it is null, the button "Ask the agent" does not show. */
     object Nav {
         @Volatile var ask: ((Context, Long, String) -> Unit)? = null
     }
@@ -120,7 +120,7 @@ class ApprovalActivity : BaseFragmentActivity() {
     private var commentToggle: View? = null
     private var commentForm: LinearLayout? = null
 
-    /** The box "From agent" (lot G4). It changes when the owner allows the agent, with no new request: it has its own holder. */
+    /** The box "From agent". It changes when the owner allows the agent, with no new request: it has its own holder. */
     private var agentHolder: LinearLayout? = null
     private var agentBoxKey: String? = null
 

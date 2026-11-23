@@ -8,7 +8,7 @@ import android.os.Looper
 import android.util.Log
 
 /**
- * Whether the phone has a network, for the banner "No network" of the home list (proposal 3.11). It follows the default
+ * Whether the phone has a network, for the banner "No network" of the home list. It follows the default
  * network while a screen is on. A network without internet still counts: a portal can sit on the local network.
  * [onChange] runs on the main thread.
  */

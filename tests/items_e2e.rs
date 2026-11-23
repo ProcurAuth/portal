@@ -964,7 +964,7 @@ async fn a_phone_of_another_account_gets_nothing_and_cannot_answer() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The agents on the phone (lot G2). The agent channel makes the agents (lot G1b), so these tests write the rows of the
+// The agents on the phone. The agent channel makes the agents, so these tests write the rows of the
 // agents in the database of the server, as another instance would, and let the server do the rest: the line "from" of a
 // request, the frames `agent`, `sync`, `agent_do` and the lock of a new agent. The in-process tests of the portal run the
 // whole life of an agent from its first call on both databases (`http/agent_frames_tests.rs`).
@@ -1841,7 +1841,7 @@ async fn a_phone_of_another_account_learns_nothing_of_the_lock() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The agents through the real channel (lot G5). No SQL writes an agent here: two agents of one key call `/mcp` with the
+// The agents through the real channel. No SQL writes an agent here: two agents of one key call `/mcp` with the
 // token that the portal gave them, and the Rust phones of the owner read the frames and act with `agent_do`.
 
 /// The `User-Agent` of the first agent and of the second agent: the client that the owner reads.
@@ -2167,7 +2167,7 @@ async fn two_agents_of_one_key_with_real_tokens_reach_the_phones_and_agent_do_ch
     let _ = (z.request_id, ids);
 }
 
-/// The mode `enrolled` (lot G6). The owner makes an agent on the web. The phone gets the frame `agent` with the state `known`,
+/// The mode `enrolled`. The owner makes an agent on the web. The phone gets the frame `agent` with the state `known`,
 /// the name of the owner and no lock, and no first-use notice. A reset of the token raises `rev`. No frame holds a token.
 /// The phone cannot enroll: `agent_do` has no such operation, so the web is the only place.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -5,7 +5,7 @@ import android.content.Intent
 import app.portalinbox.data.Item
 import app.portalinbox.proto.RequestKind
 
-/** Which screen opens an item: the approval screen for an approval, the question screen for a question (lot A4). */
+/** Which screen opens an item: the approval screen for an approval, the question screen for a question. */
 object ItemScreens {
     enum class Screen { APPROVAL, QUESTION }
 

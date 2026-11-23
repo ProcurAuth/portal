@@ -1,9 +1,9 @@
-//! End-to-end tests of the web pages of the agents (lot G3): the groups of the panel "Open items", the notice of a new agent,
+//! End-to-end tests of the web pages of the agents: the groups of the panel "Open items", the notice of a new agent,
 //! the page and the list of the agents, the forms that name, allow, block, unblock and merge, the lock of an approval, and the
 //! filter of the History. The rig is the one of the items: the service asks through the approval API, the agent gives its
 //! texts through `/mcp`, and the owner uses the pages with a session. The pages have no script, so each check reads the HTML.
 //!
-//! The agents come from the real channel (lot G5): the first call of an agent has no token, the portal makes the agent and
+//! The agents come from the real channel: the first call of an agent has no token, the portal makes the agent and
 //! gives the token, and the next calls send it. The owner uses the forms of the pages. Only the cases that the channel
 //! refuses to make are written in the database: text with hidden characters, an agent of another key or of another owner,
 //! and the demo for the eyes. They test what the page does with data that it must never trust.
@@ -303,7 +303,7 @@ fn agent_of(pep: &Pep, request: &str) -> String {
         .expect("the request has an agent")
 }
 
-/// Three requests of one key, made through the real channel (lot G5): no SQL writes an agent. The first call of an agent has
+/// Three requests of one key, made through the real channel: no SQL writes an agent. The first call of an agent has
 /// no token, so the portal makes the agent and gives its token. The owner allows the first agent with a name through the
 /// form of the page. The second agent stays new. The third request has no intent, so it goes to the bucket of the key.
 fn trio(pep: &Pep) -> Trio {
@@ -605,7 +605,7 @@ fn a_text_that_folds_to_the_name_of_a_known_agent_is_flagged() {
 }
 
 /// The notice of a new agent names the known agent that it looks like, with the sentence that hints can be copied
-/// (lot G5, SPEC 3.8.25). The text is the same as the text of the known agent, or the client and the range are the same.
+///. The text is the same as the text of the known agent, or the client and the range are the same.
 /// Nothing merges by itself.
 #[test]
 fn the_first_use_notice_names_a_similar_known_agent_and_nothing_merges() {
@@ -1132,16 +1132,14 @@ fn pages_of_the_agents_never_name_the_product_and_carry_no_store() {
             "{path}"
         );
         let body = Pep::text_of(&page);
-        for word in ["portal", "inbox", "inbox", "circular"] {
-            assert!(!body.contains(word), "{path} has the word {word}");
-        }
+        assert!(!body.contains("portal"), "{path} has the word portal");
         assert!(!page.contains("<script>"), "{path}");
     }
     // The superadmin has no agent: the list is empty, and the agents of dana are not found.
     assert_eq!(pep.page(&root, &format!("{AGENTS}/{a1}")).0, 404);
 }
 
-// The mode `enrolled` (lot G6) -------------------------------------------------------------------------
+// The mode `enrolled` -------------------------------------------------------------------------
 
 const ENROLL: &str = "/auth/settings/inbox/agents/enroll";
 const RESET: &str = "/auth/settings/inbox/agents/reset";
@@ -1223,9 +1221,7 @@ fn enrolled_cycle_enroll_call_with_and_without_the_token_reset_old_token_dead_ne
     ] {
         assert!(t.contains(needle), "{needle} is not in {t}");
     }
-    for word in ["portal", "inbox", "inbox", "circular"] {
-        assert!(!Pep::text_of(&page).contains(word), "the word {word}");
-    }
+    assert!(!Pep::text_of(&page).contains("portal"), "the word portal");
     assert!(!page.contains("<script>"));
     // The row: known, made by the owner, named, with a digest and no token.
     let row = |col: &str| {

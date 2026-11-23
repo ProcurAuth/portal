@@ -21,7 +21,7 @@ import app.portalinbox.portal.PortalIdentity
 import app.portalinbox.portal.PortalPalette
 
 /*
- * Views of the identity of a portal at enrollment (lot MP2): the monogram square, the color swatch and the picker, and the address text
+ * Views of the identity of a portal at enrollment: the monogram square, the color swatch and the picker, and the address text
  * with the changed letters marked. The other screens of the multi-portal lots (home list, approval, alarm) use the same views, so the
  * portal looks the same everywhere. A screen never draws a portal from `Server.reportedName`: it takes a [PortalIdentity].
  */

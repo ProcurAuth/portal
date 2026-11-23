@@ -25,7 +25,7 @@ import app.portalinbox.service.Registry
 /**
  * One portal: its identity on this phone (name, color, monogram, fingerprint), its state, the key-changed block, the groups, the
  * account login, the connection details, and the actions: rename, color, change address, enroll again and remove. The settings
- * (mute, lock screen, quiet hours, summary, retention) are on their own screen: [PortalPrefsActivity]. The name and the color are set here and nowhere else (proposal 3.4).
+ * (mute, lock screen, quiet hours, summary, retention) are on their own screen: [PortalPrefsActivity]. The name and the color are set here and nowhere else.
  */
 class PortalActivity : BaseActivity() {
     companion object {
@@ -201,7 +201,7 @@ class PortalActivity : BaseActivity() {
             lp().margins(this, t = 16, b = 20))
     }
 
-    /** The key-changed block (mock m9): the old fingerprint, what to do, and the two choices. A revoked device gets a shorter block. */
+    /** The key-changed block: the old fingerprint, what to do, and the two choices. A revoked device gets a shorter block. */
     private fun renderKeyChanged(m: KeyChangedModel, server: Server) {
         val fg = color(R.color.danger)
         val box = lin(padH = 12, padV = 12).apply { background = rounded(color(R.color.danger_soft), dpf(CARD_RADIUS), fg and 0x4DFFFFFF, dp(1)) }
@@ -387,7 +387,7 @@ class PortalActivity : BaseActivity() {
         startActivity(Intent(this, ReenrollActivity::class.java).putExtra(ReenrollActivity.EXTRA_PORTAL, id))
     }
 
-    /** The row that opens the settings of this portal: mute, lock screen, quiet hours, summary, retention (lot MP5). */
+    /** The row that opens the settings of this portal: mute, lock screen, quiet hours, summary, retention. */
     private fun renderSettingsRow() {
         val p = panel()
         p.addView(
@@ -395,7 +395,7 @@ class PortalActivity : BaseActivity() {
                 startActivity(PortalPrefsActivity.intent(this, serverId))
             }.apply { minimumHeight = dp(48) },
         )
-        // The agents of this portal (lot G4): where the owner finds a blocked agent to unblock it.
+        // The agents of this portal: where the owner finds a blocked agent to unblock it.
         p.addView(divider())
         p.addView(
             row(getString(R.string.agents_title), getString(R.string.agents_row_help), icon(R.drawable.ic_chevron_right, color(R.color.text_muted), 18)) {

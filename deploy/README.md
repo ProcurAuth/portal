@@ -19,10 +19,10 @@ The stack has the portal with the Inbox, and PostgreSQL. It is for development a
 1. Build the image: `tools/build.sh image`.
 2. Make the secrets: `deploy/compose/init-secrets.sh`. The script writes six files to `deploy/compose/secrets/`. It never replaces a file.
 3. Start the stack: `docker compose up -d`.
-4. Open `http://127.0.0.1:4181/auth/login`. Sign in with the login and the password in the files `superadmin_login` and `superadmin_password`.
+4. Open `http://127.0.0.1:4181/auth/login`. Enter the login and the password from the files `superadmin_login` and `superadmin_password`.
 5. Stop the stack and delete the database: `docker compose down -v`.
 
-The portal is on port 4181. This one port serves the pages, the API of the Inbox for the senders and the webhooks (`/api/v1/*`), and the phones (`/v1/enroll` and `/v1/session`). The Inbox is a feature of the portal, so it has no port of its own. The page of the Inbox is in the portal, in the tab Inbox. The portal knows nothing about TLS. No proxy is in front of this stack, so no ForwardAuth and no TLS apply.
+The portal is on port 4181. This one port serves the pages, the API of the Inbox for the senders and the webhooks (`/api/v1/*`), and the phones (`/v1/enroll` and `/v1/session`). The Inbox is a feature of the portal, so it has no port of its own. The page of the Inbox is the tab Inbox. The portal has no TLS code. No proxy is in front of this stack, so no ForwardAuth and no TLS apply.
 
 A sender sends an alert with the API key in `deploy/compose/secrets/inbox_api_key`. This key is the block `api_key "local"` of `compose/config.hcl`. Its owner is the account of the file `local`, which holds `alert.send` on the group `infra`:
 
@@ -33,7 +33,7 @@ curl -fsS -X POST http://127.0.0.1:4181/api/v1/alerts \
   -d '{"group":"infra","title":"Test"}'
 ```
 
-A phone enrolls with a code. An account that is signed in makes the code in the tab Inbox, with the plus button. There is no shared device password. The server key in `inbox_server_key` makes each code and each phone valid for this server. Keep a copy of it. A new key invalidates every phone.
+A phone enrolls with a code. An account with a session makes the code in the tab Inbox, with the plus button. There is no shared device password. The server key in `inbox_server_key` makes each code and each phone valid for this server. Keep a copy of it. A new key invalidates every phone.
 
 The stack publishes its port on `127.0.0.1`. To reach it from a phone or an emulator on another host, set `PORTAL_BIND=0.0.0.0`. Then set `inbox.devices.public_address` in `compose/config.hcl` to the address that the phone uses. This publishes the pages too: use it for tests only.
 
@@ -45,7 +45,9 @@ Run this command from the root of the repository:
 docker compose -f docker-compose.yml -f deploy/compose/docker-compose.ha.yml up -d
 ```
 
-The file adds a second instance and a Traefik proxy. Both instances share the database and the secrets. Traefik is the only service that publishes a port. It has the middleware `inbox-retry` on `/v1/`, `/api/v1/`, `/mcp` and `/api/version`. The portal sees the address of the proxy as the client address. Use this variant to test two instances. It is not a model for production.
+The file adds a second instance and a Traefik proxy. Both instances share the database and the secrets.
+
+Traefik is the only service that publishes a port. It has the middleware `inbox-retry` on `/v1/`, `/api/v1/`, `/mcp` and `/api/version`. The portal sees the address of the proxy as the client address. Use this variant to test two instances. It is not a model for production.
 
 ## K3s
 
@@ -113,22 +115,26 @@ A new `config.hcl` gives a new name to the ConfigMap. The pods then roll.
 
 The Inbox is a feature of the portal. It has one port and one domain.
 
-- **The IngressRoute `portal-inbox`** sends `/v1/*`, `/api/v1/*`, `/mcp` and `/api/version` to the Service `portal` without ForwardAuth. A phone has no session: it proves itself with the Noise handshake inside the WebSocket. A sender has no session: it sends an API key, and the Inbox checks it. An agent has no session: it sends an `mcp_` key to `/mcp`, and the Inbox checks it. The route names the default of `inbox.mcp.path`. Traefik carries a WebSocket upgrade with path routing, so a second port is not needed.
-- **The middleware `portal-inbox-retry`** sends a request again (4 attempts, 100 ms apart at first) when a node is lost and the Service still names its pod. Traefik retries only before the first byte of the answer. An upgrade that got `101` is never sent again. The `ServersTransport` `portal-inbox` has a dial timeout of 1 second, so the retry is quick.
+- **The IngressRoute `portal-inbox`** sends `/v1/*`, `/api/v1/*`, `/mcp` and `/api/version` to the Service `portal` without ForwardAuth. A phone has no session: it proves itself with the Noise handshake inside the WebSocket. A sender has no session: it sends an API key, and the Inbox checks it. An agent has no session: it sends an `mcp_` key to `/mcp`, and the Inbox checks it. The route names the default of `inbox.mcp.path`. Traefik carries a WebSocket upgrade with path rules, so a second port is not needed.
+- **The middleware `portal-inbox-retry`** repeats a request (4 attempts, 100 ms apart at first) when a node is lost and the Service still names its pod. Traefik retries only before the first byte of the answer. An upgrade that got `101` is never sent again. The `ServersTransport` `portal-inbox` has a dial timeout of 1 second, so the retry is quick.
 - **Phones** use `inbox.devices.public_address`. Set it to the public base URL of the portal: `https://portal.example.org`. A path prefix is possible (`https://host/prefix`), but the portal has no base path. The proxy must remove the prefix before it sends the request.
 - **Separate exposure** needs no second port. Restrict `/v1/` by source address or by rate with a Traefik middleware on the route `portal-inbox`. Keep the pages on routes with ForwardAuth.
 
-The portal reads the client address from `X-Forwarded-For` for the pages, the senders and the phones. It trusts the header from the networks in `server.trusted_proxies` only. The middleware `forward-auth` of the cluster must keep `trustForwardHeader: false`. Set `true` only when each hop in front of Traefik overwrites or removes the `X-Forwarded-Uri` and `X-Forwarded-Method` headers of the client. Otherwise a client chooses the request that `/auth/verify` checks (see `SECURITY.md`). The Inbox has no list of its own. The portal has no TLS code: Traefik terminates TLS. Use an HTTPS `inbox.devices.public_address`.
+The portal reads the client address from `X-Forwarded-For` for the pages, the senders and the phones. It trusts the header from the networks in `server.trusted_proxies` only.
+
+The middleware `forward-auth` of the cluster must keep `trustForwardHeader: false`. Set `true` only when each hop in front of Traefik replaces the `X-Forwarded-Uri` and `X-Forwarded-Method` headers of the client. Otherwise a client chooses the request that `/auth/verify` checks (see [Traefik and TLS](../docs/traefik.md)). The Inbox has no list of its own.
+
+The portal has no TLS code: Traefik terminates TLS. Use an HTTPS `inbox.devices.public_address`.
 
 The page of the Inbox is `/auth/settings/inbox` in the portal. ForwardAuth does not protect it. The portal checks the session itself. The launcher has no tile for the Inbox. The gear of the launcher opens the page.
 
 ### Variant with SQLite
 
-This variant is not in the manifests. Use it only when no PostgreSQL cluster exists. It has one active instance and standby instances. Replace the blocks `postgres` and `inbox.cluster` with a block `storage`. Add `inbox.replica` and a volume that all instances share. See the sections "Inbox" and "Storage" of the README.
+This variant is not in the manifests. Use it only when no PostgreSQL cluster exists. It has one active instance and standby instances. Replace the blocks `postgres` and `inbox.cluster` with a block `storage`. Add `inbox.replica` and a volume that all instances share. See [Several instances](../docs/several-instances.md) and the [Inbox](../docs/inbox/README.md).
 
 ## Migrations of the database
 
-The directory `migrations/` has the SQL files that add columns for a new version. Each file is additive and drops nothing. Stop the portal and take a backup before you run a file. See the section "Upgrades" of the README for the order of the steps.
+The directory `migrations/` has the SQL files that add columns for a new version. Each file is additive and drops nothing. Stop the portal and take a backup before you run a file. See [Operations](../docs/operations.md) for the order of the steps.
 
 - `migrations/5.3.0-to-5.4.0.sql` is for PostgreSQL. It is idempotent: a second run changes nothing. Run it with `psql -v ON_ERROR_STOP=1 -f FILE`.
 - `migrations/5.3.0-to-5.4.0.sqlite.sql` is for SQLite. Run it one time only, with `sqlite3 -bail portal.db < FILE`.

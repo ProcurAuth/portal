@@ -1,6 +1,6 @@
 //! The table of configuration keys: the one place that holds the type, the range, the default
 //! and the description of each key. The parser, the effective configuration and the generated
-//! reference in the README all read this table.
+//! reference in docs/configuration.md all read this table.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -231,14 +231,14 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ),
     (
         "keys",
-        "This block is optional. If it is present, the server accepts keys: a user makes keys in the tab Access. A key has one kind: `mcp` for an agent, verified at the key edge and by the PDP, and `api` for a service, verified by the API of the inbox. The keys `mcp` and `api` turn each kind on or off. The kind `mcp` needs the blocks `identity` and `pdp`. The kind `api` needs the block `inbox`. The block needs one kind on at least.",
+        "This block is optional. If it is present, the server accepts keys: a user makes keys in the tab Access. A key has one kind: `mcp` for an agent, verified at the key edge and by the PDP, and `api` for a service, verified by the API of the inbox.\n\nThe keys `mcp` and `api` enable or disable each kind. The kind `mcp` needs the blocks `identity` and `pdp`. The kind `api` needs the block `inbox`. At least one kind must be on.",
     ),
     ("storage", "The history, and the SQLite file."),
     (
         "postgres",
         "This block is optional. If it is present, the server uses a shared PostgreSQL database in place of the SQLite file.",
     ),
-    ("session", "The sessions and the signing key."),
+    ("session", "The sessions and the session key."),
     ("security", "The limits and the login limiters."),
     ("metrics", "The Prometheus endpoint."),
     ("discovery", "The sources of the service catalogue."),
@@ -246,7 +246,7 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ("logging", "The log."),
     (
         "inbox",
-        "This block is optional. If it is present, this server runs the inbox: it sends alerts to phones. The inbox uses the database of the portal. The blocks `inbox.devices` and `inbox.storage` are mandatory inside this block. The blocks `inbox.replica`, `inbox.cluster`, `inbox.watch`, `inbox.items` and `inbox.at_rest` are optional. The block `inbox.items` has the blocks `lease` and `digest`. The block `inbox.at_rest` has the blocks `key \"<id>\"`. The blocks `group \"<id>\"` and `api_key \"<name>\"` are inside this block.",
+        "This block is optional. If it is present, this server runs the inbox: it sends alerts to phones. The inbox uses the database of the portal.\n\nThe blocks `inbox.devices` and `inbox.storage` are mandatory inside this block. The blocks `inbox.replica`, `inbox.cluster`, `inbox.watch`, `inbox.items` and `inbox.at_rest` are optional. The block `inbox.items` has the blocks `lease` and `digest`. The block `inbox.at_rest` has the blocks `key \"<id>\"`. The blocks `group \"<id>\"` and `api_key \"<name>\"` are inside this block.",
     ),
     (
         "inbox.devices",
@@ -262,7 +262,7 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ),
     (
         "inbox.replica",
-        "This block is optional and is inside the block `inbox`. If it is present, the inbox copies the SQLite file to a directory that the standby instances share. A standby instance takes over when the owner is lost. The block needs the SQLite file: it must not be present with the block `postgres`. The copy covers the whole file, with the tables of the portal.",
+        "This block is optional and is inside the block `inbox`. If it is present, the inbox copies the SQLite file to a directory that the standby instances share. A standby instance becomes the owner when the owner is lost. The block needs the SQLite file: it must not be present with the block `postgres`. The copy covers the whole file, with the tables of the portal.",
     ),
     (
         "inbox.cluster",
@@ -270,7 +270,7 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ),
     (
         "inbox.watch",
-        "This block is optional and is inside the block `inbox`. If it is present, the portal sends alerts about itself to one group: when a service of the launcher is unhealthy, and when sign-ins fail in a burst. Without this block, the portal sends no alert about itself.",
+        "This block is optional and is inside the block `inbox`. If it is present, the portal sends alerts about itself to one group. The alerts tell that a service of the launcher is unhealthy, or that sign-ins fail in a burst. Without this block, the portal sends no alert about itself.",
     ),
     (
         "inbox.items",
@@ -290,7 +290,7 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ),
     (
         "inbox.mcp",
-        "This block is optional and is inside the block `inbox`. Its presence starts the MCP endpoint of the portal for the agents. The endpoint gives the tools `approval_intent`, `get_answer`, `keepalive`, `say`, `supersede` and `cancel`. The agent sends its explanation and its talk to the portal here, and the service never sees them. The endpoint takes the keys of the kind `mcp` only. The block needs the block `inbox.items` and `keys.mcp = true`. A call checks the origin, the client address, the key, the rate and the size of the body, in this order. Each instance keeps its own limits.",
+        "This block is optional and is inside the block `inbox`. Its presence starts the MCP endpoint of the portal for the agents. The endpoint gives the tools `approval_intent`, `get_answer`, `keepalive`, `say`, `supersede` and `cancel`. The agent sends its explanation and its talk to the portal here, and the service never sees them.\n\nThe endpoint takes the keys of the kind `mcp` only. The block needs the block `inbox.items` and `keys.mcp = true`. A call checks the origin, the client address, the key, the rate and the size of the body, in this order. Each instance keeps its own limits.",
     ),
     (
         "inbox.agents",
@@ -298,7 +298,7 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ),
     (
         "inbox.questions",
-        "This block is optional and is inside the block `inbox`. Its presence starts the questions. An agent asks the owner of its key with the tool `ask` or with `POST /api/v1/questions`. The owner answers on a phone or on the web page. The portal seals each question at rest. A service never sees a question. The block needs the blocks `inbox.items` and `inbox.at_rest`. The block can be empty. A key needs the permission `question.ask` to ask.",
+        "This block is optional and is inside the block `inbox`. Its presence starts the questions. An agent asks the owner of its key with the tool `ask` or with `POST /api/v1/questions`. The owner answers on a phone or on the web page. The portal seals each question at rest. A service never sees a question.\n\nThe block needs the blocks `inbox.items` and `inbox.at_rest`. The block can be empty. A key needs the permission `question.ask` to ask.",
     ),
     (
         "inbox.approvals",
@@ -385,7 +385,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Duration { min: secs(1), max: secs(MINUTE) },
         presence: Presence::Default("10s"),
         when: When::Always,
-        doc: "The time that a client has to send the request body. A sign-in also gets its Argon2 check in this time, or the server answers `503`.",
+        doc: "The time that a client has to send the request body. A sign-in must finish its Argon2 check within this time, or the server answers `503`.",
     },
     Key {
         block: "server",
@@ -421,7 +421,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Secret { max_bytes: 16 * 1024 },
         presence: Presence::Required,
         when: When::Always,
-        doc: "The password of the superadmin. At start, the server hashes it with Argon2id and erases it from memory. It has at most `security.max_password_bytes` bytes. The server refuses the example values of `.env.example` and of the README. A new password ends the sessions of the superadmin and the impersonated sessions.",
+        doc: "The password of the superadmin. At start, the server hashes it with Argon2id and erases it from memory. It has at most `security.max_password_bytes` bytes. The server refuses the example values of `.env.example` and of the documentation. A new password ends the sessions of the superadmin and the impersonated sessions.",
     },
     Key {
         block: "authentication",
@@ -429,7 +429,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Enum(&["off", "optional", "required"]),
         presence: Presence::Default("optional"),
         when: When::Always,
-        doc: "The second factor of the sign-in: a TOTP code from an authenticator app (RFC 6238). `off`: the portal shows no second-factor page and never asks for a code. `optional`: each account chooses to turn it on. `required`: each account, the superadmin included, must enrol after the password step, and the session starts only after the second factor. No separate switch exists for the superadmin. Under `optional`, the superadmin signs in with the password only, so scripts that sign in keep working. A value other than `off` needs `authentication.totp_key_env` or `authentication.totp_key_file`.",
+        doc: "The second factor of the sign-in: a TOTP code from an authenticator app (RFC 6238). `off`: the portal never asks for a code. `optional`: each account chooses to enable it. `required`: each account, the superadmin included, must enrol after the password step. The superadmin has no separate switch. Under `optional`, the superadmin authenticates with the password only, so scripts that authenticate need no change. A value other than `off` needs `authentication.totp_key_env` or `authentication.totp_key_file`.",
     },
     Key {
         block: "authentication",
@@ -840,7 +840,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Enum(&["ephemeral", "provided"]),
         presence: Presence::Default("ephemeral"),
         when: When::Always,
-        doc: "`ephemeral`: the server makes a new random signing key at each start. `provided`: the key comes from `session.secret_env` or `session.secret_file`. The `postgres` block needs `provided`, because all instances use the same key.",
+        doc: "`ephemeral`: the server makes a new random key at each start. `provided`: the key comes from `session.secret_env` or `session.secret_file`. The `postgres` block needs `provided`, because all instances use the same key.",
     },
     Key {
         block: "session",
@@ -848,7 +848,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Secret { max_bytes: 4096 },
         presence: Presence::Required,
         when: When::SecretProvided,
-        doc: "The signing key of the login forms, of the return links and of the anti-CSRF tokens. It has at least 32 bytes. The server refuses the example value of `.env.example`. A new value ends the sessions of the superadmin and the impersonated sessions.",
+        doc: "The key that signs the login forms, the return links and the anti-CSRF tokens. It has at least 32 bytes. The server refuses the example value of `.env.example`. A new value ends the sessions of the superadmin and the impersonated sessions.",
     },
     Key {
         block: "session",
@@ -1055,7 +1055,7 @@ pub static KEYS: &[Key] = &[
         },
         presence: Presence::Default("/icons"),
         when: When::Always,
-        doc: "The directory of the offline icon library. If the directory is missing, the pages show initials.",
+        doc: "The directory of the offline icon library. If the directory does not exist, the pages show initials.",
     },
     Key {
         block: "ui",
@@ -1087,7 +1087,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Secret { max_bytes: 4096 },
         presence: Presence::Required,
         when: When::Always,
-        doc: "The key of the server for the phones. Make it one time with `portal inbox keygen`. A new key makes each enrolled phone and each enrollment code invalid. Back it up.",
+        doc: "The key of the server for the phones. Make it one time with `portal inbox keygen`. A new key makes each enrolled phone and each enrollment code invalid. Keep a copy of it.",
     },
     Key {
         block: "inbox.devices",
@@ -1269,7 +1269,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Duration { min: secs(5), max: secs(HOUR) },
         presence: Presence::Default("30s"),
         when: When::Always,
-        doc: "The other instances consider an instance lost when its lease did not change for this time. They then take over.",
+        doc: "The other instances consider an instance lost when its lease did not change for this time. One of them then becomes the owner.",
     },
     Key {
         block: "inbox.replica",
@@ -1335,7 +1335,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Duration { min: secs(10), max: secs(DAY) },
         presence: Presence::Default("2m"),
         when: When::Always,
-        doc: "How long a service stays unhealthy before the alert. A service that is healthy or starting in this time does not raise the alert.",
+        doc: "How long a service stays unhealthy before the alert. A service that is healthy in this time, or that is in the state `starting`, does not raise the alert.",
     },
     Key {
         block: "inbox.watch",
@@ -1743,7 +1743,7 @@ pub static KEYS: &[Key] = &[
         },
         presence: Presence::Optional,
         when: When::Always,
-        doc: "The values of the header `Origin` that the endpoint accepts. A request with no `Origin` header comes from a program and passes. A request with another `Origin` gets `403`. This stops a web page from calling the endpoint with the key of a visitor (DNS rebinding). Without this key, no browser origin passes.",
+        doc: "The values of the header `Origin` that the endpoint accepts. A request with no `Origin` header comes from a program and passes. A request with another `Origin` gets `403`. A web page then cannot use the key of a visitor against the endpoint. A DNS attack can cause such a request. Without this key, no browser origin passes.",
     },
     Key {
         block: "inbox.mcp",
@@ -1788,22 +1788,22 @@ pub const LABELED_BLOCKS: &[(&str, &str, &str)] = &[
     (
         "user",
         "<login>",
-        "The grants of one user that the configuration gives (modes `static` and `hybrid`). The label is the login, as the server keeps it: 1 to 32 characters of a-z, 0-9, '.', '-' and '_'. The account itself is in the database. The superadmin has all grants and has no `user` block.",
+        "The grants of one user that the configuration gives (modes `static` and `hybrid`). The label is the login, as the server keeps it: 1 to 32 characters of a-z, 0-9, '.', '-' and '_'. The account itself is in the database. The superadmin has all grants and has no `user` block.\n\nA grant names a node of the resource tree of a service: `<action> on service:<id>`, then 0 to 4 segments `/<type>:<id>`. An example is `query.run.read on service:clickhouse-dash/host:local/database:analytics`. The action `access` lets the user open the service and has grants on the service only. The other actions are the names that the service publishes at `/.well-known/procurauth/actions`. A grant covers its node and each node below it.\n\nA type starts with a-z, then has a-z, 0-9 and '_', 1 to 32 characters, and is not `service`. Each id is percent-encoded: each byte outside A-Z a-z 0-9 - . _ ~ becomes %XX with upper-case hex digits. For example, `bucket:a%2Fb` is the id `a/b`. Any other form of the same id stops the start. An id has 1 to 256 bytes after the decode, without a control character.\n\nA grant can be an object: `{ grant = \"access on service:datastore\", limits = { requests = [ { amount = 300, window = \"minute\" } ] } }`. The member `confirm` is `true` or `false`, and the default is `false`. With `confirm = true`, each use of the action needs the approval of a person. A grant of the service `portal` or of the action `access` with `confirm = true` stops the start.\n\nThe `limits` object holds one member for each limit. A ceiling is a whole number. A budget is a list of objects with `amount` and `window` (`second`, `minute`, `hour` or `day`). A budget is valid only on the grant `access` on a service.\n\nA grant has at most 8 limit values. A value is at most 1,000,000,000. The limit values take at most 1024 bytes as compact JSON.\n\nAt start, the server checks only the form of each grant: the services and their trees of types are known at run time. The Services page of the settings shows a grant that does not follow the tree of its service. The PDP does not apply this grant. A block `user` stops the server when it gives `keys.own.create`, or an action that needs another action that it does not give.",
     ),
     (
         "key",
         "<name>",
-        "One key of a user of the file. The block is inside a block `user`. The label is the name of the key: 1 to 64 characters, with no control character. Two keys of one user have two names. The subject id of the key is `key:` and the first 16 hexadecimal characters of the SHA-256 digest of the login, a zero byte and the name. A key of the file has no expiry date. To stop it, remove the block and restart each instance. The block needs the block `keys`.",
+        "One key of a user of the file. The block is inside a block `user`. The label is the name of the key: 1 to 64 characters, with no control character. Two keys of one user have two names.\n\nThe subject id of the key starts with `key:`. It ends with the first 16 hexadecimal characters of the SHA-256 digest of the login, a zero byte and the name. A key of the file has no expiry date. To stop it, remove the block and restart each instance. The block needs the block `keys`.",
     ),
     (
         "group",
         "<id>",
-        "One group of alerts. The block is inside the block `inbox`. The label is the id of the group: 1 to 64 characters of a-z, 0-9, '-' and '_'. A phone subscribes to a group. A key sends an alert to a group.",
+        "One group of alerts. The block is inside the block `inbox`. The label is the id of the group: 1 to 64 characters of a-z, 0-9, '-' and '_'. A phone subscribes to a group, and a key sends an alert to a group.",
     ),
     (
         "api_key",
         "<name>",
-        "One API key of the file: the key of a monitoring tool, a script or a webhook that sends alerts. The block is inside the block `inbox`. The label is the name of the key: 1 to 64 characters of a-z, 0-9, '-' and '_'. The key follows its owner, as each key does: it can do only what the key and its owner both have the right to do. The owner is an account of the file (a block `user`), so the key and its account have one source. The rights of a file account do not change while the server runs, so the server decides at start which groups the key can send to. It also keeps the groups of the key where the owner holds `alert.read`: only these give the status of an alert (`GET /api/v1/alerts/{id}`). This decision does not wait for the database. The block needs `keys.api = true`. The key is not in the list of keys.",
+        "One API key of the file, inside the block `inbox`: the key of a tool, a script or a webhook that sends alerts. The label is the name of the key: 1 to 64 characters of a-z, 0-9, '-' and '_'. The key follows its owner, as each key does: it can do only what the key and its owner both have the right to do. The owner is an account of the file (a block `user`), so the key and its account have one source.\n\nThe rights of a file account stay fixed while the server runs. So the server decides at start which groups the key can send to.\n\nIt also keeps the groups of the key where the owner holds `alert.read`: only these give the status of an alert (`GET /api/v1/alerts/{id}`). This decision does not wait for the database. The block needs `keys.api = true`. The key is not in the list of keys.",
     ),
     (
         "pdp_client",
@@ -1813,7 +1813,7 @@ pub const LABELED_BLOCKS: &[(&str, &str, &str)] = &[
     (
         "external_service",
         "<name>",
-        "One external service: a tile of the launcher that opens a link. The label is the display name: 1 to 32 characters, with no control character and at least one letter or digit. The id of the service is `ext-` and the slug of the label: `Team wiki` gives `ext-team-wiki`. The id is the resource id of the grant `access`, which a block `user` gives. The service needs no container and no route, and the server never requests its link. A block `key` cannot name it, and a block `pdp_client` cannot have its id as its name. Two blocks with the same id stop the start. A service of the file wins over a service of the same id in the database: the server ignores the row and does not delete it. The Settings page shows the service of the file with the badge `file`, and it cannot change or delete it. A discovered service with the same id wins over both. A block of this kind works in each mode of `access.grants_mode`. At most 256 blocks.",
+        "One external service: a tile of the launcher that opens a link. The label is the display name: 1 to 32 characters, with no control character and at least one letter or digit. The id of the service is `ext-` and the slug of the label, so `Team wiki` gives `ext-team-wiki`. The id is the resource id of the grant `access`, which a block `user` gives.\n\nThe service needs no container and no route, and the server never requests its link. Two blocks with the same id stop the start.\n\nA service of the file wins over a database service with the same id. The server ignores the row and does not delete it. A block `key` cannot name the service, and a block `pdp_client` cannot have its id as its name.\n\nThe Settings page shows the service of the file with the badge `file`, and it cannot change or delete it. A discovered service with the same id wins over both. A block of this kind works in each mode of `access.grants_mode`. At most 256 blocks.",
     ),
     (
         "inbox.at_rest.key",
@@ -1833,7 +1833,8 @@ pub static LABELED_KEYS: &[Key] = &[
         },
         presence: Presence::Required,
         when: When::LabeledBlock,
-        doc: "The grants of the user. The user is an account of the file, with no row in the database. `access` lets the user open the service. The other actions are the names that the service publishes at `/.well-known/procurauth/actions`. A grant names a node of the resource tree of the service: `<action> on service:<id>`, then 0 to 4 segments `/<type>:<id>`, for example `query.run.read on service:clickhouse-dash/host:local/database:analytics`. A grant covers its node and each node below it. A type starts with a-z, then has a-z, 0-9 and '_', 1 to 32 characters, and is not `service`. Each id is percent-encoded: each byte outside A-Z a-z 0-9 - . _ ~ is %XX with upper-case hex digits, for example `bucket:a%2Fb` for the id `a/b`. Another encoding of the same id stops the start. A decoded id has 1 to 256 bytes, without a control character. The action `access` has grants on the service only. The `confirm` member of an object is `true` or `false`, and the default is `false`. With `confirm = true`, each use of the action needs the approval of a person. A grant of the service `portal` or of the action `access` with `confirm = true` stops the start. The `limits` object holds one member for each limit. A ceiling is a whole number. A budget is a list of objects with `amount` and `window` (`second`, `minute`, `hour` or `day`). A budget value is only on the grant `access` on a service. A grant has at most 8 limit values. A value is at most 1,000,000,000. The limit values take at most 1024 bytes as compact JSON. The number of grants is at most `users.max_grants`. At start, the server checks only the form of each grant: the services and their trees of types are known at run time. The Services page of the settings shows a grant that does not follow the tree of its service. The PDP does not apply this grant. A block `user` stops the server when it gives `keys.own.create`, or an action that needs another action that it does not give.",
+        doc: "The grants of the user. The user is an account of the file, with no row in the database. Each grant is a quoted text or an object. See the notes of this block for the form of a grant, the limit values and the approval. There are at most `users.max_grants` grants.",
+
     },
     Key {
         block: "user",
@@ -1997,7 +1998,7 @@ pub static LABELED_KEYS: &[Key] = &[
         block: "external_service",
         name: "icon",
         kind: Kind::Text {
-            expected: "a data URI in the form data:<type>;base64,<data>, with the type image/png, image/jpeg, image/webp, image/gif or image/svg+xml, and at most 32 KiB after decoding",
+            expected: "a data URI in the form data:<type>;base64,<data>, with the type image/png, image/jpeg, image/webp, image/gif or image/svg+xml, and at most 32 KiB when decoded",
             check: check_external_icon,
         },
         presence: Presence::Optional,
@@ -2650,12 +2651,12 @@ fn escape_cell(text: &str) -> String {
     text.replace('|', "\\|")
 }
 
-/// The configuration reference in Markdown, generated from the table. The README holds a copy
+/// The configuration reference in Markdown, generated from the table. The page docs/configuration.md holds a copy
 /// that a test compares with this text.
 pub fn reference() -> String {
     let mut out = String::new();
     for (block, note) in BLOCKS {
-        out.push_str(&format!("#### Block `{block}`\n\n{note}\n\n"));
+        out.push_str(&format!("### Block `{block}`\n\n{note}\n\n"));
         out.push_str("| Key | Type | Default | Description |\n|---|---|---|---|\n");
         for key in KEYS.iter().filter(|k| k.block == *block) {
             let mut description = key.doc.to_string();
@@ -2676,7 +2677,7 @@ pub fn reference() -> String {
     }
     for (block, label, note) in LABELED_BLOCKS {
         out.push_str(&format!(
-            "#### Block `{block} \"{label}\"`\n\nThis block has a label and can occur more than one time. {note}\n\n"
+            "### Block `{block} \"{label}\"`\n\nThis block has a label and can occur more than one time. {note}\n\n"
         ));
         out.push_str("| Key | Type | Default | Description |\n|---|---|---|---|\n");
         for key in LABELED_KEYS.iter().filter(|k| k.block == *block) {

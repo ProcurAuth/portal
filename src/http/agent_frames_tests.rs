@@ -1,4 +1,4 @@
-//! The agents on the phones, with the real approval API and the real engine, on SQLite and on PostgreSQL (lot G2). The
+//! The agents on the phones, with the real approval API and the real engine, on SQLite and on PostgreSQL. The
 //! frames are the ones that a session builds from its queue: the test reads them as a phone does. A change of an agent
 //! writes one message for each device of its owner and for no other device. The frame holds the state of the row when the
 //! session sends it, and an older row is withdrawn. A `sync` brings the agents that a phone lacks. `agent_do` goes
@@ -492,7 +492,7 @@ fn sync_brings_the_agents_that_the_phone_lacks() {
             (WireState::Known, false, false, true),
             "[{name}]"
         );
-        // The key store gives the mode of the key (lot G1b). A key of the kind `mcp` is in the mode `discover`: the bucket
+        // The key store gives the mode of the key. A key of the kind `mcp` is in the mode `discover`: the bucket
         // is "Unattributed" and not the key name.
         assert_eq!(
             bucket.label, "Unattributed · key 2b7c91d0e4a853f6",
@@ -833,7 +833,7 @@ fn lock_new_false_the_default_gives_the_frame_without_the_lock_and_the_same_fiel
 
 /// A new agent that looks like a known agent of the same key carries `similar` in its frame, on both ways of delivery
 /// (the queue and `sync`). The hint is help for the owner: the frames of the other agents carry none, and nothing merges
-/// by itself (lot G5, decision Q12).
+/// by itself.
 #[test]
 fn a_new_agent_that_looks_like_a_known_one_carries_similar_and_nothing_merges() {
     each_rig(true, OPEN, |r, name| {

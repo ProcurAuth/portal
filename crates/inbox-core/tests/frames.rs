@@ -775,7 +775,7 @@ fn the_protocol_document_names_what_the_code_names() {
     assert_eq!(inbox_core::render::markdown::MAX_LIST_DEPTH, 3);
 }
 
-// ---------------------------------------------------------------- agents (lot G2)
+// ---------------------------------------------------------------- agents
 
 fn golden(sub: &str, name: &str) -> Value {
     files(sub).into_iter().find(|f| f.0 == name).unwrap_or_else(|| panic!("{sub}/{name}")).2
@@ -1045,7 +1045,7 @@ fn agent_text_and_number_limits_are_exact() {
     assert!(bad_bucket(&|v| v["merged_into"] = json!("c".repeat(32))));
 }
 
-/// Lot G6: the web is the only place where an owner makes an agent or resets a token. The frame has no such operation.
+/// The web is the only place where an owner makes an agent or resets a token. The frame has no such operation.
 #[test]
 fn agent_do_has_no_operation_to_enroll_or_to_reset_a_token() {
     let a = "d4".repeat(16);

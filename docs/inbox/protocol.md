@@ -1,5 +1,7 @@
 # Device protocol (version 5)
 
+This page describes the protocol between the Inbox of the portal and the Android app Portal Inbox: enrollment, the Noise session, and the frames. It is for the author of a client or of a test.
+
 The code is the reference: [`crates/inbox-core/src/proto.rs`](../../crates/inbox-core/src/proto.rs),
 [`enroll.rs`](../../crates/inbox-core/src/enroll.rs) and [`noise.rs`](../../crates/inbox-core/src/noise.rs).
 The same crate runs on the server and in the Android app (JNI). The cryptography exists only once.
@@ -8,7 +10,7 @@ All messages are JSON. Binary fields are standard base64 with pad characters.
 This document describes protocol version 5. An app that speaks another version
 gets close code 4426 and must be updated. Protocol 5 has no compatibility with protocol 4.
 
-Protocol 4 replaced the shared device password and OPAQUE with a one-time enrollment
+Protocol 4 replaced the shared device password with a one-time enrollment
 code. An account of the portal makes the code. The login of the account is the
 user name of the device. The device cannot change it.
 
@@ -18,6 +20,35 @@ the thread of an item and the preferences of the account. It adds no cryptograph
 Protocol 5 also adds the agents of a key. An agent is one program, or one conversation of a model, that asks.
 Several agents can share one key. The portal gives each agent an id, and the owner gives it a name.
 The frames of this document tell the phone which agent asked, and let the owner act on an agent.
+
+## Overview
+
+A phone talks to the portal over one WebSocket connection. The content of the connection is a Noise session.
+The phone pins the public key of the server at enrollment, so only the real portal can answer it.
+
+![Enrollment and session: the account makes a code, the phone enrolls, then it opens a session](../assets/inbox-flow.svg)
+
+```mermaid
+sequenceDiagram
+    participant A as Account (web page)
+    participant P as Phone (app)
+    participant S as Portal
+    A->>S: Make an enrollment code
+    A-->>P: Code or link portal-inbox://enroll?s=..&k=..&c=..
+    P->>S: GET /v1/enroll (WebSocket), Noise IK message 1 (secret, device name)
+    S-->>P: Noise message 2 (device id, user name)
+    Note over P,S: The phone stores the pinned server key and its device id
+    P->>S: GET /v1/session (WebSocket), Noise IK message 1 (device id)
+    S-->>P: Noise message 2 (server name)
+    P->>S: ready
+    S-->>P: welcome, then alert, request, message, settled and agent frames
+    P->>S: ack, answer, reply, sync, agent_do
+```
+
+1. An account of the portal makes an enrollment code. The code holds the address of the portal, its public key and a one-time secret.
+2. The phone enrolls with the code. It makes its own key pair. The server links the device to the account.
+3. At each connection, the phone proves its key and opens a session. The server sends the frames of the account to it.
+4. The phone sends a receipt for each frame. The server sends a frame again until the receipt arrives.
 
 ## Keys
 
@@ -793,7 +824,7 @@ The sender refuses such a frame.
 ## Effect
 
 The effect binds a service, an action, a resource and an operation (`op`).
-The rule is paragraph 17.3 of the ProcurAuth protocol. The code is `crates/inbox-core/src/effect.rs`.
+The rule is [paragraph 17.3 of the ProcurAuth protocol](https://procurauth.github.io/procurauth/specification.html#p-17-3). The code is `crates/inbox-core/src/effect.rs`.
 The server, the phone (through JNI) and the tests use this code.
 
 1. Make the JSON object `{"v":1,"service":..,"action":..,"resource":..,"op":..}`.
@@ -926,10 +957,9 @@ The server closes the session of a device that sends a frame that fails a rule o
 
 ## Decisions
 
-These choices fill the gaps of the specification. Change them only with a new protocol version.
+These choices are part of the protocol. Change them only with a new protocol version.
 
-1. **Query form.** The link is `portal-inbox://enroll?s=..&k=..&c=..`. The earlier design note
-   used `portal-inbox://enroll#<code>`. The query form is the contract.
+1. **Query form.** The link is `portal-inbox://enroll?s=..&k=..&c=..`. A link with a fragment is an error.
 2. **Strict code.** The parser is strict. The scheme and the key names are case sensitive.
    A pad character in base64url is an error. Bits at the end that are not zero are an error.
 3. **Order of keys.** The order of `s`, `k` and `c` in the query is free.
@@ -941,17 +971,16 @@ These choices fill the gaps of the specification. Change them only with a new pr
 5. **No reason on refusal.** The server sends 4410 for every refusal that concerns the code
    or message 1. It sends 4426 only when message 1 is valid and the version is wrong,
    or when the first frame is a text frame.
-6. **Lifetime of a code.** The server decides. The merge design says one use and 10 minutes.
-   The server compares the digest of the secret in constant time.
+6. **Lifetime of a code.** The server decides. A code works one time. The key `inbox.enrollment.code_ttl`
+   sets its life (default 10 minutes). The server compares the digest of the secret in constant time.
 7. **Server key file.** One line, base64 of the 32 private bytes. No version byte.
-   The old file format with an OPAQUE setup is not read.
 8. **Device name.** The app trims it and shows the phone model as default. The server
    checks 1 to 64 bytes and no control character, and does not trim.
 9. **Login is read-only.** The phone stores `user_name` from message 2 and updates it
    at each `welcome`. The phone has no option for it.
-10. **Old servers in the app.** The upgrade of the database of the app (versions 6 and 7) removes
-    every stored server of protocol 3 with its groups and alerts. The app tells the person once:
-    "Enroll again".
+10. **Upgrade of the app.** The upgrade of the local database of the app to version 9 removes every stored
+    portal of an earlier protocol. The app tells the person once: "Enroll again".
+    The upgrade to version 10 drops the stored items only. The portal sends the open items again at the next `sync`.
 11. **Timeouts of the app.** It waits 20 seconds for the WebSocket to open and 90 seconds
     for message 2. The server SHOULD close an enrollment connection that sends no message 1
     within 10 seconds.
@@ -962,5 +991,5 @@ These choices fill the gaps of the specification. Change them only with a new pr
 ## Other interfaces
 
 The page of the Inbox is a page of the portal, at `/auth/settings/inbox`. It needs a session of the portal.
-The senders send alerts to the same listener of the portal, on `/api/v1/`. The routes are in [README.md](README.md).
+The senders send alerts to the same listener of the portal, on `/api/v1/`. The routes are in the [HTTP reference](../reference.md) and in the [Inbox guide](README.md).
 The protocol of the phones has no admin call.

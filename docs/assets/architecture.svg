@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 640" width="1100" height="640" role="img" aria-label="Architecture of portal: Traefik, port 4181, port 4182, the services and the database">
+<title>Architecture of portal: listeners, Traefik, services and the database</title><desc>People, programs with keys, senders and phones reach Traefik. Traefik terminates TLS, asks portal on port 4181 with ForwardAuth, and sends the Inbox routes to portal without ForwardAuth. Services ask the decision point on port 4182. One database, SQLite or PostgreSQL, holds the state.</desc>
+<defs><marker id="ah-a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#a5b4fc"/></marker><marker id="ah-m" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#7c83b5"/></marker><marker id="ah-ok" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#34d399"/></marker></defs>
+<rect width="1100" height="640" rx="20" fill="#12142a"/>
+<g font-family="Inter, 'Segoe UI', -apple-system, Helvetica, Arial, sans-serif">
+<text x="36" y="46" font-size="25" font-weight="700" fill="#ffffff">One binary, two ports, one database</text>
+<text x="36" y="73" font-size="15" fill="#9ca3d4">Traefik is the only public entry. The services reach the decision point on its own port.</text>
+<rect x="30" y="120" width="190" height="72" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="125.0" y="152.0" font-size="17" font-weight="700" fill="#a5b4fc" text-anchor="middle">Person</text>
+<text x="125.0" y="175.0" font-size="14" fill="#c7d2fe" text-anchor="middle">in a browser</text>
+<path d="M222 156 L292 156" fill="none" stroke="#a5b4fc" stroke-width="2" marker-end="url(#ah-a)" stroke-linejoin="round"/>
+<rect x="30" y="220" width="190" height="72" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="125.0" y="252.0" font-size="17" font-weight="700" fill="#a5b4fc" text-anchor="middle">Agent</text>
+<text x="125.0" y="275.0" font-size="14" fill="#c7d2fe" text-anchor="middle">key mcp_...</text>
+<path d="M222 256 L292 256" fill="none" stroke="#a5b4fc" stroke-width="2" marker-end="url(#ah-a)" stroke-linejoin="round"/>
+<rect x="30" y="320" width="190" height="72" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="125.0" y="352.0" font-size="17" font-weight="700" fill="#a5b4fc" text-anchor="middle">Sender</text>
+<text x="125.0" y="375.0" font-size="14" fill="#c7d2fe" text-anchor="middle">key api_...</text>
+<path d="M222 356 L292 356" fill="none" stroke="#a5b4fc" stroke-width="2" marker-end="url(#ah-a)" stroke-linejoin="round"/>
+<rect x="30" y="420" width="190" height="72" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="125.0" y="452.0" font-size="17" font-weight="700" fill="#a5b4fc" text-anchor="middle">Phone</text>
+<text x="125.0" y="475.0" font-size="14" fill="#c7d2fe" text-anchor="middle">app Portal Inbox</text>
+<path d="M222 456 L292 456" fill="none" stroke="#a5b4fc" stroke-width="2" marker-end="url(#ah-a)" stroke-linejoin="round"/>
+<rect x="294" y="120" width="128" height="372" rx="12" fill="#0ea5e9" fill-opacity=".26" stroke="#38bdf8" stroke-width="1.6"/>
+<text x="358" y="150" font-size="19" font-weight="700" fill="#e0f2fe" text-anchor="middle">Traefik</text>
+<text x="358" y="182" font-size="13" fill="#bae6fd" text-anchor="middle">terminates TLS</text>
+<text x="358" y="202" font-size="13" fill="#bae6fd" text-anchor="middle"></text>
+<text x="358" y="222" font-size="13" fill="#bae6fd" text-anchor="middle">ForwardAuth</text>
+<text x="358" y="242" font-size="13" fill="#bae6fd" text-anchor="middle">for pages</text>
+<text x="358" y="262" font-size="13" fill="#bae6fd" text-anchor="middle">and key routes</text>
+<text x="358" y="282" font-size="13" fill="#bae6fd" text-anchor="middle"></text>
+<text x="358" y="302" font-size="13" fill="#bae6fd" text-anchor="middle">routes /v1/, /api/v1/,</text>
+<text x="358" y="322" font-size="13" fill="#bae6fd" text-anchor="middle">/mcp with no</text>
+<text x="358" y="342" font-size="13" fill="#bae6fd" text-anchor="middle">ForwardAuth</text>
+<rect x="500" y="112" width="372" height="396" rx="16" fill="#0c0e15" fill-opacity=".55" stroke="#4b52a8" stroke-width="1.6" stroke-dasharray="6 5"/>
+<text x="520" y="138" font-size="18" font-weight="700" fill="#e0e7ff" text-anchor="start">portal</text>
+<text x="600" y="138" font-size="13" fill="#9ca3d4" text-anchor="start">one binary, one configuration file</text>
+<rect x="520" y="154" width="332" height="170" rx="12" fill="#4338ca" fill-opacity=".38" stroke="#818cf8" stroke-width="1.6"/>
+<text x="686.0" y="179.0" font-size="15" font-weight="700" fill="#e0e7ff" text-anchor="middle">:4181  server.listen_address</text>
+<text x="536" y="206" font-size="13.5" fill="#e0e7ff" text-anchor="start">pages, launcher, settings, history</text>
+<text x="536" y="230" font-size="13.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" fill="#e0e7ff" text-anchor="start">/auth/verify and /auth/verify-key</text>
+<text x="536" y="254" font-size="13.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" fill="#e0e7ff" text-anchor="start">Inbox: /api/v1/*, /mcp, /v1/*</text>
+<text x="536" y="278" font-size="13.5" fill="#e0e7ff" text-anchor="start">/healthz, /readyz, /metrics</text>
+<rect x="520" y="340" width="332" height="86" rx="12" fill="#34d399" fill-opacity=".22" stroke="#34d399" stroke-width="1.6"/>
+<text x="686.0" y="365.0" font-size="15" font-weight="700" fill="#d1fae5" text-anchor="middle">:4182  pdp.listen_address</text>
+<text x="536" y="392" font-size="13.5" fill="#d1fae5" text-anchor="start">AuthZEN decisions and the approval API</text>
+<text x="536" y="414" font-size="13.5" fill="#d1fae5" text-anchor="start">for the services only, never through Traefik</text>
+<rect x="520" y="440" width="332" height="52" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="686.0" y="476.0" font-size="13" fill="#c7d2fe" text-anchor="middle">inbox.cluster.listen: other instances (optional)</text>
+<rect x="560" y="548" width="252" height="62" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="686.0" y="575.0" font-size="16" font-weight="700" fill="#a5b4fc" text-anchor="middle">Database</text>
+<text x="686.0" y="597.0" font-size="13" fill="#c7d2fe" text-anchor="middle">SQLite file, or PostgreSQL</text>
+<path d="M686 510 L686 546" fill="none" stroke="#a5b4fc" stroke-width="2" marker-end="url(#ah-a)" stroke-linejoin="round"/>
+<rect x="922" y="120" width="148" height="130" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="996" y="150" font-size="16" font-weight="700" fill="#a5b4fc" text-anchor="middle">Your services</text>
+<text x="996" y="176" font-size="13" fill="#c7d2fe" text-anchor="middle">check the token,</text>
+<text x="996" y="195" font-size="13" fill="#c7d2fe" text-anchor="middle">ask the PDP,</text>
+<text x="996" y="214" font-size="13" fill="#c7d2fe" text-anchor="middle">apply the limits</text>
+<path d="M424 200 L498 200" fill="none" stroke="#a5b4fc" stroke-width="2" marker-end="url(#ah-a)" stroke-linejoin="round"/>
+<rect x="442.6" y="179" width="36.9" height="19" rx="4" fill="#12142a"/>
+<text x="461" y="192" font-size="12" fill="#c7d2fe" text-anchor="middle">gate</text>
+<path d="M358 118 L358 100 L996 100 L996 118" fill="none" stroke="#a5b4fc" stroke-width="2" marker-end="url(#ah-a)" stroke-linejoin="round"/>
+<rect x="597.1" y="92" width="157.8" height="19" rx="4" fill="#12142a"/>
+<text x="676" y="105" font-size="12" fill="#c7d2fe" text-anchor="middle">routes to the services</text>
+<path d="M920 383 L854 383" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#ah-ok)" stroke-linejoin="round"/>
+<rect x="868.6" y="362" width="36.9" height="19" rx="4" fill="#12142a"/>
+<text x="887" y="375" font-size="12" fill="#a7f3d0" text-anchor="middle">asks</text>
+<path d="M996 252 L996 383 L922 383" fill="none" stroke="#34d399" stroke-width="2" stroke-linejoin="round"/>
+<rect x="922" y="430" width="148" height="80" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="996.0" y="457.0" font-size="14" font-weight="700" fill="#a5b4fc" text-anchor="middle">Discovery</text>
+<text x="996.0" y="477.0" font-size="12" fill="#c7d2fe" text-anchor="middle">Docker labels or</text>
+<text x="996.0" y="494.0" font-size="12" fill="#c7d2fe" text-anchor="middle">Kubernetes annotations</text>
+<path d="M874 470 L920 470" fill="none" stroke="#7c83b5" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#ah-m)" stroke-linejoin="round"/>
+<rect x="875.2" y="449" width="43.6" height="19" rx="4" fill="#12142a"/>
+<text x="897" y="462" font-size="12" fill="#a6adc2" text-anchor="middle">reads</text>
+<text x="36" y="626" font-size="13" fill="#7c83b5" text-anchor="start">Ports 4181 and 4182 are the defaults of the sample files. The portal has no TLS code: Traefik terminates TLS.</text>
+</g>
+</svg>

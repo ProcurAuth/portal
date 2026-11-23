@@ -12,7 +12,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Which screen opens an item, and the words that a screen reader says on the screen of a question (DIAL 4.8). */
+/** Which screen opens an item, and the words that a screen reader says on the screen of a question. */
 class QuestionScreensTest {
     private val server = 1L
     private val created = 1_788_000_000_000L

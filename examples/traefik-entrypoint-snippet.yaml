@@ -4,7 +4,7 @@
 # A middleware on an entry point runs on every router of this entry point, also on a key route.
 # A request that has only `Authorization: Bearer mcp_...` has no session, so /auth/verify refuses it
 # before the key route sees it. The priority of a router does not change this. Agents therefore need
-# one of two setups (see "TLS and Traefik" in the README):
+# one of two setups (see docs/traefik.md):
 #   1. A dedicated entry point with no middleware, `websecure-agents` below. Put the key routers
 #      on it, with the middleware portal-key-chain of traefik-dynamic.yaml.
 #   2. No middleware on any entry point. Put portal on each router of a person, and

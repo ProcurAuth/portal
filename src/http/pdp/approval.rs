@@ -1,4 +1,4 @@
-//! The approval gate of the PDP (protocol 17.1, 17.2, 17.8; portal 3.7).
+//! The approval gate of the PDP (protocol 17.1, 17.2, 17.8).
 //!
 //! A grant with `confirm` makes an action need the approval of a person. The question carries the effect of the
 //! operation in `context.approval.effect`. The gate looks at the newest approval for the same service, subject,

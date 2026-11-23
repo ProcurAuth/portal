@@ -19,7 +19,7 @@ import app.portalinbox.portal.PortalHealth
 import app.portalinbox.portal.PortalIdentity
 
 /*
- * The views of the multi-portal home list (lot MP3, proposal 3.2 and 3.11). They draw a portal only from [PortalIdentity]:
+ * The views of the multi-portal home list. They draw a portal only from [PortalIdentity]:
  * the nickname, the color and the monogram are local, never the name that the portal sends. Colors of the portal come from
  * `PortalPalette` through the identity, not from the resources, so the dark and the light value are the ones that were checked
  * for contrast.
@@ -47,7 +47,7 @@ private fun Context.tint(fill: Int, stroke: Int, radiusDp: Float, dashed: Boolea
     if (dashed) setStroke(dp(1), stroke, dpf(3f), dpf(2.5f)) else setStroke(dp(1), stroke)
 }
 
-/** The small "New" mark of a portal added in the last 24 hours (question Q10). */
+/** The small "New" mark of a portal added in the last 24 hours. */
 private fun Context.newMark(p: PortalIdentity, night: Boolean): TextView =
     label(getString(R.string.portal_new), SP_XS, p.onColor(night), BOLD, lines = 1).apply {
         background = rounded(p.color(night), dpf(CHIP_RADIUS))

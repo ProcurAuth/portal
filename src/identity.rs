@@ -8,7 +8,7 @@
 //! 9.3). It contains no permission: the service asks the PDP.
 //!
 //! The server keeps one token for each session or key and each audience, at most 16,384 tokens
-//! for the two edges together (portal 8.4b). It gives the same token again until half of its
+//! for the two edges together. It gives the same token again until half of its
 //! life is gone, so the edge signs only a few times for each subject and service. The edge does
 //! its checks again for each request before it gives a kept token (protocol 9.9).
 //!

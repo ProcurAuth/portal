@@ -56,8 +56,7 @@ import java.time.ZoneId
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * The screen of a question, of a decision of an automatic system, and of a form of 1 to 4 questions (DIAL 4.2, 4.3; mocks 3a to
- * 3c, 6a to 6d, 7c to 7e). It only draws. The decisions are in pure classes: [QuestionState] (which rows and buttons), [FlagsMatrix]
+ * The screen of a question, of a decision of an automatic system, and of a form of 1 to 4 questions. It only draws. The decisions are in pure classes: [QuestionState] (which rows and buttons), [FlagsMatrix]
  * through it (the rows "Other answer" and "Ask the agent"), [AnswerSheet] (the draft, the rules of the server and the `answer` frame),
  * [QuestionHistory] (how a question ended), [BiometricPolicy], [TalkBackLabels].
  *

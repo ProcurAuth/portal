@@ -131,7 +131,7 @@ class TalkBackLabelTest {
 
     @Test
     fun everyRowOfTheSettingsOfAPortalHasATouchTargetOf48dpOrMore() {
-        // The settings screen and its views (lot MP5): rows, switches and the lines of the apply-to-all sheet.
+        // The settings screen and its views: rows, switches and the lines of the apply-to-all sheet.
         val sources = listOf("PortalPrefsActivity.kt", "PortalPrefsViews.kt").map { java.io.File("src/main/java/app/portalinbox/ui/$it").readText() }
         for (src in sources) {
             for (m in Regex("""minimumHeight = dp\((\d+)\)""").findAll(src)) assertTrue(m.value, m.groupValues[1].toInt() >= 48)

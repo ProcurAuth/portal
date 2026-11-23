@@ -1,5 +1,5 @@
-//! The state of a key and of its owner, for the edge and the PDP (portal 8.3, 9.2, 9.3), and the
-//! count of the key checks that passed (portal 5.5a).
+//! The state of a key and of its owner, for the edge and the PDP, and the
+//! count of the key checks that passed.
 //!
 //! A key check reads only memory: the directory, the grants of the owner and the clock. It never
 //! reads or writes a database row. The checks that passed are counted in memory and written by
@@ -18,14 +18,14 @@ use crate::store::KeyCheck;
 use crate::users::{KeyOwner, KeyRecord};
 
 /// Why a key is refused. The edge logs the cause and counts it; the answer to the client never
-/// shows it (portal 8.3, 10.5d).
+/// shows it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Cause {
     /// The request has no `Authorization` header with a key.
     NoKey,
     /// The text has not the form of a key.
     BadFormat,
-    /// The text is a good key of the other kind: this verifier serves one kind only (portal 8.3a).
+    /// The text is a good key of the other kind: this verifier serves one kind only.
     WrongKind,
     /// The directory holds no key with this digest.
     UnknownKey,
@@ -66,7 +66,7 @@ impl Cause {
         Cause::DirectoryTooOld,
     ];
 
-    /// The name of portal 10.5d.
+    /// The name of the cause.
     pub fn as_str(self) -> &'static str {
         match self {
             Cause::NoKey => "no_key",
@@ -89,7 +89,7 @@ impl Cause {
 /// The owner side of the decision for a key.
 #[derive(Clone, Debug)]
 pub enum OwnerSide {
-    /// The superadmin: always `true`, with no limit value and no counter (portal 9.1a).
+    /// The superadmin: always `true`, with no limit value and no counter.
     Superadmin,
     /// A person with the grants that apply to the person.
     Person {
@@ -107,7 +107,7 @@ pub struct Principal {
 
 impl Principal {
     /// The login that the identity token gives in the claim `owner` (protocol 9.3). For the key of
-    /// the superadmin, it is the current login of the superadmin (portal 3.7b).
+    /// the superadmin, it is the current login of the superadmin.
     pub fn owner_login<'a>(&'a self, superadmin: &'a str) -> &'a str {
         match &self.owner {
             OwnerSide::Superadmin => superadmin,
@@ -118,7 +118,7 @@ impl Principal {
 
 /// The grants of a person that apply: the account of the file, or the account of the database
 /// (the grants of the database count only when the mode uses them). `None`: no such person
-/// (portal 3.4a, 3.4b).
+///.
 pub fn person_grants(state: &AppState, login: &str) -> Option<(Vec<Grant>, bool)> {
     if let Some(account) = state.config.access.accounts.get(login) {
         return Some((account.grants.clone(), true));
@@ -132,7 +132,7 @@ pub fn person_grants(state: &AppState, login: &str) -> Option<(Vec<Grant>, bool)
 }
 
 /// The grants of a person on one service, and whether the account comes from the file. The
-/// directory holds the grants by service, so the call copies no grant (portal 10.7d). `None`: no
+/// directory holds the grants by service, so the call copies no grant. `None`: no
 /// such person.
 pub fn person_grants_on(
     state: &AppState,
@@ -161,7 +161,7 @@ pub fn person_exists(state: &AppState, login: &str) -> bool {
         || person_grants_on(state, login, portal_actions::SERVICE).is_some()
 }
 
-/// The directory of the key is too old (portal 10.3): the last good read of the database is older
+/// The directory of the key is too old: the last good read of the database is older
 /// than `keys.directory_max_age`. With SQLite, the one instance holds the directory, so it is
 /// never too old.
 pub fn directory_too_old(state: &AppState) -> bool {
@@ -174,7 +174,7 @@ pub fn directory_too_old(state: &AppState) -> bool {
 /// Finds the owner of a key and checks the state of the key and of the owner at `now` (Unix
 /// seconds): the kind of the key is on, the key is not expired, the owner exists and has
 /// `keys.own.use` on the kind of the key, and the key is not older than the `max_key_lifetime` of
-/// the owner for this kind (portal 8.3, 9.3).
+/// the owner for this kind.
 pub fn resolve(state: &AppState, key: &Arc<KeyRecord>, now: i64) -> Result<Principal, Cause> {
     // The kind of the key must be on (`keys.mcp`, `keys.api`).
     if !state
@@ -193,7 +193,7 @@ pub fn resolve(state: &AppState, key: &Arc<KeyRecord>, now: i64) -> Result<Princ
     }
     let owner = match &key.owner {
         // The superadmin has the right `keys.own.use` and no value of `max_key_lifetime`, so its
-        // key is never too old and can have no expiry date (portal 8.3).
+        // key is never too old and can have no expiry date.
         KeyOwner::Superadmin => OwnerSide::Superadmin,
         KeyOwner::User(login) | KeyOwner::File(login) => {
             // The right to use the keys comes from the grants of the service `portal` only.
@@ -222,7 +222,7 @@ pub fn resolve(state: &AppState, key: &Arc<KeyRecord>, now: i64) -> Result<Princ
     })
 }
 
-/// The count of the key checks by result (portal 10.5): one number for each cause, and one for the
+/// The count of the key checks by result: one number for each cause, and one for the
 /// checks that passed.
 #[derive(Default)]
 pub struct CheckStats {
@@ -267,13 +267,13 @@ impl CheckStats {
     }
 }
 
-/// The most source addresses that the log of the failed checks tracks (portal 10.5c).
+/// The most source addresses that the log of the failed checks tracks.
 pub const MAX_LOGGED_ADDRESSES: usize = 10_000;
 /// The time that an address stays in the table after its line.
 const LOG_GAP: Duration = Duration::from_secs(60);
 
 /// Lets the edge write at most one line each minute for each source address of a failed check
-/// (portal 10.5a). When the table is full, the edge adds no address, and it counts the checks that
+///. When the table is full, the edge adds no address, and it counts the checks that
 /// it does not log.
 #[derive(Default)]
 pub struct FailureLog {
@@ -312,7 +312,7 @@ impl FailureLog {
     }
 }
 
-/// The longest time between two writes of the checks of the keys (portal 5.5a).
+/// The longest time between two writes of the checks of the keys.
 pub const WRITE_EVERY: Duration = Duration::from_secs(15);
 
 /// The checks that passed, since the last write, and for a key of the file, since the start.
@@ -360,7 +360,7 @@ impl KeyChecks {
     }
 
     /// The time of the last check and the number of checks of a key of the file, since the start
-    /// (portal 5.5a).
+    ///.
     pub fn file_key(&self, id: &str) -> Option<(i64, i64)> {
         self.file
             .lock()

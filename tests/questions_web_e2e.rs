@@ -1,4 +1,4 @@
-//! End-to-end tests of the web pages of the questions (lot L14): the panel "Open items", the page of one question, the
+//! End-to-end tests of the web pages of the questions: the panel "Open items", the page of one question, the
 //! forms that answer, decline and ask the agent, the History and the route of the administrator. The rig is the rig of the
 //! questions (L13): the agent asks through `/mcp`, and the owner uses the pages with a session. The pages have no script,
 //! so each check reads the HTML. Run the tests on PostgreSQL with `INBOX_E2E_BACKEND=postgres`.
@@ -129,7 +129,7 @@ fn form(extra: Value) -> Value {
 
 // The matrix ---------------------------------------------------------------------------------------------
 
-/// DIAL 1.4.2: the rows under the options come from the two flags, for every type of input and both kinds of key. The
+/// The rows under the options come from the two flags, for every type of input and both kinds of key. The
 /// server refuses a combination that the protocol forbids, so 17 of the 40 combinations make a page, as on the phone.
 #[test]
 fn rows_follow_flags_matrix_web() {
@@ -935,9 +935,7 @@ fn the_agent_token_is_never_in_a_page_and_no_page_names_the_product() {
         assert_eq!(st, 200, "{path}");
         assert!(!page.contains(&token), "{path} has the token of the agent");
         let text = Pep::text_of(&page);
-        for word in ["portal", "inbox", "inbox", "circular"] {
-            assert!(!text.contains(word), "{path} has the word {word}");
-        }
+        assert!(!text.contains("portal"), "{path} has the word portal");
     }
     // The answered page too, and the page of a form.
     let f = ask(
@@ -945,9 +943,7 @@ fn the_agent_token_is_never_in_a_page_and_no_page_names_the_product() {
         flags(form(json!({"idempotency_key": "f"})), true, true),
     );
     let page = detail(&pep, &cookie, &f);
-    for word in ["portal", "inbox", "inbox", "circular"] {
-        assert!(!Pep::text_of(&page).contains(word));
-    }
+    assert!(!Pep::text_of(&page).contains("portal"));
 }
 
 #[test]

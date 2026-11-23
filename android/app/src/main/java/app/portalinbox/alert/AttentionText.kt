@@ -11,7 +11,7 @@ import app.portalinbox.ui.VisibleText
  * did not hide it for that portal. Neither version holds a command, a body, a title of a request, an agent text or an
  * explanation. A nickname goes through [VisibleText.escapeLine] anyway.
  *
- * The digest of a portal (lot MP5) adds "3 waiting, oldest 6 days" to the line of that portal. When the phone holds no item of a
+ * The digest of a portal adds "3 waiting, oldest 6 days" to the line of that portal. When the phone holds no item of a
  * portal yet, the digest also gives the title: "5 waiting". The digest adds only numbers and an age, so it is the same on the
  * lock screen.
  */

@@ -10,13 +10,13 @@ import app.portalinbox.proto.Urgency
 import app.portalinbox.service.LinkState
 
 /**
- * The one notification of the phone (decision "one notification", lot MP4). Pure Kotlin: no Context.
+ * The one notification of the phone (decision "one notification"). Pure Kotlin: no Context.
  *
  * The phone shows at most ONE notification for everything that waits: approvals, questions, replies of agents, alerts and the
  * warnings of portals that are down. It covers all portals. It has one fixed id and one fixed tag, and it is updated in place.
  * [compute] reads the state of the repositories and gives the [Aggregate]: counts for each portal, the oldest age, the most
  * urgent thing, the alarm and the single approval. The digest of a portal is one more entry and one more part of its line
- * ([DigestPlan], lot MP5): it never makes a second notification and it never makes a sound. [decide] says if the notification must alert again. [plan] says what to post.
+ * ([DigestPlan]): it never makes a second notification and it never makes a sound. [decide] says if the notification must alert again. [plan] says what to post.
  * The texts are in [AttentionText]. [AttentionCenter] runs the three steps. The Android object [AttentionNotifier] only draws.
  */
 object Attention {
@@ -58,7 +58,7 @@ object Attention {
     data class Reply(val serverId: Long, val requestId: String, val urgency: Urgency)
 
     /**
-     * A new agent that waits for the first decision of the owner (lot G4). [keyName] is text of the portal (the name of the key),
+     * A new agent that waits for the first decision of the owner. [keyName] is text of the portal (the name of the key),
      * never text that an agent sent. [notified]: the phone already counted it before the process started.
      */
     data class NewAgent(val serverId: Long, val agentId: String, val keyName: String, val notified: Boolean)

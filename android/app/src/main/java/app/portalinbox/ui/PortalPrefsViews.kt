@@ -12,7 +12,7 @@ import app.portalinbox.portal.PrefsApply
 import app.portalinbox.portal.PortalIdentity
 
 /*
- * Views of the settings of one portal (lot MP5): a row with a switch, and a line of the apply-to-all sheet. They only draw. The
+ * Views of the settings of one portal: a row with a switch, and a line of the apply-to-all sheet. They only draw. The
  * decisions are in [app.portalinbox.ui.PrefsForm] and [PrefsApply].
  */
 

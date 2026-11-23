@@ -69,7 +69,7 @@ pub struct AgentKey {
     pub key_id: String,
     pub owner: String,
     pub interaction: inbox_core::proto::Interaction,
-    /// What the key does with the agents that share it (lot G1b). The engine ignores it without `inbox.agents`.
+    /// What the key does with the agents that share it. The engine ignores it without `inbox.agents`.
     pub agents: super::agents::AgentMode,
 }
 

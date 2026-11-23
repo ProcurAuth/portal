@@ -3,7 +3,7 @@ package app.portalinbox.portal
 import app.portalinbox.data.Item
 
 /**
- * The order of the items of the home list when they come from several portals (proposal 3.2). Pure Kotlin.
+ * The order of the items of the home list when they come from several portals. Pure Kotlin.
  *
  * Each portal has its own clock, and a portal chooses the times that it sends. The raw `created_at_ms` is not a safe sort key:
  * a rogue portal could send 0 and put its items on top. The sort key is the creation time moved to the phone clock and then

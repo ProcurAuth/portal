@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 620" width="1280" height="620" role="img" aria-label="Identity token and PDP flow: agent, Traefik, portal, service and the decision point">
+<title>The identity token and the PDP: one call of an agent</title><desc>An agent calls a service with an mcp key. Traefik asks portal on /auth/verify-key. portal answers 204 with a signed identity token. Traefik sends the request and the token to the service. The service asks the PDP on port 4182 with an AuthZEN question. The PDP answers the decision and the limits. The service applies the limits and answers the agent.</desc>
+<defs><marker id="ah-a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#a5b4fc"/></marker><marker id="ah-ok" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#34d399"/></marker></defs>
+<rect width="1280" height="620" rx="20" fill="#12142a"/>
+<g font-family="Inter, 'Segoe UI', -apple-system, Helvetica, Arial, sans-serif">
+<text x="36" y="46" font-size="25" font-weight="700" fill="#ffffff">One call of an agent: the token, then the question</text>
+<text x="36" y="73" font-size="15" fill="#9ca3d4">The agent never talks to the decision point. The service asks it and applies the answer.</text>
+<rect x="30" y="96" width="160" height="56" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="110.0" y="120.5" font-size="16" font-weight="700" fill="#a5b4fc" text-anchor="middle">Agent</text>
+<text x="110.0" y="142.5" font-size="12" fill="#c7d2fe" text-anchor="middle">key mcp_...</text>
+<line x1="110" y1="154" x2="110" y2="596" stroke="#3b4180" stroke-width="1.5" stroke-dasharray="4 6"/>
+<rect x="280" y="96" width="160" height="56" rx="12" fill="#0ea5e9" fill-opacity=".26" stroke="#38bdf8" stroke-width="1.6"/>
+<text x="360.0" y="120.5" font-size="16" font-weight="700" fill="#e0f2fe" text-anchor="middle">Traefik</text>
+<text x="360.0" y="142.5" font-size="12" fill="#bae6fd" text-anchor="middle">edge</text>
+<line x1="360" y1="154" x2="360" y2="596" stroke="#3b4180" stroke-width="1.5" stroke-dasharray="4 6"/>
+<rect x="530" y="96" width="160" height="56" rx="12" fill="#4338ca" fill-opacity=".38" stroke="#818cf8" stroke-width="1.6"/>
+<text x="610.0" y="120.5" font-size="16" font-weight="700" fill="#e0e7ff" text-anchor="middle">portal</text>
+<text x="610.0" y="142.5" font-size="12" fill="#c7d2fe" text-anchor="middle">:4181</text>
+<line x1="610" y1="154" x2="610" y2="596" stroke="#3b4180" stroke-width="1.5" stroke-dasharray="4 6"/>
+<rect x="780" y="96" width="160" height="56" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="860.0" y="120.5" font-size="16" font-weight="700" fill="#a5b4fc" text-anchor="middle">Your service</text>
+<text x="860.0" y="142.5" font-size="12" fill="#c7d2fe" text-anchor="middle">PEP</text>
+<line x1="860" y1="154" x2="860" y2="596" stroke="#3b4180" stroke-width="1.5" stroke-dasharray="4 6"/>
+<rect x="1050" y="96" width="160" height="56" rx="12" fill="#34d399" fill-opacity=".22" stroke="#34d399" stroke-width="1.6"/>
+<text x="1130.0" y="120.5" font-size="16" font-weight="700" fill="#d1fae5" text-anchor="middle">portal PDP</text>
+<text x="1130.0" y="142.5" font-size="12" fill="#a7f3d0" text-anchor="middle">:4182</text>
+<line x1="1130" y1="154" x2="1130" y2="596" stroke="#3b4180" stroke-width="1.5" stroke-dasharray="4 6"/>
+<path d="M114 206 L354 206" fill="none" stroke="#a5b4fc" stroke-width="2" marker-end="url(#ah-a)" stroke-linejoin="round"/>
+<circle cx="134" cy="206" r="12" fill="#4338ca"/>
+<text x="134" y="210.5" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">1</text>
+<text x="243.0" y="197" font-size="14" font-weight="600" fill="#e0e7ff" text-anchor="middle">Authorization: Bearer mcp_...</text>
+<text x="243.0" y="225" font-size="12.5" fill="#9ca3d4" text-anchor="middle">a call to the service</text>
+<path d="M364 268 L604 268" fill="none" stroke="#a5b4fc" stroke-width="2" marker-end="url(#ah-a)" stroke-linejoin="round"/>
+<circle cx="384" cy="268" r="12" fill="#4338ca"/>
+<text x="384" y="272.5" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">2</text>
+<text x="493.0" y="259" font-size="14" font-weight="600" fill="#e0e7ff" text-anchor="middle">ForwardAuth /auth/verify-key</text>
+<text x="493.0" y="287" font-size="12.5" fill="#9ca3d4" text-anchor="middle">copies the header Authorization</text>
+<path d="M606 330 L366 330" fill="none" stroke="#34d399" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#ah-ok)" stroke-linejoin="round"/>
+<circle cx="586" cy="330" r="12" fill="#047857"/>
+<text x="586" y="334.5" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">3</text>
+<text x="477.0" y="321" font-size="14" font-weight="600" fill="#e0e7ff" text-anchor="middle">204 + X-Identity-Token</text>
+<text x="477.0" y="349" font-size="12.5" fill="#9ca3d4" text-anchor="middle">JWT, Ed25519, sub = key:ID</text>
+<path d="M364 392 L854 392" fill="none" stroke="#a5b4fc" stroke-width="2" marker-end="url(#ah-a)" stroke-linejoin="round"/>
+<circle cx="384" cy="392" r="12" fill="#4338ca"/>
+<text x="384" y="396.5" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">4</text>
+<text x="618.0" y="383" font-size="14" font-weight="600" fill="#e0e7ff" text-anchor="middle">request + identity token</text>
+<text x="618.0" y="411" font-size="12.5" fill="#9ca3d4" text-anchor="middle">the key is removed (drop-authorization)</text>
+<path d="M864 454 L1124 454" fill="none" stroke="#a5b4fc" stroke-width="2" marker-end="url(#ah-a)" stroke-linejoin="round"/>
+<circle cx="884" cy="454" r="12" fill="#4338ca"/>
+<text x="884" y="458.5" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">5</text>
+<text x="1003.0" y="445" font-size="14" font-weight="600" fill="#e0e7ff" text-anchor="middle">POST /access/v1/evaluation</text>
+<text x="1003.0" y="473" font-size="12.5" fill="#9ca3d4" text-anchor="middle">action, resource, usage</text>
+<path d="M1126 516 L866 516" fill="none" stroke="#34d399" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#ah-ok)" stroke-linejoin="round"/>
+<circle cx="1106" cy="516" r="12" fill="#047857"/>
+<text x="1106" y="520.5" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">6</text>
+<text x="987.0" y="507" font-size="14" font-weight="600" fill="#e0e7ff" text-anchor="middle">decision + limits</text>
+<text x="987.0" y="535" font-size="12.5" fill="#9ca3d4" text-anchor="middle">or budget_exceeded, retry_after</text>
+<path d="M856 578 L116 578" fill="none" stroke="#34d399" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#ah-ok)" stroke-linejoin="round"/>
+<circle cx="836" cy="578" r="12" fill="#047857"/>
+<text x="836" y="582.5" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">7</text>
+<text x="477.0" y="569" font-size="14" font-weight="600" fill="#e0e7ff" text-anchor="middle">the answer, cut to the limits</text>
+<text x="477.0" y="597" font-size="12.5" fill="#9ca3d4" text-anchor="middle">a ceiling such as max_rows applies to the result</text>
+</g>
+</svg>

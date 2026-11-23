@@ -3,9 +3,9 @@ package app.portalinbox.portal
 import app.portalinbox.data.OpenCount
 
 /**
- * The filter of the home list (proposal 3.2): all portals, or one portal. Pure Kotlin.
+ * The filter of the home list: all portals, or one portal. Pure Kotlin.
  *
- * The filter is never stored. A new start of the app shows All (question Q9): a stored filter could hide the request of
+ * The filter is never stored. A new start of the app shows All: a stored filter could hide the request of
  * another portal for days.
  */
 sealed interface HomeFilter {
@@ -43,7 +43,7 @@ sealed interface HomeFilter {
 }
 
 /**
- * The numbers on the filter chips: unread alerts plus open items, for each portal and for All (proposal 3.2). Only the
+ * The numbers on the filter chips: unread alerts plus open items, for each portal and for All. Only the
  * portals that exist count: a row of a removed portal is not shown, so it is not counted.
  */
 data class HomeCounts(val perPortal: Map<Long, Int>, val all: Int) {

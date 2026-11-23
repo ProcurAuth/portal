@@ -3,7 +3,7 @@
 # Check it with:  docker compose run --rm --no-deps portal check-config --config /etc/portal/config.hcl
 #
 # Every secret comes from a file under /run/secrets. `deploy/compose/init-secrets.sh` makes these files.
-# The keys that this file does not set have documented defaults: see the configuration reference in README.md.
+# The keys that this file does not set have documented defaults: see the configuration reference in docs/configuration.md.
 
 server {
   listen_address  = "0.0.0.0:4181"

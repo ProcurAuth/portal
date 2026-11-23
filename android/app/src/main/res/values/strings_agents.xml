@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Agents on the phone (lot G4). ASCII only. The words "Not verified" mark each text that a client or an agent sent. The sentences that
+    <!-- Agents on the phone. ASCII only. The words "Not verified" mark each text that a client or an agent sent. The sentences that
          depend on data are in the pure classes of the package ui, so that a JVM test reads them. -->
 
     <!-- The card of a new agent, above the list "To answer" -->

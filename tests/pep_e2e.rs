@@ -1,4 +1,4 @@
-//! End-to-end check of the portal against the REAL reference PEP of the ProcurAuth repository (lot L7b).
+//! End-to-end check of the portal against the REAL reference PEP of the ProcurAuth repository.
 //!
 //! This test does not start anything. `tools/dev/pep-e2e.sh` builds the stack (the portal, the reference service, a tap
 //! on the link between them) and runs this test against it, with `PEP_E2E=1`. Without the variable the test does nothing.
@@ -31,7 +31,7 @@ const EXPLANATION: &str = "CANARY-EXPLANATION-7b1f4d2a";
 const HINT: &str = "CANARY-HINT-7b1f4d2a";
 const COMMENT: &str = "CANARY-COMMENT-7b1f4d2a use the staging table";
 const THREAD: &str = "CANARY-THREAD-7b1f4d2a";
-/// What the first agent and the second agent say about themselves, and the client that they show (lot G5). The agents give
+/// What the first agent and the second agent say about themselves, and the client that they show. The agents give
 /// them to the portal only. The service must never see them, nor the token, nor the id of an agent.
 const LABEL: &str = "CANARY-LABEL-7b1f4d2a";
 const LABEL2: &str = "CANARY-LABEL2-7b1f4d2a";
@@ -205,7 +205,7 @@ fn make_owner_and_key(s: &Server) -> (String, String, Arc<AdminSession>) {
 
 // ------------------------------------------------------------------------------------------------ the agent
 
-/// One agent: the key, and the token that the portal gave it (lot G5). The first call of the agent to the portal has no
+/// One agent: the key, and the token that the portal gave it. The first call of the agent to the portal has no
 /// token. The portal makes the agent and gives its token in the result of `approval_intent`. The agent keeps it and sends
 /// it in the header `Agent-Token` to the portal, never to the service. A clone shares the token: it is the same agent.
 #[derive(Clone)]
@@ -460,7 +460,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 }
 
 /// One decision of the PDP as the service reads it: `decision`, and a context of the members of protocol 6 and 17 only. A
-/// reason of a refusal is one of the four reasons of the approval (CONF 3.1a, case D90).
+/// reason of a refusal is one of the four reasons of the approval (case D90).
 fn check_decision(decision: &Value, line: &Value) {
     let keys: Vec<&str> = decision
         .as_object()
@@ -637,7 +637,7 @@ async fn pep_end_to_end() {
     pass("S0 U127 the static file asks `access` on the service with no usage and no effect, the PDP answers true with no reason, and /health asks nothing");
 
     // ---------------------------------------------------------------------------------------- S1
-    step("S1 (CONF 3.4): approve on the phone, execute one time, the second call asks again");
+    step("S1: approve on the phone, execute one time, the second call asks again");
     let r1 = agent.intent(json!({"lease_s": 120, "explanation": EXPLANATION, "hint": {"suggested": HINT, "source": "e2e"}}));
     let first = agent.append(101, json!({"approval_ref": r1}));
     let (id1, code1) = awaiting(&first);
@@ -696,7 +696,7 @@ async fn pep_end_to_end() {
     assert_eq!(seen.value["status"], "pending", "{}", seen.value);
     pass("S1 U101 a call while pending gives the same request; the verdict is pending");
 
-    // SA (lot G5): a second agent of the same key asks for the same effect while the request is open. The portal made it a
+    // SA: a second agent of the same key asks for the same effect while the request is open. The portal made it a
     // second agent (its own token). The PEP gives it the request of the first agent (same effect, same id, same code). The
     // portal records `also_requested`, the item keeps its first agent, and the service learns nothing of the two agents.
     step("SA: a second agent asks for the same effect: the same request, and the service sees no agent");
@@ -949,7 +949,7 @@ async fn pep_end_to_end() {
         agent.portal("cancel", json!({"request_id": id9})).value["status"],
         "cancelled"
     );
-    pass("S3 inside the revive window a read of the agent revives the request (CONF 3.6)");
+    pass("S3 inside the revive window a read of the agent revives the request");
 
     // ---------------------------------------------------------------------------------------- S4
     step("S4: a thread at the portal (say) never reaches the service");
@@ -1062,7 +1062,7 @@ async fn pep_end_to_end() {
     pass("S5c lease_s out of range is refused (invalid_argument, nothing ran); `until` makes a request in the mode until");
 
     // ---------------------------------------------------------------------------------------- S6
-    step("S6 (CONF 9.2 PEP observation): what the service received is the verdict, the request id and the code");
+    step("S6 (PEP observation): what the service received is the verdict, the request id and the code");
     let tap = stack.tap();
     assert!(
         tap.len() >= 10,
@@ -1085,7 +1085,7 @@ async fn pep_end_to_end() {
         &phone.device_id,
         "pixel",
         "agent-laptop",
-        // The agents (lot G5): the tokens, what they said, their client, their ids, and the words of the channel.
+        // The agents: the tokens, what they said, their client, their ids, and the words of the channel.
         &t1[4..],
         &t2[4..],
         "agt_",

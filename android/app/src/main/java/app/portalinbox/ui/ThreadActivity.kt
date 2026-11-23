@@ -36,7 +36,7 @@ import java.time.ZoneId
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * The discussion with an agent (CONF 3.5, DIAL 4.4). It only draws. The decisions are in [ThreadState] (the thread, the field,
+ * The discussion with an agent. It only draws. The decisions are in [ThreadState] (the thread, the field,
  * the end states), [ReplyOutbox] (the message of the owner) and [TalkBackLabels] (the words of a screen reader).
  *
  * The turns of the agent are texts of a third party: a dashed edge, the label "Not checked", Markdown with the colors of the

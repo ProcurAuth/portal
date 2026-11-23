@@ -5,7 +5,7 @@ import app.portalinbox.data.Server
 /**
  * How the phone shows one portal. This is the only thing that a screen, a notification or the approval prompt reads to
  * draw a portal: the nickname, the color, the monogram and the fingerprint. A screen never reads `Server.reportedName`
- * for that: the portal chooses that text, and the portal is not trusted with its own identity (proposal 2, rule 1).
+ * for that: the portal chooses that text, and the portal is not trusted with its own identity.
  *
  * All five values are local. The user chooses the nickname and the color when adding the portal. The fingerprint comes
  * from the pinned key, not from the wire.
@@ -38,7 +38,7 @@ data class PortalIdentity(
         /** The banner of the approval screen shows this number of groups. The footer shows all of them. */
         const val BANNER_GROUPS = 2
 
-        /** A portal is "New" for this long after it was added (proposal 3.1, question Q10). */
+        /** A portal is "New" for this long after it was added. */
         const val NEW_WINDOW_MS = 24L * 60 * 60 * 1000
 
         fun of(server: Server): PortalIdentity = PortalIdentity(

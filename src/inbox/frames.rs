@@ -24,7 +24,7 @@
 //!   the answer to a form: `[{question_id, choice?: [id], text?}]`. A text that is not such an object reads as the
 //!   text of the owner, with no intent.
 
-// The agent channel (lot L9) writes the sealed turns with the types of this module.
+// The agent channel writes the sealed turns with the types of this module.
 #![allow(dead_code)]
 
 use inbox_core::effect::{Op, View};
@@ -261,7 +261,7 @@ pub struct AgentFacts<'a> {
 }
 
 /// The hint "looks like" for a `new` agent: a known agent of the same key that says the same text, or that has the same
-/// client and the same address range (lot G5). The label is portal text, as for `label`. The hint is help for the owner:
+/// client and the same address range. The label is portal text, as for `label`. The hint is help for the owner:
 /// the portal never merges by itself, and a hint can be copied. `others` are the agents of the owner with their hints.
 pub fn similar_of<'a>(
     agent: &AgentRow,

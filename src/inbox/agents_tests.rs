@@ -1,4 +1,4 @@
-//! Tests of the agents on SQLite and on PostgreSQL, with a clock that the test moves by hand (lot G1a).
+//! Tests of the agents on SQLite and on PostgreSQL, with a clock that the test moves by hand.
 //!
 //! Each test runs on SQLite and, when `INBOX_TEST_PG` names a server, on PostgreSQL too. The rig is the one of
 //! `items_tests.rs`. The tests cover the resolution, the limits and the flood bucket, the binding of a call to an
@@ -1473,7 +1473,7 @@ async fn base_database_without_agents_table_stops_the_start() {
         env.sql(drop).await;
         let error = start_checks(&env.store, &env.content).await.unwrap_err();
         assert!(
-            error.contains("table agents") && error.contains("README, Upgrades"),
+            error.contains("table agents") && error.contains("docs/operations.md, Upgrades"),
             "{}: {error}",
             env.name
         );
@@ -1582,7 +1582,7 @@ async fn the_items_of_one_agent_can_be_listed() {
     }
 }
 
-// ---------------------------------------------------------------- the mode `enrolled` (lot G6)
+// ---------------------------------------------------------------- the mode `enrolled`
 
 fn enrolled(token: Option<&str>) -> AgentCall {
     AgentCall {

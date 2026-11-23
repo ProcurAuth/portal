@@ -1,6 +1,6 @@
 package app.portalinbox.portal
 
-/** The moves of the drag handles of the portal list (proposal 3.4). Pure Kotlin. The result goes to `Store.reorder`. */
+/** The moves of the drag handles of the portal list. Pure Kotlin. The result goes to `Store.reorder`. */
 object PortalReorder {
     /** [order] with [id] moved to [toIndex] (clamped to the list). An id that is not in the list gives the same list. */
     fun move(order: List<Long>, id: Long, toIndex: Int): List<Long> {

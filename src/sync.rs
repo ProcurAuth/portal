@@ -1,12 +1,12 @@
 //! What keeps the instances of the portal in step, and what runs on a timer.
 //!
 //! The instances share only the database. Each instance reads the directory of the users and the
-//! keys again every few seconds (portal 10.7): when the version changed, a change made on another
+//! keys again every few seconds: when the version changed, a change made on another
 //! instance shows up. Each instance also sweeps the sessions that ran out. With a SQLite file, one
 //! process owns the file, so no round reads the directory.
 //!
-//! On both stores, the thread writes the checks of the keys that passed (portal 5.5a), and it
-//! deletes the keys that expired long ago and the summary rows that are too old (portal 5.4).
+//! On both stores, the thread writes the checks of the keys that passed, and it
+//! deletes the keys that expired long ago and the summary rows that are too old.
 
 use std::sync::Arc;
 use std::thread;
@@ -24,7 +24,7 @@ const CLEANUP_EVERY_ROUNDS: u32 = 12;
 const KEY_CHECKS_EVERY_ROUNDS: u32 = 3;
 /// The old keys and summary rows are deleted once in every PRUNE_EVERY_ROUNDS rounds: 5 minutes.
 const PRUNE_EVERY_ROUNDS: u32 = 60;
-/// The portal keeps an expired key for 30 days (portal 5.4).
+/// The portal keeps an expired key for 30 days.
 const EXPIRED_KEY_DAYS: i64 = 30;
 
 /// Starts the thread.
@@ -58,9 +58,9 @@ pub fn run_round(state: &AppState, round: u32) {
     }
 }
 
-/// One round of the directory (portal 10.7): the instance reads the version, and it reads the
+/// One round of the directory: the instance reads the version, and it reads the
 /// directory again when the version changed. A new directory clears the refusal memo and makes the
-/// counter rows that it needs (portal 7.2a, 7.6).
+/// counter rows that it needs.
 pub fn directory_round(state: &AppState) {
     match state.users.refresh(&state.store) {
         Ok(true) => after_new_directory(state),
@@ -98,7 +98,7 @@ fn write_key_checks(state: &AppState) {
 }
 
 /// Deletes the keys that expired more than 30 days ago and the summary rows older than
-/// `keys.history_days` (portal 5.4).
+/// `keys.history_days`.
 fn prune_keys(state: &AppState) {
     let now = unix_now();
     let day = 86_400;

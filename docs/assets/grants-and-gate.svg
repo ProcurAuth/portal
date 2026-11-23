@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 520" width="1100" height="520" role="img" aria-label="Grants model: a grant on a host covers the databases below it, and nothing else">
+<title>The grants model of portal: resource tree and coverage</title><desc>A grant is an action on a node of the resource tree of a service. A grant covers its node and every node below it. It never covers the parent, a node of another branch or the whole service. A grant can ask for the approval of a person before each use by a key.</desc>
+<defs><marker id="ah-m" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#7c83b5"/></marker></defs>
+<rect width="1100" height="520" rx="20" fill="#12142a"/>
+<g font-family="Inter, 'Segoe UI', -apple-system, Helvetica, Arial, sans-serif">
+<text x="36" y="46" font-size="25" font-weight="700" fill="#ffffff">A grant covers its node and everything below it</text>
+<text x="36" y="73" font-size="15" fill="#9ca3d4">The resources of a service form a tree. The service publishes the tree. portal compares the path segment by segment.</text>
+<rect x="190" y="104" width="250" height="42" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="315.0" y="135.0" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" fill="#c7d2fe" text-anchor="middle">service:clickhouse-dash</text>
+<rect x="90" y="190" width="190" height="42" rx="12" fill="#34d399" fill-opacity=".22" stroke="#34d399" stroke-width="1.6"/>
+<text x="185.0" y="221.0" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" fill="#a7f3d0" text-anchor="middle">host:local</text>
+<rect x="360" y="190" width="190" height="42" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="455.0" y="221.0" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" fill="#c7d2fe" text-anchor="middle">host:prod</text>
+<rect x="24" y="286" width="168" height="42" rx="12" fill="#34d399" fill-opacity=".22" stroke="#34d399" stroke-width="1.6"/>
+<text x="108.0" y="317.0" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" fill="#a7f3d0" text-anchor="middle">database:analytics</text>
+<rect x="210" y="286" width="130" height="42" rx="12" fill="#34d399" fill-opacity=".22" stroke="#34d399" stroke-width="1.6"/>
+<text x="275.0" y="317.0" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" fill="#a7f3d0" text-anchor="middle">database:logs</text>
+<rect x="380" y="286" width="164" height="42" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="462.0" y="317.0" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" fill="#c7d2fe" text-anchor="middle">database:billing</text>
+<path d="M315 148 L185 188" fill="none" stroke="#7c83b5" stroke-width="1.5" stroke-linejoin="round"/>
+<path d="M315 148 L455 188" fill="none" stroke="#7c83b5" stroke-width="1.5" stroke-linejoin="round"/>
+<path d="M185 234 L108 284" fill="none" stroke="#7c83b5" stroke-width="1.5" stroke-linejoin="round"/>
+<path d="M185 234 L275 284" fill="none" stroke="#7c83b5" stroke-width="1.5" stroke-linejoin="round"/>
+<path d="M455 234 L462 284" fill="none" stroke="#7c83b5" stroke-width="1.5" stroke-linejoin="round"/>
+<text x="36" y="376" font-size="13" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" fill="#a7f3d0" text-anchor="start">query.run.read on service:clickhouse-dash/host:local</text>
+<text x="36" y="398" font-size="13" fill="#c7d2fe" text-anchor="start">covers host:local, database:analytics and database:logs.</text>
+<text x="36" y="418" font-size="13" fill="#c7d2fe" text-anchor="start">It does not cover the service, host:prod or database:billing.</text>
+<text x="36" y="450" font-size="13" fill="#9ca3d4" text-anchor="start">A user with no grant sees no service. The superadmin has all grants.</text>
+<text x="36" y="470" font-size="13" fill="#9ca3d4" text-anchor="start">The action access opens the whole service and has no node below it.</text>
+<rect x="36" y="488" width="14" height="14" rx="3" fill="#34d399" fill-opacity=".22" stroke="#34d399"/>
+<text x="58" y="500" font-size="12.5" fill="#9ca3d4" text-anchor="start">covered by the grant</text>
+<rect x="206" y="488" width="14" height="14" rx="3" fill="#1c1f3d" stroke="#2c3070"/>
+<text x="228" y="500" font-size="12.5" fill="#9ca3d4" text-anchor="start">not covered</text>
+<rect x="620" y="100" width="450" height="118" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="636" y="125.0" font-size="15" font-weight="700" fill="#a5b4fc" text-anchor="start">Where grants come from  (access.grants_mode)</text>
+<text x="638" y="150" font-size="13.5" fill="#c7d2fe" text-anchor="start">dynamic: the settings pages (default)</text>
+<text x="638" y="172" font-size="13.5" fill="#c7d2fe" text-anchor="start">static: user blocks of the configuration file</text>
+<text x="638" y="194" font-size="13.5" fill="#c7d2fe" text-anchor="start">hybrid: both; the file part is read-only in the pages</text>
+<rect x="620" y="236" width="450" height="118" rx="12" fill="#fbbf24" fill-opacity=".20" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="636" y="261.0" font-size="15" font-weight="700" fill="#fef3c7" text-anchor="start">Approval of an action  (confirm)</text>
+<text x="638" y="286" font-size="13.5" fill="#fef3c7" text-anchor="start">A grant with confirm asks a person before each</text>
+<text x="638" y="306" font-size="13.5" fill="#fef3c7" text-anchor="start">use by a key of the account. A person never asks</text>
+<text x="638" y="326" font-size="13.5" fill="#fef3c7" text-anchor="start">for their own use. Needs the block inbox.approvals.</text>
+<rect x="620" y="372" width="450" height="118" rx="12" fill="#4338ca" fill-opacity=".38" stroke="#818cf8" stroke-width="1.6"/>
+<text x="636" y="397.0" font-size="15" font-weight="700" fill="#e0e7ff" text-anchor="start">Who decides</text>
+<text x="638" y="422" font-size="13.5" fill="#e0e7ff" text-anchor="start">The gate decides access, from memory.</text>
+<text x="638" y="442" font-size="13.5" fill="#e0e7ff" text-anchor="start">The service decides every other action: it asks</text>
+<text x="638" y="462" font-size="13.5" fill="#e0e7ff" text-anchor="start">the PDP, which applies the same grants.</text>
+</g>
+</svg>

@@ -6,7 +6,7 @@ import java.time.Instant
 import java.time.ZoneId
 
 /**
- * The quiet hours of the account (DIAL 3). Pure Kotlin.
+ * The quiet hours of the account. Pure Kotlin.
  *
  * The server never holds an item back: it sets `quiet` on a request that came inside the window. The phone also checks the
  * window with its own clock, so a notification that the phone shows later (a reconnection after the window began, a

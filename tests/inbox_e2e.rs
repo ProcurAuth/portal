@@ -3572,7 +3572,7 @@ async fn an_api_key_sends_alerts_with_the_permissions_and_the_limit_of_its_owner
     s.stop();
 }
 
-/// The checksum characters of a key text: the CRC-32 of zlib in base62, as portal 5.1 says.
+/// The checksum characters of a key text: the CRC-32 of zlib in base62, as the key format says.
 fn crc_text(covered: &str) -> String {
     const ALPHABET: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     let mut crc = 0xFFFF_FFFFu32;

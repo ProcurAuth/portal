@@ -1,7 +1,7 @@
-//! The measures of the keys, the counters and the directory (portal 10.5).
+//! The measures of the keys, the counters and the directory.
 //!
 //! No label names a user or a key. The labels `service` and `budget` are not used: a measure has
-//! the same series at any number of services (portal 10.5b).
+//! the same series at any number of services.
 
 use std::sync::atomic::Ordering;
 
@@ -10,7 +10,7 @@ use crate::http::AppState;
 use crate::users::KeyOwner;
 
 /// The number of values of limits that the current documents of the services do not declare
-/// (portal 7.8): a value on a grant of the database or of the file, for a limit that the document
+///: a value on a grant of the database or of the file, for a limit that the document
 /// of its service does not declare. A service with no known document counts no value.
 pub fn undeclared_values(state: &AppState) -> u64 {
     let count = |grants: &[Grant]| -> u64 {
@@ -40,14 +40,14 @@ pub fn undeclared_values(state: &AppState) -> u64 {
     total
 }
 
-/// Reads the number again and keeps it for the measure (portal 7.8). The call is for a new
+/// Reads the number again and keeps it for the measure. The call is for a new
 /// directory and a new action document, not for each scrape.
 pub fn refresh_undeclared(state: &AppState) {
     let total = undeclared_values(state);
     state.undeclared_values.store(total, Ordering::Relaxed);
 }
 
-/// The active keys: not expired and not too old (portal 5.5b).
+/// The active keys: not expired and not too old.
 fn active_keys(state: &AppState, now: i64) -> usize {
     state
         .users

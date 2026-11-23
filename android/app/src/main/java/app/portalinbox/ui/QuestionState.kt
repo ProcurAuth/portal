@@ -14,7 +14,7 @@ import app.portalinbox.proto.Interaction
 import app.portalinbox.proto.RequestKind
 
 /**
- * What the screen of a question shows and lets the owner do (DIAL 1.4.2, 1.6, 4.2, 4.3, 4.8). Pure Kotlin: the Activity gives
+ * What the screen of a question shows and lets the owner do. Pure Kotlin: the Activity gives
  * the facts and draws the answer.
  *
  * Rules:

@@ -70,7 +70,7 @@
             android:name=".ui.ApprovalActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
-        <!-- The screen of a question or a decision (lot A4). Only the app opens it. -->
+        <!-- The screen of a question or a decision. Only the app opens it. -->
         <activity
             android:name=".ui.QuestionActivity"
             android:exported="false"

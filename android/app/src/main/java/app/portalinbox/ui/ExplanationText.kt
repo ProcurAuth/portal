@@ -3,7 +3,7 @@ package app.portalinbox.ui
 import app.portalinbox.proto.ExplanationFormat
 
 /**
- * What the zone "Agent explanation" shows (CONF 4.9). Pure Kotlin.
+ * What the zone "Agent explanation" shows. Pure Kotlin.
  *
  * The explanation is the text of a third party. It never changes what will run, and the screen says so with
  * a fixed sentence. A missing or empty explanation shows "No explanation given".

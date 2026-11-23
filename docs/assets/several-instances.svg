@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 480" width="1100" height="480" role="img" aria-label="Several instances: a proxy, N portal instances, one PostgreSQL database and the cluster listener">
+<title>Several instances of portal share one PostgreSQL database</title><desc>A proxy sends requests to any of N portal instances. Every instance reads and writes the same PostgreSQL database: sessions, accounts, keys, counters, history and the Inbox. Each instance keeps its own rate limits and a copy of what it checked for 5 seconds. The cluster listener copies accepted alerts between the instances while the database has no writable primary.</desc>
+<defs><marker id="ah-a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#a5b4fc"/></marker><marker id="ah-warn" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#fbbf24"/></marker></defs>
+<rect width="1100" height="480" rx="20" fill="#12142a"/>
+<g font-family="Inter, 'Segoe UI', -apple-system, Helvetica, Arial, sans-serif">
+<text x="36" y="46" font-size="25" font-weight="700" fill="#ffffff">Any number of instances, one database</text>
+<text x="36" y="73" font-size="15" fill="#9ca3d4">The instances are equal. A proxy sends each request to any of them.</text>
+<rect x="30" y="150" width="150" height="100" rx="12" fill="#0ea5e9" fill-opacity=".26" stroke="#38bdf8" stroke-width="1.6"/>
+<text x="105.0" y="197.0" font-size="18" font-weight="700" fill="#e0f2fe" text-anchor="middle">Traefik</text>
+<text x="105.0" y="221.0" font-size="13" fill="#bae6fd" text-anchor="middle">any instance</text>
+<path d="M105 148V118H830" fill="none" stroke="#a5b4fc" stroke-width="2"/>
+<path d="M180 200 L248 200" fill="none" stroke="#a5b4fc" stroke-width="2" marker-end="url(#ah-a)" stroke-linejoin="round"/>
+<rect x="250" y="150" width="200" height="130" rx="12" fill="#4338ca" fill-opacity=".38" stroke="#818cf8" stroke-width="1.6"/>
+<text x="350.0" y="193.5" font-size="17" font-weight="700" fill="#e0e7ff" text-anchor="middle">portal A</text>
+<text x="350.0" y="216.5" font-size="13" fill="#c7d2fe" text-anchor="middle">:4181  pages and gate</text>
+<text x="350.0" y="234.5" font-size="13" fill="#c7d2fe" text-anchor="middle">:4182  PDP</text>
+<text x="350.0" y="252.5" font-size="13" fill="#c7d2fe" text-anchor="middle">own rate limits</text>
+<path d="M350 282 L350 352" fill="none" stroke="#a5b4fc" stroke-width="2" marker-end="url(#ah-a)" stroke-linejoin="round"/>
+<rect x="490" y="150" width="200" height="130" rx="12" fill="#4338ca" fill-opacity=".38" stroke="#818cf8" stroke-width="1.6"/>
+<text x="590.0" y="193.5" font-size="17" font-weight="700" fill="#e0e7ff" text-anchor="middle">portal B</text>
+<text x="590.0" y="216.5" font-size="13" fill="#c7d2fe" text-anchor="middle">:4181  pages and gate</text>
+<text x="590.0" y="234.5" font-size="13" fill="#c7d2fe" text-anchor="middle">:4182  PDP</text>
+<text x="590.0" y="252.5" font-size="13" fill="#c7d2fe" text-anchor="middle">own rate limits</text>
+<path d="M590 118 L590 148" fill="none" stroke="#a5b4fc" stroke-width="2" marker-end="url(#ah-a)" stroke-linejoin="round"/>
+<path d="M590 282 L590 352" fill="none" stroke="#a5b4fc" stroke-width="2" marker-end="url(#ah-a)" stroke-linejoin="round"/>
+<rect x="730" y="150" width="200" height="130" rx="12" fill="#4338ca" fill-opacity=".38" stroke="#818cf8" stroke-width="1.6"/>
+<text x="830.0" y="193.5" font-size="17" font-weight="700" fill="#e0e7ff" text-anchor="middle">portal C</text>
+<text x="830.0" y="216.5" font-size="13" fill="#c7d2fe" text-anchor="middle">:4181  pages and gate</text>
+<text x="830.0" y="234.5" font-size="13" fill="#c7d2fe" text-anchor="middle">:4182  PDP</text>
+<text x="830.0" y="252.5" font-size="13" fill="#c7d2fe" text-anchor="middle">own rate limits</text>
+<path d="M830 118 L830 148" fill="none" stroke="#a5b4fc" stroke-width="2" marker-end="url(#ah-a)" stroke-linejoin="round"/>
+<path d="M830 282 L830 352" fill="none" stroke="#a5b4fc" stroke-width="2" marker-end="url(#ah-a)" stroke-linejoin="round"/>
+<path d="M452 215 L488 215" fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="6 5" stroke-linejoin="round"/>
+<path d="M488 215 L452 215" fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#ah-warn)" stroke-linejoin="round"/>
+<path d="M452 215 L488 215" fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#ah-warn)" stroke-linejoin="round"/>
+<path d="M692 215 L728 215" fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="6 5" stroke-linejoin="round"/>
+<path d="M728 215 L692 215" fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#ah-warn)" stroke-linejoin="round"/>
+<path d="M692 215 L728 215" fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#ah-warn)" stroke-linejoin="round"/>
+<rect x="250" y="354" width="680" height="92" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="590.0" y="382.0" font-size="18" font-weight="700" fill="#a5b4fc" text-anchor="middle">PostgreSQL</text>
+<text x="590" y="406" font-size="13.5" fill="#c7d2fe" text-anchor="middle">sessions, accounts, keys, budget counters, history,</text>
+<text x="590" y="425" font-size="13.5" fill="#c7d2fe" text-anchor="middle">the Inbox (alerts, items, approvals)</text>
+<rect x="950" y="150" width="120" height="130" rx="12" fill="#1c1f3d" stroke="#2c3070" stroke-width="1.6"/>
+<text x="1010" y="180" font-size="14" font-weight="700" fill="#a5b4fc" text-anchor="middle">Local to</text>
+<text x="1010" y="198" font-size="14" font-weight="700" fill="#a5b4fc" text-anchor="middle">an instance</text>
+<text x="1010" y="226" font-size="12" fill="#c7d2fe" text-anchor="middle">rate limits</text>
+<text x="1010" y="243" font-size="12" fill="#c7d2fe" text-anchor="middle">5 s copy of a</text>
+<text x="1010" y="260" font-size="12" fill="#c7d2fe" text-anchor="middle">session or account</text>
+<path d="M36 462h26" stroke="#fbbf24" stroke-width="2" stroke-dasharray="6 5"/>
+<text x="72" y="466" font-size="12.5" fill="#fde68a" text-anchor="start">cluster listener: the instances copy accepted alerts to each other while the database has no writable primary</text>
+</g>
+</svg>

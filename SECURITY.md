@@ -1,396 +1,80 @@
-# Security model
-
-`portal` is a ForwardAuth barrier, the launcher page of the lab, and the AuthZEN PDP of the deployment (section 11 of the MCP server contract). It has one superadmin, defined by the environment, and users with grants. It intentionally does not implement groups, OAuth/OIDC, or password reset. Accounts and connection history are stored in one SQLite file. When several instances run, they use a shared PostgreSQL database instead (the `postgres` block).
-
-A grant is an action on a service, or on a node of the resource tree of a service. The grants come from the settings pages, from `user` blocks of the configuration, or from both (`access.grants_mode`). `/auth/verify` decides the action `access` with the grants in memory. The services decide their other actions. They ask the PDP. See "Grants and the gate" in the README.
-
-## Core invariants
-
-- The project code must not contain `unsafe` Rust.
-- Hyper does the HTTP/1 parsing.
-- The server limits the request headers, the connection count, the body size, and the read times.
-- The startup fails if the HCL configuration is unknown or invalid.
-- The server reads the superadmin password from an environment variable or from a file. The read is bounded.
-- The server hashes the superadmin password once with Argon2id. Then the server zeroizes the password.
-- The server stores user passwords only as Argon2id hashes.
-- Each login attempt costs exactly one Argon2 check. This applies to every login name.
-- A dummy hash replaces an unknown login name.
-- A failed login returns the same message.
-- A new user has no grant and opens no service. Access comes from a grant only. The superadmin has all grants.
-- A path that no service owns is open to each signed-in user only when the catalogue is complete. The catalogue is complete when each configured discovery source answered at least once. Until then, only the superadmin passes the gate.
-- A workload with unusable labels keeps the path of its `href` closed. A workload that does not ask for a listing (for example `portal.enabled=false`) also keeps it closed. A workload whose id another workload uses with another `href` also keeps its path closed. Only the superadmin passes a closed path.
-- The gate reads an `href` with the same percent-decode as a request path. A segment that starts with the last segment of a prefix belongs to that service, as Traefik `PathPrefix` routes it. Such a path gets no identity token.
-- The gate reads the forwarded path in every way that a proxy or a backend can read it.
-- The gate allows the request only if every reading is allowed.
-- The gate refuses a URI that cannot be read.
-- The portal receives only the headers of a request (ForwardAuth). It never receives the body of a service.
-- The launcher lists only the services for which the user has `access`.
-- Discovery problems name workloads. Only the superadmin sees them.
-- Only the superadmin can administer accounts. This covers add, edit, delete, and log in as.
-- The server checks this rule on the server side.
-- Account administration uses a purpose-bound CSRF token and a same-origin check.
-- A new password is hashed under the same Argon2 permit as a login.
-- A new password ends the sessions of that account.
-- Each sign-in proof and each session carries a stamp of the credential that the proof checked. A proof opens a session, and a session acts, only while the account has the same stamp. Thus a password step or a second step that started before a new password opens no session.
-- A form checks the session again after its body. A session that ended while the body arrived does not act. **Log in as** and **Back to superadmin** give no session in place of a session that ended.
-- The superadmin login has one owner. An account of the database or a block `user` with this login stops the start.
-- A new superadmin login, password or session secret ends the sessions of the superadmin and the impersonated sessions. This also applies with PostgreSQL, where the other sessions survive a restart.
-- **Log in as** and **Back to superadmin** keep the end of the session that the password opened. A switch never gives a fresh `session.ttl`.
-- The server refuses at start the example superadmin passwords and the example session secret that the repository publishes. The error names the key and the source. It never shows the value.
-- The server writes every change to the audit history.
-- The 403 page names no service. A user does not learn the name of a service that is not open to that user.
-- An alert of the portal about a service (`inbox.watch`) follows the same rule. See "Inbox".
-- In the mode `static`, the settings pages refuse a change of grants. The server does not use the grants of the database.
-- In the mode `hybrid`, the settings pages cannot change a grant of the configuration.
-- The settings pages give a grant below a service only for a level that the service declares and an action that lists its type. The form gives one id for each type of the chain. While the service has not answered, the pages refuse the grant. Each resource id is exact. The server does not trim it or change its case. An id with a control character, or of more than 256 bytes, is refused.
-- The text form of a grant encodes each id with one canonical percent-encoding. Thus a `/` or a `:` in an id never divides a segment, and one grant has one text only. The parser refuses another encoding of the same id.
-- At start, the server does not know the services. Thus it checks only the form of a grant of the configuration. The Services page shows a grant that does not follow the tree of its service. The PDP does not apply this grant.
-- The **Generate** button in the add-user form draws a 20-character password in the browser.
-- The button uses `crypto.getRandomValues` and rejection sampling over an alphabet without look-alike characters.
-- The superadmin sees the generated password, so that the superadmin can give it to the user.
-- The password reaches the server only when the superadmin submits the form.
-- The history records addresses and user agents. The server keeps them for `storage.retention_days`.
-- The history never records a path, a query, a password, or what was typed in a login that does not exist.
-- The server limits the Argon2 concurrency.
-- The server limits the rate of login failures per IP address and globally.
-- The global limiter has a separate budget for the superadmin login. Failures against other logins never refuse the sign-in of the superadmin.
-- The server reads a bounded number of sign-in bodies at the same time (`server.max_login_body_reads`). A sign-in keeps its place in this number until it gets the Argon2 permit. Slow sign-in bodies and a queue of sign-ins cannot hold every connection that ForwardAuth needs.
-- A successful authentication creates a random, opaque session identifier of 256 bits.
-- Active sessions are held in limited process RAM. With PostgreSQL, they are held in the shared database as SHA-256 digests. The database never stores the cookie.
-- Each instance keeps a copy of each active session for a few seconds.
-- A logout revokes the exact session on the server.
-- With SQLite, a process restart invalidates all sessions.
-- With PostgreSQL, sessions survive a process restart.
-- A logout, a deleted account, or a changed password ends the session in the database at once.
-- The other instances end their copy of the session within 5 seconds.
-- Over HTTPS, the cookies are host-only (`__Host-`), `Secure`, `HttpOnly`, and `Path=/`. Their SameSite value is Strict or Lax.
-- Over plain HTTP, the cookies use the same name without the prefix. They have no `Secure` attribute (see "Plain HTTP").
-- A session works only from the client address and User-Agent that logged in (`session.bind`).
-- The client address comes from `X-Forwarded-For` only when the TCP peer is in `server.trusted_proxies`. For any other peer, the client address is the address of the peer.
-- A session ends after `session.idle_timeout` without use.
-- A session has an absolute life of `session.ttl` (24 hours at first), also when it is in use. Its cookie has no `Max-Age`: the browser deletes it at the end of its session.
-- The box "Remember me" is the only way to a persistent cookie. It is not ticked at first, and the person must tick it. A remembered session has the life `session.remember_ttl` (30 days at first, 90 days at most), the idle time `session.remember_idle_timeout` (7 days at first) and a cookie with the same life. `session.remember = false` removes the box, and the server then ignores the field.
-- A remembered session is stored with the other sessions. It follows the same rules for a logout, a deleted account, a new password and **End all sessions**. A new superadmin login, password or session secret ends a remembered session of the superadmin.
-- **Log in as** never opens a remembered session. **Back to superadmin** does not open one either.
-- The page after a refused sign-in has the same form for every cause of the refusal, and it never shows the box ticked.
-- The server renders the launcher. The launcher references nothing outside the binary.
-- The CSP of the launcher is `default-src 'none'`. The launcher uses its own style, its own script, and its own images.
-- The server HTML-escapes every value taken from a label.
-- Every `href` is a local path or an http(s) URL.
-- POST login and POST logout require CSRF protection. For login, the protection is a double-submit cookie. For logout, it is an HMAC of the session ID.
-- The server also validates the same origin with Origin and Referer.
-- Return paths are local path and query values only. The server signs them with HMAC.
-- A return path with an ASCII control byte (0x00 to 0x1F, 0x7F) is refused, raw or after one percent-decode. A URL parser of the URL Standard removes TAB, CR and LF, so `/<TAB>/host` would become `//host`.
-- The server validates dynamic HTTP header values with typed Hyper header parsing.
-- Prometheus labels never contain unbounded values, secret values, or values that users control.
-- Security failures fail closed.
-
-## Identity token
-
-With the `identity` block, `/auth/verify` gives a JWT to each service that a user can open (protocol section 9). The server signs the token with Ed25519 (the `alg` value is `Ed25519`). The token holds `iss`, `sub` (the login), `aud` (the id of the service), `iat`, and `exp`. It holds no permission. Its life is `identity.token_ttl`. The default is 5 minutes. The maximum is 1 hour.
-
-- The server gets the private key from `identity.signing_key_env` or from `identity.signing_key_file`. The server reads the key once at start. A key that is not a PKCS#8 Ed25519 key stops the server. The effective configuration and the log show only its `kid`.
-- The server keeps one token for each session and each service. It issues the token again when half of its life is gone. The cache holds at most 16384 tokens. A token stays valid until `exp` after a logout. Keep `token_ttl` short.
-- Traefik must list the header in `authResponseHeaders`. Traefik then replaces a header of the same name that a client sends. A service must verify the signature, `iss`, `aud`, and `exp` of each token. A service must accept the token only in this header.
-
-## AuthZEN PDP
-
-With the `pdp` block, the server answers AuthZEN requests on a second listener (`pdp.listen_address`). Traefik does not route to this listener.
-
-- Each server has its own bearer token. A `pdp_client` block, with `_env` or `_file`, gives the token. The token must contain at least 32 bytes. Each server uses a different token. The PDP keeps only the SHA-256 of each token. The PDP compares tokens in constant time. The PDP returns `401` for a request without a valid token.
-- The PDP answers a server only for its own resources. A resource of a type other than `service` is a node below the service of the server that asks. The bearer token tells the server. The first ancestor of the node must be this service. The chain must follow the parents of the last known document of the service. Else, the PDP returns `false` with the reason `invalid_resource`. The service of another server gets the same answer. Thus a request cannot name a node of another service, or a database without its host.
-- A node below the service without ancestors, or with an empty list, gets `invalid_resource`. A node of depth 1 has the chain `[service]`.
-- A grant covers its node and each node below it. The PDP compares the chains segment by segment, with exact types and decoded ids. A grant does not cover its parent or a node of another branch.
-- With `context.match = "subtree"`, a grant on a node below the resource also gives `true`. This answer only tells that something below the resource is open: a service uses it to show a navigation element, never to permit an operation. An operation asks with the default `"node"`. A bad value gives `false` with the reason `invalid_request`.
-- A grant below the service applies only when the last known document of the service follows it. The action must list the type, and the path must follow the parents. The PDP keeps the last document that it read for each service. A failed read does not remove this document. If the document does not follow the grant, the PDP does not apply it (fail closed). If portal has no good document of the service, the PDP returns `false` for each node of this service and for the whole service. Only `access` on the whole service is not affected: without the document, the PDP cannot apply the ceilings and the budgets of a grant. The check is at run time. The start checks only the form of the grants.
-- The PDP fails closed. It returns `false` for an unknown user, an unknown subject type, or a bad action name. It returns `400` and no decision for a request that it cannot read. The PDP limits the body size (`pdp.max_body_bytes`). It limits the batch size (`pdp.max_evaluations`).
-- The log records each decision (`pdp_decision`). Each entry has the server, the subject, the action, the resource, the decision, and the reason. The resource is the chain with the ids percent-encoded, so that an id cannot add a line or a field to the log. The counters `portal_pdp_decisions_total` and `portal_pdp_refused_total` are in `/metrics`.
-- The PDP has no TLS. The deployment must limit the network of the listener to the services and the portal. This differs from AuthZEN, which requires TLS. In K3s, the NetworkPolicy `allow-portal-pdp` admits to the port 4182 only the pods with the label `portal-pdp-client: "true"` in the namespaces `apps`, `observability` and `edge`.
+# Security policy
 
-## Keys
+This policy tells you how to report a vulnerability in portal, which versions get fixes, and what to expect from the maintainers. The security model of the code is in [`docs/security.md`](docs/security.md).
 
-- A key has one of two kinds. The prefix gives the kind: `mcp_` for agents, `api_` for services and webhooks. The prefix `whk_` is reserved. The key edge `/auth/verify-key` verifies `mcp_` keys. The API of the Inbox verifies `api_` keys. Each verifier refuses the other kind with `401` and no detail.
-- The portal never stores the text of a key. It stores the SHA-256 digest and the last 4 characters. The text has the prefix, 43 random base62 characters and a CRC-32 check of the prefix and the 43 characters. A typing error or a changed prefix gets no database read.
-- The edge `/auth/verify-key` reads only memory. A refusal gives status 401 with an empty body. The body and the headers never tell which check failed. The log has at most one line each minute for each address and cause.
-- A key holds only the actions of the service `portal` that its kind lists. An MCP key lists none. An API key lists `alert.send`, `alert.send_user` and `alert.read`, and it holds `access on service:portal` for the budget `alerts`. An API key holds no grant on another service. The PDP ignores any other grant.
-- A key never gives more than its owner. This holds for both kinds. The PDP checks both sides at each question, and the lowest ceiling applies. A key also needs `keys.own.use` on its kind. When the owner loses a right, the key loses it at once. When an account is deleted, its keys go with it.
-- The rights to make and to use a key are by kind (`key_kind:mcp` and `key_kind:api`). The switches `keys.mcp` and `keys.api` turn a kind off. A kind that is off has no key edge or no route.
-- A secret of the configuration (password hash, key text) uses only `_env` or `_file`. A secret in clear text stops the start.
-- The portal counts the uses of a budget in the database, with one statement that takes the unit from each counter or from none. A failed count gives status 503, never `true`.
-- A form of the key page has a size limit and at most 4 forms are read at the same time.
-- On SIGTERM, the instance closes its listeners after 5 seconds and waits at most 10 seconds for the answers in progress.
+## Report a vulnerability
 
-## Actions of the services
+Use the private vulnerability reports of GitHub. Do not open a public issue, a pull request or a discussion for a vulnerability.
 
-The server reads `/.well-known/procurauth/actions` of each service. It reads the document from an internal URL that a label gives (`portal.actions`, or the origin of `portal.health`). The read has a timeout. It has a size limit of 64 KiB. The read does not follow redirects. The concurrency is limited. The server refuses the whole document in these cases:
+1. Open <https://github.com/ProcurAuth/portal/security/advisories/new>.
+2. Describe the problem, the version, the impact and the steps to reproduce it.
+3. Add a proof of concept if you have one. A short one is best.
+4. Tell us if you plan to publish your own report, and when.
 
-- a bad action;
-- a duplicate action;
-- the action `access`;
-- a `server` that is not the id of the service.
+The project has no e-mail address for reports. If you cannot use private reports, open a public issue that says only "I need a private channel for a security report". Do not put details in the issue.
 
-A person who may set the labels of a workload chooses the actions that the settings pages offer for it. This is the trust boundary of the discovery.
+## What to include
 
-## Session secret modes
+- The version (`portal version`) or the commit.
+- The configuration that you used, with the secrets removed.
+- The deployment: Docker Compose or Kubernetes, the proxy and its version, and SQLite or PostgreSQL.
+- The request or the steps that show the problem, and what you expected to happen.
+- The impact as you see it: who can do what that they must not do.
 
-Exactly two modes exist.
+## Supported versions
 
-### `ephemeral`
+The latest release of the 5.x series gets security fixes. An older release does not. The project has no long-term support branch. The [changelog](CHANGELOG.md) lists the releases. A fix ships as a new release, and the release notes say that it is a security fix. The Android app Portal Inbox has the same version as the server and follows the same rule.
 
-```hcl
-session {
-  secret_mode = "ephemeral"
-}
-```
+## Scope
 
-The process generates a fresh 32-byte secret with `getrandom` at startup. The process zeroizes the secret at application state teardown.
+In scope:
 
-### `provided`
+- The `portal` binary: the gate (`/auth/verify` and `/auth/verify-key`), the sign-in, the sessions, the second factor, the accounts, the grants and the settings pages.
+- The keys and their limits, the identity tokens and the AuthZEN PDP, with the approval API.
+- The Inbox: the routes of the phones, the API of the senders, the agent channel, the approvals and the storage of the contents.
+- The Android app Portal Inbox and the crates `inbox-core` and `inbox-android`.
+- The build and release scripts, if a flaw there can put hostile code in a release.
 
-```hcl
-session {
-  secret_mode = "provided"
-  secret_file = "/run/secrets/portal_session_secret"   # or: secret_env = "PORTAL_SESSION_SECRET"
-}
-```
+Out of scope:
 
-Give exactly one of `secret_env` (the name of an environment variable) or `secret_file` (an absolute path). The value must contain at least 32 bytes. The program reads it with a finite upper bound. The program removes one trailing line end from the content of the file. Inline HCL secrets are not supported.
+- A flaw in a service behind the portal. Report it to the project of that service.
+- A deployment that skips a duty that [Traefik and TLS](docs/traefik.md) or [Security model](docs/security.md) describes. The known limits in these pages are not vulnerabilities. Examples are a session cookie that reaches a service on the same origin and plain HTTP on an untrusted network.
+- A denial of service that needs the superadmin account or a valid administrator action.
+- An attack that needs control of the host, of the database with its keys, of the browser or of the phone of the victim.
+- Reports from automatic scanners that show no impact on a real deployment.
+- A security header that is absent on a page that holds no secret and no state.
+- A weakness in a dependency that the portal does not reach. If you think that it does, tell us how.
 
-The secret protects HMAC-signed authentication control data. Examples are the return target and the anti-CSRF tokens. With SQLite, active opaque sessions stay only in RAM in both modes. Therefore `provided` does **not** make them survive a process restart. With PostgreSQL, the sessions are in the database. `provided` is required. Every instance must sign with the same key. `ephemeral` is rejected.
+If you are not sure that a problem is in scope, report it. We prefer a question to a missed flaw.
 
-## Opaque sessions
+## What to expect
 
-A session ID is a random 32-byte value. It is encoded with unpadded base64url. The cookie is not a JWT. It contains no claims and no expiration data.
+These are targets. They are not guarantees. The project has a small team.
 
-The server stores only these values:
+| Step | Target |
+|---|---|
+| We acknowledge your report. | 3 business days |
+| We give a first assessment: accepted, needs more information, or not a vulnerability. | 10 business days |
+| We fix a critical or high problem. | 30 days after the assessment |
+| We fix a medium problem. | 90 days after the assessment |
+| We fix a low problem. | The next regular release |
 
-- a SHA-256 digest of the token;
-- an `Instant` expiration;
-- a last-use time;
-- a hash of the client binding.
+We keep you informed of the progress. We credit you in the advisory and in the changelog if you want it. Tell us the name that you want to use.
 
-Logout therefore revokes the session on the server. It does not only delete the browser cookie. A cookie with another binding is refused. The refusal does not change the session. A thief cannot end the owner's session this way.
+## Coordinated disclosure
 
-The store is limited by `session.max_active_sessions`. The server removes expired entries during session operations. When capacity is reached, new sessions fail closed with `503`. One account has at most `session.max_sessions_per_account` sessions. Its new session ends its session that was used least recently, so one account cannot take the places of the others.
+We ask you to keep the report private until a fix is available. We publish a GitHub security advisory with the fix. We ask for at most 90 days between your report and the public disclosure. We agree on another time with you when the case needs it. If a problem is already under active attack, we ship a fix and an advisory as fast as we can.
 
-With PostgreSQL, the digest, the binding hash, the identity, the expiry, and the last use are rows of the shared database. The instance that served the login writes these rows. The same statement enforces the binding and the idle timeout, and finds the session. A refused binding renews nothing. Each instance trusts its own copy of a session for 5 seconds at most. A revocation made on another instance takes up to 5 seconds to reach the copy. While the database is unreachable, a copy checked less than 2 minutes ago is still honoured. This copy is bounded by the session's own expiry. This rule prevents the sign-out of every user. Logins fail closed. The failed-login limiters stay per instance. With N instances, an attacker has N times the budget.
+## Safe harbour
 
-A row also holds the credential generation of the superadmin: HMAC-SHA-256 under the session secret of the superadmin login and password. The database never holds a plain hash of the superadmin password. Thus a reader of the database cannot test password guesses without the secret. A superadmin or impersonated row is valid only with the generation of the instance that reads it. At start, each instance deletes the superadmin and impersonated rows of the other generations. After a suspected theft of a superadmin cookie, rotate the superadmin password or the session secret: the rotation ends the stolen session on every instance.
+We consider good-faith research under this policy as authorised. We will not start legal action against you for it. Good faith means these rules:
 
-A row also holds the stamp of the credential that opened the session. The stamp is a SHA-256 digest of the source of the account, its login and its password hash. An instance accepts the row only while the account has the same stamp. Thus a new or removed `password_hash` of an account of the file ends its sessions. A new account of the login never gets the sessions of an old account.
+- Test only against your own deployment, or a deployment whose owner agrees.
+- Do not read, change or delete data of other persons. Stop when you reach it, and tell us.
+- Do not degrade a service for other persons. Do not run a denial of service test against a shared deployment.
+- Do not use deceit of persons, physical attacks or the accounts of other persons.
+- Give us reasonable time to fix the problem before you publish it.
 
-### Remembered sessions
+## The model of the code
 
-The standard guidance is the OWASP Session Management Cheat Sheet. It asks for an idle timeout and an absolute timeout. It allows a persistent cookie only when the person asks for it. The portal follows this guidance.
-
-- The session without the box has an absolute life of `session.ttl` and an idle time of `session.idle_timeout`.
-- The session with the box has an absolute life of `session.remember_ttl` and an idle time of `session.remember_idle_timeout`. The idle time of a remembered session is longer. Otherwise, `session.idle_timeout` would end the session at each pause of 30 minutes.
-- The server checks the two rules with the same statement in the memory store and in the PostgreSQL store. The row of the session holds the flag `remembered`. Each instance reads the flag with the session.
-- The server refuses at start a file where `session.remember_ttl` is shorter than `session.ttl`, where `session.remember_idle_timeout` is longer than `session.remember_ttl`, or where it is shorter than `session.idle_timeout`.
-- The binding `session.bind` stays as the file sets it. With `ip_user_agent`, a change of the client address makes the session useless. This happens often on mobile networks. The person then signs in again. `user_agent` is the usual choice for a site where people keep remembered sessions on phones. The default does not change.
-
-Recommendation, not done in this version: ask for a fresh sign-in before a sensitive action in a remembered session. The actions to protect are the creation of a key, **Log in as** and a change of the password.
-
-### Incident action: end all sessions
-
-The superadmin can end every session from the page **Users**. The command `portal end-sessions --config FILE` does the same on a PostgreSQL database. Both end the sessions of the superadmin too. The route `POST /auth/users/end-sessions` has the checks of the account routes: the `Origin` check, the anti-CSRF token and the superadmin in its own right. It also needs the field `confirm=end-all-sessions`. Each use writes the audit event `sessions_ended`. With a shared database, an instance can accept a cached session for up to 5 seconds after the end. The command does not work with SQLite, because the sessions are in the memory of the process: restart the portal.
-
-## Plain HTTP
-
-The portal knows nothing about TLS. Traefik terminates TLS, and the portal listeners speak plain HTTP. Traefik can also serve plain HTTP. Examples are a LAN without certificates and a test stack. The server reads the scheme for each request. It uses the unique `X-Forwarded-Proto` value that Traefik sets (`trustForwardHeader: false`). Any value other than a single `https` counts as HTTP.
-
-Browsers refuse `Secure` and `__Host-` cookies over HTTP. Therefore, over HTTP, the cookies have no prefix (`portal`, `lc`). They have no `Secure` attribute.
-
-Over HTTP, an attacker on the network can read the password and the session cookie. The binding limits the value of a stolen cookie. The binding uses the client address and User-Agent, relayed by `authRequestHeaders: [Cookie, User-Agent]`. The idle timeout also limits the value of a stolen cookie. Only HTTPS removes the exposure. Use HTTPS on every network that is not trusted.
-
-## Discovery and the launcher
-
-The catalogue comes from container labels. The labels come from the Docker socket, which is mounted read-only. The catalogue also comes from IngressRoute annotations. They come from the in-cluster API. The ServiceAccount is limited to `get` and `list` on `ingressroutes` and `pods`.
-
-A person who can create a container or an IngressRoute chooses what the launcher lists. This is the trust boundary. It is acceptable for a single administrator. A workload with unusable labels is skipped. The page reports it. The workload is not listed in part. The gate keeps the path of its `href` closed, because Traefik still routes the workload.
-
-The gate opens a path that no service owns to each signed-in user. This rule is safe only when the catalogue holds every service. The first snapshot after a start is empty. A source that has not answered yet gives a snapshot without its services. Thus, until each configured source answered once, the gate lets only the superadmin through. A source that failed at setup keeps this state for the life of the process. The metric `portal_catalog_complete` shows the state.
-
-A source that answers can still miss a workload that Traefik routes. Examples are a container that restarts and a container that Compose recreates. The path of such a workload keeps its last owner, or stays closed, for 20 refreshes after the last list that names it. A new workload has no owner until the first refresh that lists it. In this time, each signed-in user passes the gate for its path, without an identity token. A service that checks the identity token refuses such a request.
-
-Health probes are plain GET requests to URLs taken from labels. They do not follow redirects. They do not read the body. They have a timeout and limited concurrency. They send nothing secret. The probe client does not verify certificates. It asks only whether something answers.
-
-Only the health probes use this client. The reads of the actions documents and of the options use a client that verifies the certificate and the host name of an https URL, with the embedded Mozilla roots. A read that fails this check gives no document and no option.
-
-Icons are SVG files. They are included in the image and indexed once at startup. A request can name only an indexed icon. A request cannot build a path. The server serves each icon with `Content-Security-Policy: default-src 'none'; sandbox`.
-
-## Request-origin checks
-
-Before the service parses the body of `POST /auth/login` or `POST /auth/logout`, the service verifies the request origin.
-
-- With Traefik forwarding metadata, the service requires one unique `X-Forwarded-Proto` header and one unique `X-Forwarded-Host` header.
-- Without forwarded metadata, the expected origin is `http` plus the unique `Host` header.
-- If `Origin` exists, it must match the normalized expected origin exactly. A mismatch cannot use Referer instead.
-- If `Origin` is absent, the service requires one unique absolute `Referer` with the same normalized origin.
-- The service rejects `Origin: null`, duplicate headers, unsupported schemes, userinfo, and partial forwarded metadata.
-
-This check is defense in depth. It works in addition to the CSRF token.
-
-## HTTP resource limits
-
-The server configuration sets these limits:
-
-```hcl
-server {
-  max_connections     = 1024
-  max_headers         = 64
-  max_header_bytes    = "32KiB"
-  header_read_timeout = "10s"
-  max_body_bytes      = "32KiB"
-  body_read_timeout   = "10s"
-}
-```
-
-Hyper's HTTP/1 connection parser receives the header limits and timeouts. The application collects the body in parts. It checks the size before each extension. A total read timeout wraps the collection.
-
-`POST /auth/login` is the only route that reads a body before it knows the client. The API of the Inbox checks the key of the sender before it reads the body. One connection can hold a slot for `header_read_timeout` plus `body_read_timeout`.
-
-The server therefore reads at most `server.max_login_body_reads` sign-in bodies at the same time. A sign-in keeps its place until it gets the Argon2 permit, and it waits for this permit only until `body_read_timeout` ends. It refuses the other sign-ins at once with `503` and `Retry-After: 1`. This value must be less than `max_connections`, so ForwardAuth always has connections left.
-
-The client address comes from `X-Forwarded-For` only when the TCP peer is in `server.trusted_proxies`. The server reads the header from the right. It skips the trusted addresses and takes the first address that is not trusted. A peer that is not trusted, a missing header, two headers, or an entry that is not an address give the address of the peer. Keep the networks of this list small. In K3s, the NetworkPolicy `allow-portal-http` admits only the Traefik and Prometheus pods to the port 4181.
-
-## Second factor (TOTP)
-
-The key `authentication.mfa` (`off`, `optional` or `required`) sets the policy. The code follows RFC 6238: HMAC-SHA-1, 6 digits, a step of 30 seconds, and a window of one step before and after.
-
-### What it stops
-
-- A password that a thief knows or guesses. A thief needs the code of the app too.
-- A password that comes from a leak of another site (credential stuffing). The attacker reaches the second step and no further.
-- A copy of the database. The secrets are sealed with AES-256-GCM under `authentication.totp_key`, and the associated data names the login. A reader of the database cannot read a secret, and cannot move it to another account. The recovery codes are keyed HMAC-SHA-256 values: a reader without the key cannot test a guess.
-
-### What it does not stop
-
-- Phishing. A person can type a TOTP code in a false page, and the attacker uses it at once. Only a passkey (WebAuthn, the next step) is bound to the real site.
-- A thief who has the password and the key and the database. This person can read the secrets.
-- A stolen session cookie. The cookie is a session: it has passed the second factor already. The binding `session.bind` and the idle time limit this risk.
-- A loss of the phone and of the recovery codes. The superadmin resets the account. The superadmin itself uses `portal reset-two-factor`, which needs access to the host and the configuration.
-- HMAC-SHA-1 is safe for TOTP: the attacks on SHA-1 are collision attacks, and an HMAC does not depend on collision resistance. The portal uses HMAC-SHA-1 for TOTP only.
-
-### Design
-
-- **State between the two steps.** The password step gives no session. It gives a token that the server signs (HMAC-SHA-256 under the session secret). The token holds the account, the choice "Remember me", the count of wrong codes and the time of issue. It also holds a keyed digest of the credential that the password step checked and of the second factor of the account at that time. The second step goes on only while both are the same. Thus a new password, a reset of the second factor, an enrolment or a new superadmin credential refuses the token. It is bound to the client binding and to the anti-CSRF token of the page. It lives 5 minutes. A token that is changed, old, or used by another client gives the page "The page was open too long". A person cannot tell these causes apart.
-- **Anti-enumeration.** The first step does not change: a wrong password gives the same answer for an unknown login, for an account with a second factor and for an account without. Only a person who knows the password reaches the second step, and learns that the account has one. This is accepted.
-- **Brute force.** The counters of an account are in its database row: failures, start of the window, end of the lock. Each attempt counts in one write transaction before the comparison of the code. Thus attempts at the same time, on one instance or on several, compare at most five codes before the lock. A good code clears the count. Five failures in 10 minutes lock the second step for 5 minutes. No account stays locked for ever. A lock needs the password first: an anonymous attacker cannot lock an account. An attacker who has the password can lock the second step for the person. The address limiter of the second step counts each attempt in the same way before the comparison. A TOTP code has 10^6 values and three are valid at a time: the lock keeps the chance of a guess below 1 in 10^5 for each 5 minutes.
-- **Replay.** The row keeps the last accepted time step. A statement accepts a step only if it is more than the stored step, so two instances never accept the same code. A code of the same step, or of an older step, is refused. The code that confirms an enrolment is used up.
-- **Recovery codes.** Ten codes of 50 bits, shown one time, stored as keyed hashes. The delete of the hash is the use: it succeeds for one caller only.
-- **Wrong key.** At start, the server compares a check value of the key with the value in the database. A key that does not match stops the server. A secret that a key does not open gives an error of the server, never a wrong code, and no secret changes. The server never replaces a secret under another key.
-- **Cookie and pages.** The pages of the second step go through the pass of the random names. They have no inline script and no inline style. The QR code is inline SVG markup: no image request. The pages have `Cache-Control: no-store`.
-- **Log in as.** A session of **Log in as** needs no code of the target account. The session of the superadmin is the one that counts. The session is not marked as a session of the second factor.
-
-Recommendations, not done in this version: ask for a fresh second factor before a sensitive action (create a key, **Log in as**, change a password), and add passkeys.
-
-## Password controls
-
-Two limiters protect against password failures. The first is a limited per-IP limiter. The second is a separate global limiter. The global limiter is not reset on purpose by a successful login. Both stores are process-local.
-
-The global limiter has two budgets of the same size: one for the superadmin login, one for all other logins. Anonymous failures against other logins thus cannot refuse the sign-in of the superadmin. Failures against the superadmin login lock out only the superadmin. This has a cost: while one budget is locked out, the answer tells whether a typed login is the superadmin login. The superadmin login is not a secret, because each identity token carries it in `sub`.
-
-Argon2 checks run through an async semaphore and `spawn_blocking`. This keeps the CPU-heavy hash calculations away from the Tokio I/O workers.
-
-## Metrics and logs
-
-Security-relevant metrics cover these items:
-
-- successful and failed logins;
-- CSRF failures;
-- origin failures (login, logout, users);
-- IP and global rate-limit blocks;
-- ForwardAuth results (including `denied`);
-- session validation outcomes;
-- active and capacity sessions;
-- Argon2 checks;
-- account administration results;
-- history events dropped or failed to flush;
-- HTTP request latency and status;
-- connection saturation.
-
-No metric label contains a login, an address, or a user agent.
-
-The log records events such as:
-
-```text
-login_success
-login_failed
-login_rate_limited
-origin_check_failed
-session_capacity_reached
-```
-
-Do not log the password, session ID, CSRF token, HMAC secret, Cookie header, return-signature value, or Authorization header.
-
-## Dependency resolution
-
-The `Cargo.lock` file is generated explicitly with `./scripts/update-lockfile.sh` after a dependency change. It is reviewed and committed. CI, Docker, and release builds require the committed resolution. They run the actual test and build steps with `--frozen`. Release jobs never regenerate the dependency resolution.
-
-## Known limits and deployment measures
-
-These limits come from the deployment, not from the code. The portal cannot remove them. Apply the measures below.
-
-### The session cookie goes to every service on the same origin
-
-The session cookie has `Path=/`. The browser sends it with each request to the origin of the portal. In K3s, the services are routed by path on the same origin (`/grafana/`, `/dagu/` and others). Traefik forwards the `Cookie` header to the service. A service, or a person who controls a service, therefore receives the session cookie, the client address and the User-Agent. With these three values, the service can act as the user, also as the superadmin.
-
-Measures:
-
-- Remove the portal cookie from the requests to the services. Use a Traefik middleware that removes the `Cookie` header, or only the portal cookie, on the routes of the services.
-- Better: give the portal its own host name, and give each service that you do not trust its own host name. A host-only `__Host-` cookie then never reaches these services.
-- Use the identity token (`X-Identity-Token`) in the services, not the cookie.
-- Keep `session.bind = "ip_user_agent"` and a short `session.idle_timeout`.
-- Keep `session.remember_ttl` as short as the site accepts, or set `session.remember = false`. A persistent cookie stays valid on a device that other persons can use. A stolen cookie of a remembered session works for up to 30 days, until the owner signs out, or until the superadmin ends the sessions.
-
-### The settings pages share the origin of the services
-
-The settings pages and the account administration (`/auth/settings`, `/auth/users/*`) are on the same origin as the services. The `Origin` check and the anti-CSRF token do not separate the portal from a script that a service serves on the same origin. Such a script can read the settings pages and send the administration forms of the superadmin.
-
-Measures:
-
-- Serve the portal (`/auth/*`) on a host name of its own, and do not route services on that host name.
-- Do not route on the portal origin a service that lets its users publish HTML or JavaScript.
-- Open the settings pages only in a browser profile that does not open the services.
-
-### Forwarded headers of ForwardAuth
-
-`/auth/verify` and `/auth/verify-key` know the request only from `X-Forwarded-Uri` and `X-Forwarded-Method`. With `trustForwardHeader: false`, Traefik writes these headers from the request that it routes. With `true`, Traefik copies the values that come from a trusted hop (`forwardedHeaders.trustedIPs`). A hop that passes the headers of the client lets the client send `X-Forwarded-Uri: /auth/login`. The request then reaches a service without a session.
-
-Measures:
-
-- Keep `trustForwardHeader: false` on each ForwardAuth middleware of the portal.
-- Set `true` only when each hop in front of Traefik overwrites or removes the `X-Forwarded-Uri`, `X-Forwarded-Method`, `X-Forwarded-Host` and `X-Forwarded-Proto` headers of the client. `forwardedHeaders.trustedIPs` alone does not remove them.
-- Behind a TCP load balancer, give the client address with `proxyProtocol.trustedIPs` of the entry point. Behind an HTTP proxy, keep `false` and set `session.bind = "user_agent"`.
-
-### Traefik path normalisation
-
-The gate reads the path of `X-Forwarded-Uri` in each way that a proxy or a backend can read it, after it removes dot segments. Traefik must route on the same clean path. If Traefik routes on a path that still holds `..` or an encoded `/` (`%2F`), a request can match the route of a service while the gate reads it as a path without an owner.
-
-Measures:
-
-- On each entry point of Traefik, set `http.sanitizePath: true`. Set each key of `http.encodedCharacters` to `false`: `allowEncodedSlash`, `allowEncodedBackSlash`, `allowEncodedNullCharacter`, `allowEncodedSemicolon`, `allowEncodedPercent`, `allowEncodedQuestionMark` and `allowEncodedHash`. The Compose configuration of Traefik (`traefik/docker/compose.yaml`) sets these values. Set them also on the K3s entry point `websecure` (`traefik/k3s/controller.yaml`).
-- Check the effective configuration of the entry point after each upgrade of Traefik.
-- The gate gives a segment that starts with the last segment of a prefix to that service, as ``PathPrefix(`/files`)`` routes it. A router rule must not match a path outside the text prefix of the `href` of its service. For example, a deep link `/pgadmin/browser/` with the rule ``PathPrefix(`/pgadmin`)`` leaves `/pgadmin/misc/` without an owner.
-
-
-## Inbox
-
-The Inbox is a feature of the portal. The page `docs/inbox/SECURITY.md` gives its model. These are the invariants.
-
-- A phone enrolls with a one-time code of an account of the portal. The code holds the address of the server, the public key of the server and a secret of 128 bits. The secret works one time and expires. The server keeps only its SHA-256 digest.
-- The phone pins the public key of the code. The session is Noise IK between the key of the phone and this key. A network capture gives no secret and no material for an offline attack.
-- The server limits the failed attempts for each client address: enrollments, and session handshakes that prove no phone. A phone that proves its key always gets its session.
-- A handshake has a fixed time limit, and one client address holds at most `inbox.devices.max_handshakes_per_address` handshakes. One account has at most `inbox.devices.max_per_account` phones.
-- A revocation also ends a session that was in its handshake at the time of the revocation.
-- The routes of the phones (`/v1/enroll`, `/v1/session`) and the API of the senders share the listener of the portal. They have no session, set no cookie and need no ForwardAuth. The portal matches them before every other route and applies no session, CSRF or origin check to them. A phone session uses a budget of connections that is separate from the pages: a flood of phone sessions cannot starve the pages, and a flood of page requests cannot starve the phones.
-- A phone subscribes only to a group for which its account has `inbox.receive`. A loaded directory that positively refuses a subscription removes it. A directory that is not ready, old or empty never removes one.
-- The API of the senders reads the key only in the header `Authorization: Bearer`. It does not read a key in the query of the URL, because a proxy can write the URL in its log. A request with a key in the query and no header gets `401`. The request log of the portal has the path and no query.
-- A sender sends an alert with an API key (`api_`) as a bearer token. The server checks the form of the text (prefix, length, characters, checksum) before any lookup. A key of another kind gets `401` with no detail. The server compares the keys of the file in constant time. A key needs `alert.send` on the group for the key and for its owner. To alert an account, the key and its owner need `alert.send_user` on the service `portal`: this right is flat, so a sender can alert any account. An alert to an account has no group, so only the key that sent it can read its status. A key of the file decides its groups, and `direct_alerts`, at start and reads no directory.
-- An alert of the portal about a service (`inbox.watch`) carries the id of the service. A reader sees the alert only when the launcher of the reader shows the service: the superadmin, or an account with `access` on the service. The rule applies to the phones, the notifications and their count, the page of the Inbox and `GET /api/v1/alerts/{id}`. A key reads the alert only when its owner may open the service. The recovery of the service follows the same rule.
-- The Inbox makes no delivery of such an alert for the phone of an account without this access. It checks the rights again before it sends a delivery. When the account lost the access, the Inbox removes the delivery, and the phone never gets the alert. An alert that a phone received stays on the phone. When the portal cannot tell the rights of an account, the account sees no alert about a service.
-- The page of the Inbox needs a session of the portal. A form carries an anti-CSRF token and a same-origin check. A session that the superadmin opens as another account cannot send an alert and cannot revoke a phone. Such a session can make an enrollment code for that account. The owner has not reviewed this point.
-- The key file of the Inbox server and the secrets of the `api_key` blocks use only `_env` or `_file`. A secret in clear text stops the start. The log never holds a key text, a code or a secret.
-- The portal listener has no TLS. An API key travels in clear text on plain HTTP. Use a TLS proxy for the senders.
-- The Android app accepts clear text for each address. It has no network security configuration. This is an open point.
+[`docs/security.md`](docs/security.md) states what the portal defends and what it does not, the invariants that the code keeps, and the measures that a deployment must apply. [`docs/inbox/SECURITY.md`](docs/inbox/SECURITY.md) has the model of the Inbox.

@@ -1,4 +1,4 @@
-//! The approval API for a service (a PEP), on the PDP listener (protocol 17.4, portal CONF 3.1a and 6.6).
+//! The approval API for a service (a PEP), on the PDP listener (protocol 17.4).
 //!
 //! | Request | Answer |
 //! | --- | --- |

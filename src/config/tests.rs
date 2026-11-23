@@ -1133,22 +1133,25 @@ fn the_postgres_password_must_be_valid_utf8() {
 }
 
 #[test]
-fn the_configuration_reference_in_the_readme_is_the_generated_one() {
-    let readme = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))
-        .expect("README.md must be next to Cargo.toml");
+fn the_configuration_reference_in_the_docs_is_the_generated_one() {
+    let readme = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/docs/configuration.md"
+    ))
+    .expect("docs/configuration.md must exist");
     let begin = "<!-- config-reference:begin -->\n";
     let end = "<!-- config-reference:end -->";
     let start = readme
         .find(begin)
-        .expect("README.md has no config-reference:begin marker")
+        .expect("docs/configuration.md has no config-reference:begin marker")
         + begin.len();
     let stop = readme
         .find(end)
-        .expect("README.md has no config-reference:end marker");
+        .expect("docs/configuration.md has no config-reference:end marker");
     assert_eq!(
         &readme[start..stop],
         format!("{}\n", keys::reference().trim_end_matches('\n')),
-        "the reference in README.md is out of date: run `portal config-reference` and paste the result"
+        "the reference in docs/configuration.md is out of date: run `portal config-reference` and paste the result"
     );
 }
 
@@ -1425,7 +1428,7 @@ fn a_bad_pdp_configuration_stops_the_start() {
 // Security regressions -------------------------------------------------------------------------
 
 /// The superadmin password and the session secret of the published examples (`.env.example`,
-/// the quick start of the README). Anybody who reads the repository knows them.
+/// the quick start of the documentation). Anybody who reads the repository knows them.
 #[test]
 fn the_published_example_secrets_stop_the_start_and_are_never_printed() {
     for password in ["change-me-use-a-long-random-secret", "test1234"] {

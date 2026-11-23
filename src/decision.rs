@@ -7,7 +7,7 @@
 //! A decision for a person looks at the grants of the person. A decision for a key has two sides:
 //! the grants of the key and the grants of its owner (protocol 3.5). Each side must allow the
 //! action on the resource. The owner can be the superadmin: its side is always `true`, with no
-//! limit value and no counter (portal 9.1a). Each limit of both sides applies (protocol 8.1): the
+//! limit value and no counter. Each limit of both sides applies (protocol 8.1): the
 //! lowest value of a ceiling, and the counters of both sides for a budget.
 //!
 //! A grant below the service applies only when the document of the service declares its chain
@@ -43,7 +43,7 @@ pub struct Question<'a> {
 /// The owner of a key.
 #[derive(Clone, Copy, Debug)]
 pub enum Owner<'a> {
-    /// The superadmin: the side of the owner is always `true` (portal 9.1a).
+    /// The superadmin: the side of the owner is always `true`.
     Superadmin,
     /// A person, with the grants that apply to the person.
     Person(&'a [Grant]),
@@ -57,7 +57,7 @@ pub enum CounterOwner {
     /// A key of the database, by id.
     Key(String),
     /// A subject of the configuration file: the login of an account, or the subject id of a key
-    /// (portal 7.2d).
+    ///.
     File(String),
 }
 
@@ -228,7 +228,7 @@ pub fn person(login: &str, grants: &[Grant], q: &Question<'_>) -> Verdict {
 }
 
 /// The decision for a person of the configuration file: its counters are the rows of its login in
-/// the file (portal 7.2d).
+/// the file.
 pub fn file_person(login: &str, grants: &[Grant], q: &Question<'_>) -> Verdict {
     let mut verdict = person(login, grants, q);
     for counter in &mut verdict.counters {

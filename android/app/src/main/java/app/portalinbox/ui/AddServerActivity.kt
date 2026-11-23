@@ -31,7 +31,7 @@ import app.portalinbox.service.InboxService
 import app.portalinbox.service.Registry
 
 /**
- * Enrolls this phone with a one-time enrollment code made by an account of the portal. Two steps (proposal 3.5):
+ * Enrolls this phone with a one-time enrollment code made by an account of the portal. Two steps:
  * 1. The code step: the user types or pastes the code. A tapped `portal-inbox://enroll?...` link skips it. Nothing is used.
  * 2. The confirmation step: the address (with the changed letters of a look-alike marked), the full fingerprint, the name and the
  *    color of the portal on this phone, and the tick. The code is used only when the user taps "Add portal".
@@ -578,7 +578,7 @@ open class AddServerActivity : BaseActivity() {
 }
 
 /**
- * The enrollment again of one portal (proposal 3.6). It is not exported: only the screen of a portal on this phone opens it, with the
+ * The enrollment again of one portal. It is not exported: only the screen of a portal on this phone opens it, with the
  * id of the portal. A link from another app can never reach it, so a link can never replace the key of a portal in place.
  */
 class ReenrollActivity : AddServerActivity() {

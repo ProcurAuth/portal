@@ -1458,7 +1458,7 @@ async fn old_inbox_schema_stops_start() {
         env.sql(drop).await;
         let error = start_checks(&env.store, &env.content).await.unwrap_err();
         assert!(
-            error.contains("table items") && error.contains("README, Upgrades"),
+            error.contains("table items") && error.contains("docs/operations.md, Upgrades"),
             "{}: {error}",
             env.name
         );
@@ -1573,7 +1573,7 @@ fn the_journal_and_the_metrics_follow_the_names_of_the_specification() {
     }
 }
 
-// ---------------------------------------------------------------- preferences and digest (lot L11)
+// ---------------------------------------------------------------- preferences and digest
 
 /// Unix time in milliseconds of an RFC 3339 text.
 fn at(text: &str) -> i64 {

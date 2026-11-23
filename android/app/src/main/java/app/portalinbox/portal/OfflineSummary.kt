@@ -7,7 +7,7 @@ import app.portalinbox.ui.Ages
 import app.portalinbox.ui.VisibleText
 import java.time.ZoneId
 
-/** What the home list says about the link to one portal (proposal 3.11). */
+/** What the home list says about the link to one portal. */
 enum class PortalHealth {
     /** Connected, or not connected for less than the offline threshold of the portal. */
     OK,
@@ -63,7 +63,7 @@ data class HomePortal(
 }
 
 /**
- * The warnings of the home list for the portals that cannot be reached (proposal 3.11, 3.8). Pure Kotlin.
+ * The warnings of the home list for the portals that cannot be reached. Pure Kotlin.
  *
  * These are banners inside the screen. They are not notifications: the one notification of the app is a separate part.
  */

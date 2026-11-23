@@ -7,7 +7,7 @@ import app.portalinbox.service.LinkStatus
 import app.portalinbox.ui.VisibleText
 
 /**
- * The model of one row of the portal list and of the head of the portal screen (proposal 3.4). Pure Kotlin: the screen
+ * The model of one row of the portal list and of the head of the portal screen. Pure Kotlin: the screen
  * gets the texts it can format without a decision.
  */
 data class PortalRow(

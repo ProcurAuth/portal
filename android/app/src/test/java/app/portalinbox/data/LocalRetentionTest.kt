@@ -145,7 +145,7 @@ class LocalRetentionTest {
         assertEquals("1 year", LocalRetention.label(365))
     }
 
-    // ------------------------------------------------------------ the own value of a portal (lot MP5)
+    // ------------------------------------------------------------ the own value of a portal
 
     @Test
     fun aPortalFollowsTheGlobalValueUnlessItHasItsOwn() {

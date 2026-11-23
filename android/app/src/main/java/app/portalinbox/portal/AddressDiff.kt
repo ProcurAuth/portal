@@ -2,7 +2,7 @@ package app.portalinbox.portal
 
 /**
  * Finds the letters of an address that differ from the address of a portal that the phone holds, so the confirmation screen
- * can mark them (`porta[1].example.org` against `portal.example.org`, proposal 3.5). Pure Kotlin.
+ * can mark them (`porta[1].example.org` against `portal.example.org`). Pure Kotlin.
  *
  * The method is an edit distance with a trace back. It marks a letter of the shown text when it replaces a letter of the other
  * text, or when the other text has no such letter. When the shown text lacks a letter that the other text has, the letter after

@@ -1,5 +1,5 @@
 //! The binding of an item to its agent on the path of the PEP, with the real approval API, on SQLite and on PostgreSQL
-//! (lot G1a). The agent calls `approval_intent` and gets an `approval_ref`. The service submits with that reference and
+//!. The agent calls `approval_intent` and gets an `approval_ref`. The service submits with that reference and
 //! never sees the token, the id or the hints of the agent. A submission with no intent belongs to the bucket of the key.
 //! A chain (`previous_id`, `supersedes`) stays inside one agent. A blocked agent has no live reference.
 

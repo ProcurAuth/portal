@@ -168,7 +168,7 @@ impl Pep {
     }
 
     /// A server with the block `inbox.questions`: the owner and its key hold `question.ask` and `question.cancel`
-    /// (lot L13). `tweak` can add more blocks.
+    ///. `tweak` can add more blocks.
     pub fn with_questions(tweak: impl FnOnce(&Server)) -> Pep {
         Pep::with_full(
             |s| {
@@ -369,7 +369,7 @@ discovery {{
         self.key_id = list[id..].split(['.', '"']).next().unwrap().to_string();
     }
 
-    /// A second key of the owner, made through the form of the keys, in the given mode of the agents (lot G6). The result is
+    /// A second key of the owner, made through the form of the keys, in the given mode of the agents. The result is
     /// the id of the key and its text. The key has the same grants as the key of the rig.
     pub fn make_key_in_mode(&self, name: &str, agents: &str) -> (String, String) {
         let s = &self.s;
@@ -427,7 +427,7 @@ discovery {{
         )
     }
 
-    /// A key of the kind `mcp` for the questions (lot L13): it holds `question.ask` and `question.cancel`, and its
+    /// A key of the kind `mcp` for the questions: it holds `question.ask` and `question.cancel`, and its
     /// `interaction` is `conversational` or `one_shot`. The result is the id of the key and its text.
     pub fn make_question_key(&self, name: &str, interaction: &str) -> (String, String) {
         self.make_question_key_with(name, interaction, "")
@@ -1147,7 +1147,7 @@ impl Pep {
         super::unescape(page[at..].split('"').next().unwrap())
     }
 
-    /// The owner makes an agent for the key of the rig with the form "Add agent" (lot G6; the key is in the mode `enrolled`).
+    /// The owner makes an agent for the key of the rig with the form "Add agent" (the key is in the mode `enrolled`).
     pub fn enroll_via_web(&self, cookie: &str, name: &str) -> (u16, String, String) {
         let csrf = self.inbox_csrf(cookie);
         self.post(

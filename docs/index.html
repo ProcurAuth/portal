@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="portal is one program that signs people in, protects services, gives keys to agents, answers AuthZEN questions and sends alerts to phones.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="portal">
+<meta property="og:title" content="portal: the gate, the keys and the inbox for your services">
+<meta property="og:description" content="portal is one program that signs people in, protects services, gives keys to agents, answers AuthZEN questions and sends alerts to phones.">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="portal: the gate, the keys and the inbox for your services">
+<meta name="twitter:description" content="portal is one program that signs people in, protects services, gives keys to agents, answers AuthZEN questions and sends alerts to phones.">
+<link rel="canonical" href="https://procurauth.github.io/portal/">
+<meta property="og:url" content="https://procurauth.github.io/portal/">
+<title>portal: the gate, the keys and the inbox for your services</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234338ca'/%3E%3Cpath d='M10.6 23.6V16.8a5.4 5.4 0 0 1 10.8 0v6.8' fill='none' stroke='white' stroke-width='4'/%3E%3Ccircle cx='16' cy='19.6' r='2' fill='%237dd3fc'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/site.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to the content</a>
+<header class="site-header">
+  <div class="wrap bar">
+    <a class="brand" href="index.html" aria-label="portal, home page"><svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect width="32" height="32" rx="8" fill="var(--accent)"/><path d="M10.6 23.6V16.8a5.4 5.4 0 0 1 10.8 0v6.8" fill="none" stroke="var(--accent-ink)" stroke-width="4"/><circle cx="16" cy="19.6" r="2" fill="#38b6ff"/></svg><span>port<b>al</b></span></a>
+    <button class="menu-btn" id="menu-btn" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
+    <nav id="site-nav" aria-label="Main"><ul><li><a href="index.html" aria-current="page">Home</a></li><li><a href="getting-started.html">Getting started</a></li><li><a href="documentation.html">Documentation</a></li><li><a href="configuration.html">Configuration</a></li><li><a href="security.html">Security</a></li><li><a href="reference.html">Reference</a></li><li class="nav-gh"><a href="https://github.com/ProcurAuth/portal">GitHub</a></li></ul></nav>
+    <a class="gh-link" href="https://github.com/ProcurAuth/portal" aria-label="portal on GitHub" title="portal on GitHub"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg><span>GitHub</span></a>
+    <button class="icon-btn" id="theme-btn" type="button" aria-label="Switch colour theme" title="Switch colour theme"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor"/></svg></button>
+  </div>
+</header>
+<main id="main">
+<section class="hero" aria-labelledby="hero-title">
+  <div class="wrap hero-grid">
+    <div>
+      <p class="eyebrow"><span class="badge">Version 5.6.0</span> Part of ProcurAuth</p>
+      <h1 id="hero-title">portal</h1>
+      <p class="promise">One program signs people in, guards your services, gives keys to AI agents and sends alerts to phones.</p>
+      <p class="sub">A key never has more rights than the person who owns it. One static binary, one configuration file, one database.</p>
+      <div class="btn-row">
+        <a class="btn primary" href="getting-started.html">Get started</a>
+        <a class="btn" href="documentation.html">Read the documentation</a>
+      </div>
+      <p class="more"><a href="architecture.html">See how it works</a></p>
+    </div>
+    <div class="hero-card" role="group" aria-label="Start portal with Docker in five commands">
+      <header><i></i><i></i><i></i><span>Five-minute start (shortened)</span></header>
+      <div class="step">Build and start the local stack</div>
+      <pre tabindex="0" aria-label="Commands"><code><span class="ln" style="--i:0"><span class="c">$ </span>tools/build.sh image</span><span class="ln" style="--i:0"><span class="c">$ </span>deploy/compose/init-secrets.sh</span><span class="ln" style="--i:0"><span class="c">$ </span>docker compose up -d</span></code></pre>
+      <div class="sep"></div>
+      <div class="step">Open the page and use the files in deploy/compose/secrets/</div>
+      <pre tabindex="0" aria-label="Address"><code><span class="ln" style="--i:0">http://127.0.0.1:4181/auth/login</span></code></pre>
+    </div>
+  </div>
+</section>
+<section class="section" aria-labelledby="ideas-h">
+  <div class="wrap">
+    <div class="section-head"><h2 id="ideas-h">The gate, the keys and the inbox in one binary</h2>
+    <p>portal is the backend, the edge and the decision point of ProcurAuth. It needs Traefik for TLS and routing, and nothing else.</p></div>
+    <div class="grid c3">
+      <a class="card" href="grants-and-gate.html"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 21V11a6 6 0 0 1 12 0v10"/><circle cx="12" cy="16" r="1.5"/></svg></div><h3>A gate for every service</h3>
+        <p>Traefik asks portal about each request. portal answers from memory with the grants of the person. A new user has no grant. A service never handles a password.</p></a>
+      <a class="card" href="keys-and-limits.html"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="12" r="5.5"/><circle cx="15" cy="12" r="5.5"/></svg></div><h3>Keys that follow their owner</h3>
+        <p>A program or an AI agent acts with a key. The key never has more rights than its owner. It can have ceilings, and budgets that portal counts.</p></a>
+      <a class="card" href="inbox.html"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M11 18.5h2"/></svg></div><h3>Alerts and approvals on a phone</h3>
+        <p>Senders post alerts. Each subscribed phone shows each alert one time. An agent can ask the owner of its key to approve an action, on the phone or on a web page.</p></a>
+    </div>
+  </div>
+</section>
+<section class="section alt" aria-labelledby="flow-h">
+  <div class="wrap">
+    <div class="section-head"><h2 id="flow-h">One call of an agent</h2>
+    <p>The agent never talks to the decision point. portal gives the service a signed identity token. The service asks one AuthZEN question and applies the answer.</p></div>
+    <figure class="panel"><img src="assets/identity-pdp-flow.svg" alt="One call of an agent in seven steps: the key, ForwardAuth, the identity token, the request, the AuthZEN question, the decision with limits, and the answer" loading="lazy"><figcaption>The identity token and the decision point. <a href="identity-and-pdp.html">Read the details.</a></figcaption></figure>
+  </div>
+</section>
+<section class="section" aria-labelledby="shots-h">
+  <div class="wrap">
+    <div class="section-head"><h2 id="shots-h">The product</h2>
+    <p>These pictures come from the program with demo data.</p></div>
+    <figure class="panel only-light"><img src="assets/screenshots/launcher-light.png" alt="The launcher: one tile for each service that the signed-in user may open" loading="lazy"><figcaption>The launcher lists only the services that the user may open.</figcaption></figure>
+    <figure class="panel only-dark"><img src="assets/screenshots/launcher-dark.png" alt="The launcher: one tile for each service that the signed-in user may open (dark theme)" loading="lazy"><figcaption>The launcher lists only the services that the user may open.</figcaption></figure>
+    <figure class="panel only-light"><img src="assets/screenshots/settings-grants-light.png" alt="The grant editor for one account: the resource tree of a service and its permissions" loading="lazy"><figcaption>The grant editor. A grant on a node covers the nodes below it.</figcaption></figure>
+    <figure class="panel only-dark"><img src="assets/screenshots/settings-grants-dark.png" alt="The grant editor for one account: the resource tree of a service and its permissions (dark theme)" loading="lazy"><figcaption>The grant editor. A grant on a node covers the nodes below it.</figcaption></figure>
+    <figure class="panel only-light"><img src="assets/screenshots/approval-light.png" alt="The approval of an agent action: the command, its effect hash, the explanation and the buttons Approve and Decline" loading="lazy"><figcaption>The approval of an agent action, as the owner of the key sees it.</figcaption></figure>
+    <figure class="panel only-dark"><img src="assets/screenshots/approval-dark.png" alt="The approval of an agent action: the command, its effect hash, the explanation and the buttons Approve and Decline (dark theme)" loading="lazy"><figcaption>The approval of an agent action, as the owner of the key sees it.</figcaption></figure>
+    <p><a class="btn small" href="settings-and-history.html">See the settings pages</a></p>
+  </div>
+</section>
+<section class="section alt" aria-labelledby="parts-h">
+  <div class="wrap">
+    <div class="section-head"><h2 id="parts-h">What is inside</h2>
+    <p>Each part except the launcher, the gate and the accounts is optional.</p></div>
+    <ul class="tools-row">
+      <li><a class="card tool-card" href="launcher.html"><span class="name">Launcher</span><p>Lists the services of the lab from labels and annotations.</p></a></li>
+      <li><a class="card tool-card" href="grants-and-gate.html"><span class="name">Gate</span><p>A Traefik ForwardAuth server with grants on a resource tree.</p></a></li>
+      <li><a class="card tool-card" href="authentication.html"><span class="name">Accounts</span><p>Argon2id passwords, opaque sessions and a second factor (TOTP).</p></a></li>
+      <li><a class="card tool-card" href="identity-and-pdp.html"><span class="name">PDP</span><p>An AuthZEN decision point with limits and approvals.</p></a></li>
+      <li><a class="card tool-card" href="inbox.html"><span class="name">Inbox</span><p>Alerts, questions and approvals for Android phones.</p></a></li>
+    </ul>
+  </div>
+</section>
+<section class="section" aria-labelledby="go-h">
+  <div class="wrap">
+    <div class="section-head"><h2 id="go-h">Start with the guide or with the reference</h2>
+    <p>The configuration is one strict file. The reference is generated from the table of keys in the code.</p></div>
+    <div class="btn-row">
+      <a class="btn primary" href="getting-started.html">Getting started</a>
+      <a class="btn" href="configuration.html">Configuration reference</a>
+      <a class="btn" href="security.html">Security model</a>
+      <a class="btn" href="https://github.com/ProcurAuth/portal/releases/latest">Downloads</a>
+    </div>
+  </div>
+</section>
+</main>
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid"><div><h2>Start</h2><ul><li><a href="overview.html">Overview</a></li><li><a href="getting-started.html">Getting started</a></li><li><a href="architecture.html">Architecture</a></li></ul></div><div><h2>Use</h2><ul><li><a href="authentication.html">Authentication and sessions</a></li><li><a href="grants-and-gate.html">Grants and the gate</a></li><li><a href="identity-and-pdp.html">Identity tokens and the PDP</a></li><li><a href="keys-and-limits.html">Keys and limits</a></li><li><a href="launcher.html">Launcher and service discovery</a></li><li><a href="settings-and-history.html">Settings pages and history</a></li><li><a href="several-instances.html">Several instances (PostgreSQL)</a></li><li><a href="traefik.html">Traefik and TLS</a></li></ul></div><div><h2>Configure and operate</h2><ul><li><a href="configuration.html">Configuration</a></li><li><a href="security.html">Security model</a></li><li><a href="operations.html">Operations</a></li><li><a href="build-and-release.html">Build and release</a></li><li><a href="development.html">Development</a></li></ul></div><div><h2>Reference</h2><ul><li><a href="reference.html">Reference</a></li><li><a href="limitations.html">Limitations</a></li><li><a href="design-inbox.html">Design: the Inbox</a></li><li><a href="design-login-hardening.html">Design: sign-in protection</a></li><li><a href="changelog.html">Changelog</a></li></ul></div><div><h2>Project</h2><ul><li><a href="https://github.com/ProcurAuth/portal">Repository</a></li><li><a href="https://github.com/ProcurAuth/portal/releases/latest">Downloads</a></li><li><a href="https://github.com/ProcurAuth/portal/blob/main/SECURITY.md">Security policy</a></li><li><a href="https://github.com/ProcurAuth/portal/blob/main/CONTRIBUTING.md">Contribute</a></li><li><a href="https://procurauth.github.io/procurauth/">ProcurAuth specification</a></li></ul></div></div>
+    <div class="foot-legal">
+      <p>portal, version 5.6.0. Part of <a href="https://procurauth.github.io/procurauth/">ProcurAuth</a>.</p>
+      <p>Licence: <a href="https://github.com/ProcurAuth/portal/blob/main/LICENSE-MIT">MIT</a> or <a href="https://github.com/ProcurAuth/portal/blob/main/LICENSE-APACHE">Apache-2.0</a>.</p>
+    </div>
+  </div>
+</footer>
+</body>
+</html>

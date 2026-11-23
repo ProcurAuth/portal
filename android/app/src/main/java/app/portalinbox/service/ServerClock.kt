@@ -4,7 +4,7 @@ import android.content.Context
 import app.portalinbox.data.ClockOffsets
 
 /**
- * The clock of each server, for the ages on the item screens (DIAL 4.8). The `welcome` frame gives the server time. The
+ * The clock of each server, for the ages on the item screens. The `welcome` frame gives the server time. The
  * offset also goes to a small file, so a phone that opens the app offline still shows the right age.
  */
 object ServerClock {

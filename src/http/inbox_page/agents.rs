@@ -1,4 +1,4 @@
-//! The pages of the agents under `/auth/settings/inbox/agents` and the forms that act on an agent (lot G3).
+//! The pages of the agents under `/auth/settings/inbox/agents` and the forms that act on an agent.
 //!
 //! The pages: the list of the agents at `/agents`, and the page of one agent at `/agents/{id}`. The forms: `rename`, `allow`,
 //! `block`, `unblock` and `merge`, each one a POST with the token `csrf` and the `Origin` of the portal. They are for the
@@ -809,7 +809,7 @@ pub(super) async fn merge(state: &Arc<AppState>, ctx: &Context<'_>, mut f: Field
     .await
 }
 
-// The mode `enrolled` (lot G6) ------------------------------------------------------------------------
+// The mode `enrolled` ------------------------------------------------------------------------
 
 /// The page that shows the token one time. It is the answer to a POST. The token is in no URL and in no other page.
 fn token_response(

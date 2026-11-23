@@ -1,4 +1,4 @@
-//! The keys in the tab Access (portal 5.8): the list of the keys, and the pages "New key" and
+//! The keys in the tab Access: the list of the keys, and the pages "New key" and
 //! "Edit key".
 //!
 //! A key has one kind, API or MCP, and the list shows it with an icon. The list is a panel of the
@@ -32,7 +32,7 @@ pub const CREATE_PATH: &str = "/auth/keys/create";
 pub const EDIT_PATH: &str = "/auth/keys/edit";
 pub const REVOKE_PATH: &str = "/auth/keys/revoke";
 
-/// The state of a key (portal 5.5): the first that applies, in this order.
+/// The state of a key: the first that applies, in this order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyState {
     Expired,
@@ -62,7 +62,7 @@ impl KeyState {
     }
 }
 
-/// How the rights of the owner cover a grant of a key (portal 4.3).
+/// How the rights of the owner cover a grant of a key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cover {
     /// The owner holds the grant, or a grant above it.
@@ -104,7 +104,7 @@ pub struct KeyLine {
     pub check_count: i64,
     pub revoked_at: Option<i64>,
     pub grants: Vec<GrantLine>,
-    /// Services where the key has a node grant and no grant `access` (portal 4.2b).
+    /// Services where the key has a node grant and no grant `access`.
     pub no_access: Vec<String>,
     /// The interaction of a key that exists. `None` for a revoked key.
     pub interaction: Option<crate::keys::Interaction>,
@@ -167,9 +167,9 @@ pub struct KeysView<'a> {
     pub pane: Pane<'a>,
     /// The first value of the field `expires_at`.
     pub expires_at: String,
-    /// The longest lifetime of a key, in seconds (portal 5.3).
+    /// The longest lifetime of a key, in seconds.
     pub max_lifetime: Option<u64>,
-    /// The name that the form of a new key has when it copies a key (portal 4.1a).
+    /// The name that the form of a new key has when it copies a key.
     pub copy_name: String,
     /// The interaction that the form of a key shows.
     pub interaction: Option<crate::keys::Interaction>,
@@ -181,7 +181,7 @@ pub struct KeysView<'a> {
     pub needs_access: Option<String>,
 }
 
-/// The text of the outcome of a form, from a fixed list (portal 5.8f).
+/// The text of the outcome of a form, from a fixed list.
 pub fn notice_for(code: &str) -> Option<Notice> {
     let (text, ok) = match code {
         "edited" => ("The key is changed. The change applies within a few seconds.", true),
@@ -373,9 +373,9 @@ pub struct KeysList {
     pub create_kinds: Vec<KeyKind>,
     pub can_revoke: bool,
     pub can_revoke_all: bool,
-    /// The user browses as another user: no change is possible (portal 3.7).
+    /// The user browses as another user: no change is possible.
     pub impersonated: bool,
-    /// The owner can make keys and cannot use them (portal 5.3b).
+    /// The owner can make keys and cannot use them.
     pub cannot_use: bool,
     /// The names of the groups of the inbox, for the column "Can use".
     pub groups: Vec<(String, String)>,

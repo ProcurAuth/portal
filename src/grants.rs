@@ -1,6 +1,6 @@
 //! The grants of the users: an action on a node of the resource tree of a service.
 //!
-//! The text form of a grant is `<action> on service:<id>[/<type>:<id>]...` (contract 11.8):
+//! The text form of a grant is `<action> on service:<id>[/<type>:<id>]...`:
 //!
 //! - `access on service:grafana`: the grant applies to the whole service.
 //! - `query.run.read on service:clickhouse-dash/host:local`: the grant applies to the host `local`
@@ -486,7 +486,7 @@ pub struct CounterId {
 }
 
 /// The counters that a set of grants needs for one subject: one for each window of each budget
-/// value of each grant `access` on a service (portal 3.2a, 7.2a). Sorted, without duplicates.
+/// value of each grant `access` on a service. Sorted, without duplicates.
 pub fn counter_ids(grants: &[Grant]) -> Vec<CounterId> {
     let mut out: Vec<CounterId> = Vec::new();
     for grant in grants

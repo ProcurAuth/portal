@@ -3,7 +3,7 @@ package app.portalinbox.portal
 import app.portalinbox.data.ItemRepository
 
 /**
- * What "Remove" erases for one portal (proposal 3.4): the text before the one confirmation. Pure Kotlin. The counts come from the
+ * What "Remove" erases for one portal: the text before the one confirmation. Pure Kotlin. The counts come from the
  * repository before the delete. The delete itself is the cascade of the foreign keys of the table `servers`.
  */
 data class RemovalSummary(

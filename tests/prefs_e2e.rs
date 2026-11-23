@@ -1,4 +1,4 @@
-//! End-to-end tests of the preferences (lot L11): the page "Inbox > Preferences", the frames `set_prefs` and `welcome` of
+//! End-to-end tests of the preferences: the page "Inbox > Preferences", the frames `set_prefs` and `welcome` of
 //! the phone, and the quiet flag of a request. The rig is the one of the approvals. The pages have no script, so each
 //! check reads the HTML. The digest and its clock have unit tests that move the clock by hand
 //! (`src/inbox/items_tests.rs`, `src/http/prefs_tests.rs`): a real server cannot.

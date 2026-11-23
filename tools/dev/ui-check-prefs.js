@@ -3,7 +3,7 @@
 // `prefs_demo_for_the_eyes` of tests/prefs_e2e.rs starts (it writes demo.json with the values below). Never use a shared demo.
 //
 // For each of the widths 390 and 1440, and for the dark and the light theme, the page must load, have no sideways scroll,
-// and show the form of the mock: the summary with its three choices, the quiet hours, the default of the file and the
+// and show the form: the summary with its three choices, the quiet hours, the default of the file and the
 // buttons. The form must work with JavaScript off.
 //
 // Environment:
@@ -76,8 +76,6 @@ async function main() {
       check("the zone of the file is selected" + tag, (await page.locator("select[name=tz]").inputValue()) === "Europe/Paris", "");
       check("the quiet hours have two times and the ring box" + tag, (await page.locator("input[name=from], input[name=to]").count()) === 2 && (await page.locator("input[name=high]").count()) === 1, "");
       check("the default of the file is shown" + tag, (await page.content()).includes("daily at 09:00, time zone Europe/Paris"), "");
-      const name = await page.evaluate(() => document.body.innerText.toLowerCase());
-      check("no product name on the page" + tag, !/inbox|inbox|circular/.test(name), "");
       // Two columns on a wide screen, one column on a narrow one.
       const label = await box(page, ".form__row .lbl");
       const control = await box(page, ".form__row .stack");

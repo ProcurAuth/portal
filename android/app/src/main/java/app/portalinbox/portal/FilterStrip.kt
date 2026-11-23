@@ -1,7 +1,7 @@
 package app.portalinbox.portal
 
 /**
- * What the filter strip and the dots of the top bar show (proposal 3.2). Pure Kotlin: the screen only draws it.
+ * What the filter strip and the dots of the top bar show. Pure Kotlin: the screen only draws it.
  */
 object FilterStrip {
     /** One chip. [portal] is null for the chip All. */

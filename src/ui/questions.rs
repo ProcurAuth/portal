@@ -1,4 +1,4 @@
-//! The rules of the web page of a question (lot L14): the rows under the options, the sheet of the blocks, and the
+//! The rules of the web page of a question: the rows under the options, the sheet of the blocks, and the
 //! reading of the answer form. This module writes no HTML. The Android app has the same rules in `FlagsMatrix.kt` and
 //! `AnswerSheet.kt`, so the page and the phone show the same rows and refuse the same answers.
 //!
@@ -60,7 +60,7 @@ impl Invalid {
     }
 }
 
-/// The rows under the options (DIAL 1.4.2 and 4.2). One pure function decides them.
+/// The rows under the options. One pure function decides them.
 ///
 /// | `allow_custom` | `allow_ask_back` | Rows |
 /// |---|---|---|

@@ -26,7 +26,7 @@ interface ItemRepository {
     fun items(serverId: Long): List<Item>
 
     /**
-     * The open items of every portal, counted by kind, in one pass (lot MP3: the filter chips of the home list count without
+     * The open items of every portal, counted by kind, in one pass (the filter chips of the home list count without
      * loading each item). A portal with no open item has no entry.
      */
     fun openCounts(): Map<Long, OpenCount>
@@ -55,7 +55,7 @@ interface ItemRepository {
     fun closeOutbox(serverId: Long, clientMsgId: String, result: String, atMs: Long)
     fun closeOutboxOf(serverId: Long, requestId: String, result: String, atMs: Long)
 
-    /** Erases an item and what belongs to it: its turns, its outbox rows and an early settlement. Lot A2, local retention. */
+    /** Erases an item and what belongs to it: its turns, its outbox rows and an early settlement. This is the local retention. */
     fun deleteItem(serverId: Long, requestId: String)
 
     /** Erases the closed outbox entries of the actions on agents that closed before [beforeMs]. An action has no item that a retention could erase. */

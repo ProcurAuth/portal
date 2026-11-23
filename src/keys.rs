@@ -1,4 +1,4 @@
-//! The text of a key, its digest, its hint and its id (portal 5.1, 4.7).
+//! The text of a key, its digest, its hint and its id.
 //!
 //! The text of a key is a prefix, then 43 random characters from `a-z`, `A-Z` and `0-9`, then 6
 //! characters: the CRC-32 (the CRC-32 of zlib) of the prefix and the 43 characters, in base62. The
@@ -7,7 +7,7 @@
 //! the key edge, and `api_` for a service, verified by the API of the inbox. The prefix `whk_` is
 //! reserved: it is an unknown prefix. A verifier refuses a text with a bad prefix, a bad length, a
 //! bad character or a bad checksum before it hashes the text, and then it refuses a key of the
-//! other kind (portal 5.1, 8.3).
+//! other kind.
 //!
 //! The portal shows the text one time. It keeps only the SHA-256 digest and a hint of at most 4 of
 //! the 43 random characters. A standalone key of a service has 47 characters, not 53 (portal
@@ -29,7 +29,7 @@ pub const CHECKSUM_CHARS: usize = 6;
 /// The length of the text of a key.
 pub const TEXT_CHARS: usize = PREFIX_CHARS + RANDOM_CHARS + CHECKSUM_CHARS;
 
-/// The kind of a key (portal 5.1). One key has one kind, and the kind decides who verifies it.
+/// The kind of a key. One key has one kind, and the kind decides who verifies it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum KeyKind {
     /// An agent. The key edge verifies it (`/auth/verify-key`).
@@ -126,7 +126,7 @@ impl Interaction {
     }
 }
 
-/// What the portal does with the agents that share one key (lot G1b, proposal 4.1). The owner sets it when the key is made,
+/// What the portal does with the agents that share one key. The owner sets it when the key is made,
 /// and the form of the key can change it. The agent never sets it. It has an effect only when the file has the block
 /// `inbox.agents`: without the block, each key acts as `key`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -288,7 +288,7 @@ pub fn hint(text: &str) -> String {
         .unwrap_or_default()
 }
 
-/// A new id of a key of the database: 16 characters from `0-9` and `a-f` (portal 4.7).
+/// A new id of a key of the database: 16 characters from `0-9` and `a-f`.
 pub fn new_id() -> Result<String, String> {
     let mut bytes = [0u8; ID_CHARS / 2];
     getrandom::fill(&mut bytes).map_err(|e| format!("OS random generator failed: {e}"))?;
@@ -296,7 +296,7 @@ pub fn new_id() -> Result<String, String> {
 }
 
 /// The id of a key of the file: the first 16 hexadecimal characters of the SHA-256 digest of the
-/// login, a zero byte and the name (portal 3.4c).
+/// login, a zero byte and the name.
 pub fn file_id(login: &str, name: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(login.as_bytes());
@@ -308,7 +308,7 @@ pub fn file_id(login: &str, name: &str) -> String {
         .collect()
 }
 
-/// The name of a key: 1 to 64 characters, with no control character (portal 4.1).
+/// The name of a key: 1 to 64 characters, with no control character.
 pub fn check_name(name: &str) -> Result<(), String> {
     let chars = name.chars().count();
     if chars == 0 || chars > MAX_NAME_CHARS || name.chars().any(char::is_control) {
@@ -319,7 +319,7 @@ pub fn check_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The digest of a key as 64 hexadecimal characters, for the configuration (portal 3.4c). Upper
+/// The digest of a key as 64 hexadecimal characters, for the configuration. Upper
 /// and lower case are the same. Any other form is an error.
 pub fn parse_digest_hex(text: &str) -> Result<[u8; 32], String> {
     if text.len() != 64 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -415,7 +415,7 @@ mod tests {
             check_format(&format!("{}a", *good)),
             Err(FormatError::Length)
         );
-        // A standalone key has 47 characters (portal 5.1b).
+        // A standalone key has 47 characters.
         assert_eq!(check_format(&good[..47]), Err(FormatError::Length));
         let mut bad_character = good.to_string();
         bad_character.replace_range(10..11, "-");
@@ -460,7 +460,7 @@ mod tests {
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
         assert_ne!(id, new_id().unwrap());
-        // The example of portal 3.4c.
+        // The example key text.
         assert_eq!(file_id("carol", "nightly report"), "34b1100f45b235ba");
         assert_eq!(
             file_id("carol", "nightly report"),

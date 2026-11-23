@@ -1,4 +1,4 @@
-//! The web pages of the questions under `/auth/settings/inbox` (lot L14): the page of one question and the form that
+//! The web pages of the questions under `/auth/settings/inbox`: the page of one question and the form that
 //! answers or declines it. The panel "Open items", the History and the form "Ask the agent" are in `items.rs`, which calls
 //! this module for a row of kind `question`.
 //!

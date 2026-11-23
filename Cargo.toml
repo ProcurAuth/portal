@@ -70,11 +70,11 @@ deadpool-postgres = { version = "=0.14.2", default-features = false, features = 
 # The WebSocket of the phones. The upgrade of the connection comes from hyper. No TLS feature.
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
 futures-util = { version = "=0.3.34", default-features = false, features = ["sink", "std"] }
-# The IANA time zones of the digest and of the quiet hours (lot L11). The feature `tzdb-bundle-always` embeds the database in the
+# The IANA time zones of the digest and of the quiet hours. The feature `tzdb-bundle-always` embeds the database in the
 # binary (about 200 KB): the static image has no `/usr/share/zoneinfo`. The server never reads the zone files of the host. The
 # crate is for the server only: `inbox-core` and the phone do not use it.
 jiff = { version = "=0.2.41", default-features = false, features = ["std", "tzdb-bundle-always"] }
-# NFKC of the name of an agent and of the text that an agent says about itself (lot G1a): two names that look the same fold to
+# NFKC of the name of an agent and of the text that an agent says about itself: two names that look the same fold to
 # one value. The crate is already in the build (the SCRAM code of PostgreSQL uses it), so the binary does not grow.
 unicode-normalization = { version = "=0.1.25", default-features = false, features = ["std"] }
 

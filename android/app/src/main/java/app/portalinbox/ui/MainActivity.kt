@@ -75,7 +75,7 @@ class MainActivity : BaseActivity() {
     private var screen = Screen.ALERTS
 
     /**
-     * The filter of the home list. It is not saved: each start of the app shows All (question Q9), because a saved filter can
+     * The filter of the home list. It is not saved: each start of the app shows All, because a saved filter can
      * hide the request of another portal for days.
      */
     private var filter: HomeFilter = HomeFilter.AT_START
@@ -508,7 +508,7 @@ class MainActivity : BaseActivity() {
         // The items of the portals that the filter shows, the oldest first across portals with the limited time of each portal.
         val shownItems = filteredItems(servers)
         val toAnswer = ItemSort.toAnswer(shownItems, clockOffsets(servers))
-        // The agents (lot G4): the groups of "To answer", and the cards of the new agents above them.
+        // The agents: the groups of "To answer", and the cards of the new agents above them.
         val directory = AgentDirectory(Items.repository(this).allAgents())
         val groups = ItemListOrder.toAnswer(toAnswer, directory, collapse)
         val agentCards = NewAgentCard.build(
@@ -517,7 +517,7 @@ class MainActivity : BaseActivity() {
         )
         pruneCollapse(servers)
         val filterName = only?.let { byId[it]?.identity?.nickname }
-        // Alice's rule: the alerts come first, then the items to answer. The new agents sit between. A section with no row does not show.
+        // The alerts come first, then the items to answer. The new agents sit between. A section with no row does not show.
         val sections = ItemListOrder.sections(hasAlerts = alerts.isNotEmpty(), hasItems = groups.isNotEmpty(), hasNewAgents = agentCards.isNotEmpty())
         if (sections.isEmpty()) {
             if (filterName != null) {
@@ -654,7 +654,7 @@ class MainActivity : BaseActivity() {
         return card
     }
 
-    // ------------------------------------------------------------ the agents (lot G4)
+    // ------------------------------------------------------------ the agents
 
     /** Forgets the folded groups that do not exist any more, in all portals: a filter on one portal never forgets the others. */
     private fun pruneCollapse(servers: List<Server>) {

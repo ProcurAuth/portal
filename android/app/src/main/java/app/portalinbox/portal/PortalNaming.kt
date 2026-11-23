@@ -3,7 +3,7 @@ package app.portalinbox.portal
 import app.portalinbox.ui.VisibleText
 
 /**
- * The rules of the nickname of a portal (proposal 2, rule 3; proposal 3.1). Pure Kotlin.
+ * The rules of the nickname of a portal. Pure Kotlin.
  *
  * - The nickname is required. The phone never proposes the name that the portal gives.
  * - It has 1 to 16 characters (Unicode code points) after the spaces at both ends are removed.

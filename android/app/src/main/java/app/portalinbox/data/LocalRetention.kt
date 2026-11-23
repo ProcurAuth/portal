@@ -1,7 +1,7 @@
 package app.portalinbox.data
 
 /**
- * How long the phone keeps the local copy of a final item (CONF 7.3: the local copy is the independent proof of what the
+ * How long the phone keeps the local copy of a final item (the local copy is the independent proof of what the
  * owner saw, and it is erased at `local_retention`). Pure Kotlin: the clock is an argument.
  *
  * - An open item is never erased.
@@ -20,7 +20,7 @@ object LocalRetention {
     fun daysOrDefault(stored: Int?): Int = if (stored != null && isOption(stored)) stored else DEFAULT_DAYS
 
     /**
-     * The days that apply to one portal (proposal 3.10, answer Q6). A portal has its own value, or none: then the global value
+     * The days that apply to one portal. A portal has its own value, or none: then the global value
      * applies. A stored value that is not an option is not read as an own value: the portal follows the global one, and the phone
      * never erases earlier than the user asked.
      */

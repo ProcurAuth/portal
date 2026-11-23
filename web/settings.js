@@ -1092,7 +1092,7 @@
       ui.appendChild(side);
       ui.appendChild(main);
 
-      // ---- the children that the service lists (portal 3.1a)
+      // ---- the children that the service lists
       function addChildren(svc, parent, type, answer) {
         var tree = treeOf(svc);
         answer.items.forEach(function (item) {
@@ -1998,7 +1998,7 @@
           });
         });
         ui.appendChild(table);
-        // The budget of the alerts (portal 15.3): one value for the account, on `access`.
+        // The budget of the alerts: one value for the account, on `access`.
         if (actions.access && actions.access.limits.length && actions["alert.send"]) {
           var item = ticked.get(keyOf(svc.id, "access", ""));
           var budget = item && item.limits.alerts && typeof item.limits.alerts === "object" ? item.limits.alerts : {};

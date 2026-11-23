@@ -258,7 +258,7 @@ pub struct ApiKeyConfig {
     pub direct_alerts: bool,
     pub webhook_send_resolved: bool,
     /// The attribute `interaction` of the block. The default is `one_shot`. The agent channel reads
-    /// it (lot L9): this lot only stores and checks it.
+    /// it: this lot only stores and checks it.
     #[allow(dead_code)]
     pub interaction: crate::keys::Interaction,
 }
@@ -889,7 +889,7 @@ pub fn check_against(config: &Config, inbox: &InboxConfig, postgres: bool) -> Re
     Ok(())
 }
 
-/// Checks each block `api_key` against the accounts of the file (portal 3.4a, 4.1). The owner is an
+/// Checks each block `api_key` against the accounts of the file. The owner is an
 /// account of the file. The owner must hold `keys.own.use` on the kind `api`, `alert.send` on each
 /// group of the key, and `alert.send_user` on the service when the key has `direct_alerts`. The
 /// error names the key, the expected value and the value found. The function also keeps, for each

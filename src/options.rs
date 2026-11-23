@@ -1,5 +1,4 @@
-//! The options of a node: the children that a service lists for the forms of grants (portal 3.1a,
-//! 3.1c; protocol 5.6 to 5.9).
+//! The options of a node: the children that a service lists for the forms of grants (protocol 5.6 to 5.9).
 //!
 //! A person who gives a grant on a resource does not know the resources of the service. The
 //! forms ask the service for the children of a node, and the person picks one. The request is
@@ -14,16 +13,16 @@ use std::time::{Duration, Instant};
 
 use crate::util::percent_encode_query_component as encode;
 
-/// The number of items that the portal asks for in one request (portal 3.1c).
+/// The number of items that the portal asks for in one request.
 pub const PAGE_ITEMS: usize = 50;
 /// The largest answer that the portal reads (protocol 5.8).
 const MAX_ANSWER_BYTES: usize = 64 * 1024;
 /// The longest id of an item, in bytes, and the longest label, in characters (protocol 5.8).
 const MAX_ID_BYTES: usize = 256;
 const MAX_LABEL_CHARS: usize = 60;
-/// How long the portal keeps an answer (portal 3.1c).
+/// How long the portal keeps an answer.
 const KEEP: Duration = Duration::from_secs(60);
-/// The bounds of the cache (portal 3.1c).
+/// The bounds of the cache.
 const MAX_ENTRIES: usize = 5_000;
 const MAX_CACHE_BYTES: usize = 32 * 1024 * 1024;
 

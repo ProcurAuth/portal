@@ -1,0 +1,51 @@
+name: Bug report
+description: Report a fault in portal or in the Android app Portal Inbox.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for the report. Do not report a security problem here: use the private vulnerability report of this repository.
+        Do not paste a secret, a key, a session cookie or a password. Replace real host names with example.com.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `portal version`, or the version of the app.
+      placeholder: 5.6.0
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Gate and sign-in
+        - Keys and limits
+        - AuthZEN decision point
+        - Launcher and discovery
+        - Settings pages
+        - Inbox and Android app
+        - Configuration
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Say what you did, what you expected and what you saw. Give the shortest steps that show the fault.
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration and logs
+      description: The output of `portal check-config` with the secrets hidden, and the log lines that matter.
+      render: text
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: The database (SQLite or PostgreSQL), the proxy and its version, Docker or Kubernetes, the Android version if it applies.

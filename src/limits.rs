@@ -153,7 +153,7 @@ pub struct Declaration {
     pub range: Option<(u64, u64)>,
 }
 
-/// A limit that a grant can hold, as a form shows it (portal 3.2, 3.3): the text of its
+/// A limit that a grant can hold, as a form shows it: the text of its
 /// declaration and its kind.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Input {
@@ -294,7 +294,7 @@ impl Limits {
         Json::Object(map).to_string()
     }
 
-    /// Checks the values against the declarations (protocol 6.1, portal 3.2). `action` is the
+    /// Checks the values against the declarations (protocol 6.1). `action` is the
     /// action of the grant, and `listed` names the limits that this action lists. On the action
     /// `access`, a value is good only for a budget that the document declares. On another
     /// action, a value is good only for a ceiling that the action lists.
