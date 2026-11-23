@@ -70,6 +70,7 @@ COPY --from=build /out/portal /portal
 FROM scratch AS runtime
 COPY --from=build --chown=10001:10001 /out/rootfs/ /
 COPY --from=build /out/portal /portal
+LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 USER 10001:10001
 # 4181: the portal: the pages, and the Inbox for the senders, the webhooks and the phones. 4182: the AuthZEN PDP.
 # Do not route 4182 through Traefik.
