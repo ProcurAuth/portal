@@ -60,7 +60,7 @@ jobs:
       # The runner has the architecture of the binary: tools/build.sh builds natively, then checks that it is static.
       - name: Build the static binary
         run: tools/build.sh server
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: server-${{ matrix.arch }}
           path: dist/portal_${{ needs.prepare.outputs.version }}_linux_${{ matrix.arch }}
@@ -93,7 +93,7 @@ jobs:
       - name: Remove the signing key
         if: always()
         run: rm -f "$RUNNER_TEMP/release.jks"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: apk
           path: dist/portal-inbox-${{ needs.prepare.outputs.version }}.apk
