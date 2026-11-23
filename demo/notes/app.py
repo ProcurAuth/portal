@@ -70,7 +70,7 @@ DOCUMENT = {
             "name": "max_results",
             "label": "Most notes in one read",
             "description": "The most notes that one read gives.",
-            "unit": "note",
+            "unit": "notes",
             "kind": "ceiling",
             "min": 1,
             "max": 100,

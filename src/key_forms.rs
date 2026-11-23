@@ -519,7 +519,7 @@ mod tests {
                              {"name":"data.admin","resource_types":["service"],"description":"a"},
                              {"name":"data.purge","resource_types":["host","database"],"description":"w"}],
                   "limits":[{"name":"requests","label":"R","description":"d","unit":"request","kind":"budget"},
-                            {"name":"max_rows","label":"M","description":"d","unit":"row","kind":"ceiling","min":1,"max":100000}]}"#,
+                            {"name":"max_rows","label":"M","description":"d","unit":"rows","kind":"ceiling","min":1,"max":100000}]}"#,
             )
             .unwrap(),
         )

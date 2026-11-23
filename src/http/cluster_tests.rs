@@ -3692,8 +3692,8 @@ pub(super) const KEY_TEST_DOCUMENT: &str = r#"{"server":"db",
      "limits":["max_duration"]}],
   "limits":[
     {"name":"requests","label":"Requests","description":"d","unit":"request","kind":"budget"},
-    {"name":"max_rows","label":"Rows","description":"d","unit":"row","kind":"ceiling","min":1,"max":100000},
-    {"name":"max_duration","label":"Duration","description":"d","unit":"second","kind":"ceiling","min":1,"max":3600}]}"#;
+    {"name":"max_rows","label":"Rows","description":"d","unit":"rows","kind":"ceiling","min":1,"max":100000},
+    {"name":"max_duration","label":"Duration","description":"d","unit":"seconds","kind":"ceiling","min":1,"max":3600}]}"#;
 
 /// The budgets count in windows that start at a multiple of their length of the clock. A test that counts several
 /// uses of a budget of one minute must not see the end of the window in the middle: the count starts again and a

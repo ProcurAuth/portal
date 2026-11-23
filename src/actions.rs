@@ -1382,7 +1382,7 @@ mod tests {
           {"name":"requests","label":"Queries","description":"The queries that a subject sends.",
            "unit":"request","kind":"budget"},
           {"name":"max_duration","label":"Maximum duration of a query","description":"The longest run of one query.",
-           "unit":"second","kind":"ceiling","min":0,"max":3600}]"#;
+           "unit":"seconds","kind":"ceiling","min":0,"max":3600}]"#;
         let actions = r#"[
           {"name":"query.run.read","resource_types":["service"],"description":"A query.","limits":["max_duration"]},
           {"name":"system.read","resource_types":["service"],"description":"The action system.read."}]"#;

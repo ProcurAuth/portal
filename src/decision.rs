@@ -341,8 +341,8 @@ mod tests {
                  "description":"Write.","limits":["max_duration"]}],
               "limits":[
                 {"name":"requests","label":"Requests","description":"d","unit":"request","kind":"budget"},
-                {"name":"max_rows","label":"Rows","description":"d","unit":"row","kind":"ceiling","min":1,"max":100000},
-                {"name":"max_duration","label":"Duration","description":"d","unit":"second","kind":"ceiling","min":1,"max":3600}]}"#,
+                {"name":"max_rows","label":"Rows","description":"d","unit":"rows","kind":"ceiling","min":1,"max":100000},
+                {"name":"max_duration","label":"Duration","description":"d","unit":"seconds","kind":"ceiling","min":1,"max":3600}]}"#,
         )
         .unwrap()
     }

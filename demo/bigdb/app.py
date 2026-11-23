@@ -58,7 +58,7 @@ def build():
             {"name": "requests", "label": "Requests", "description": "The uses of the service by one subject in a window.",
              "unit": "request", "kind": "budget"},
             {"name": "max_rows", "label": "Most rows", "description": "The most rows that one read gives.",
-             "unit": "row", "kind": "ceiling", "min": 1, "max": 1000000},
+             "unit": "rows", "kind": "ceiling", "min": 1, "max": 1000000},
         ],
         "resources": resources,
     }

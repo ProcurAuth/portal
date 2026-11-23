@@ -541,7 +541,7 @@ mod tests {
     fn duration_declaration() -> Declaration {
         check_declarations(raw(
             r#"[{"name":"max_duration","label":"Maximum duration","description":"The longest run of one use.",
-                 "unit":"second","kind":"ceiling","min":1,"max":3600}]"#,
+                 "unit":"seconds","kind":"ceiling","min":1,"max":3600}]"#,
         ))
         .unwrap()
         .remove(0)
@@ -751,7 +751,7 @@ mod tests {
     fn a_ceiling_accepts_the_minimum_zero() {
         let declarations = check_declarations(raw(
             r#"[{"name":"max_key_lifetime","label":"Longest key lifetime","description":"The longest lifetime of a key, in seconds.",
-                 "unit":"second","kind":"ceiling","min":0,"max":31536000}]"#,
+                 "unit":"seconds","kind":"ceiling","min":0,"max":31536000}]"#,
         ))
         .unwrap();
         let listed = vec!["max_key_lifetime".to_string()];
@@ -763,7 +763,7 @@ mod tests {
     fn the_declarations_follow_the_closed_schema() {
         let ok = check_declarations(raw(
             r#"[{"name":"requests","label":"Requests","description":"d","unit":"request","kind":"budget"},
-                {"name":"max_duration","label":"Duration","description":"d","unit":"second","kind":"ceiling","min":1,"max":60}]"#,
+                {"name":"max_duration","label":"Duration","description":"d","unit":"seconds","kind":"ceiling","min":1,"max":60}]"#,
         ))
         .unwrap();
         assert_eq!(ok[0].kind, Kind::Budget);
@@ -845,7 +845,7 @@ mod tests {
         }
         // A ceiling that Dash declares above 1e9 works: a value of 5 GB (the old bound was 1e9).
         let wide = check_declarations(raw(
-            r#"[{"name":"max_read_size","label":"Read size","description":"d","unit":"byte","kind":"ceiling","min":1,"max":1000000000000000}]"#,
+            r#"[{"name":"max_read_size","label":"Read size","description":"d","unit":"bytes","kind":"ceiling","min":1,"max":1000000000000000}]"#,
         ))
         .unwrap();
         let big = Limits::from_json(r#"{"max_read_size":5000000000}"#).unwrap();
