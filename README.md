@@ -2491,7 +2491,7 @@ Version 5.1.0 adds the agents of a key. Read these points before you upgrade fro
 - The Android app of 5.1.0 and the server of 5.1.0 go together. The app keeps its portals when it updates from an earlier build, and it drops its local items: they come back from the server at the next connection. A phone of an earlier build cannot read the new frames of the agents. Update the app and the server in one step.
 
 
-Unreleased changes the licence, adds one member to the metadata of the PDP, follows ProcurAuth 1.1 and corrects the documents. It changes no table of the database, no frame of the phone and no key of the file. Read these points before you upgrade from 5.5.1:
+Version 5.6.0 changes the licence, adds one member to the metadata of the PDP, follows ProcurAuth 1.1 and corrects the documents. It changes no table of the database, no frame of the phone and no key of the file. Read these points before you upgrade from 5.5.1:
 
 - The licence of the whole workspace is `MIT OR Apache-2.0`. Before, the workspace package and the shared crates said `LicenseRef-Proprietary`, and the root package said `MIT OR Apache-2.0`. The file `LICENSE-APACHE` now holds the full text of the Apache License 2.0. The image has the label `org.opencontainers.image.licenses`.
 - The metadata of the PDP now has `procurauth_directory_max_age_seconds`. With PostgreSQL, its value is `keys.directory_max_age` in whole seconds (default 30). The value is rounded up when the duration is not whole, and it is never 0. With SQLite, the value is 1, because the PDP has no copy of its directory (protocol 3.9). A service that does not know the member ignores it.
