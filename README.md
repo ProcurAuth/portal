@@ -430,6 +430,7 @@ Only a request with one evaluation can carry `context.usage` (protocol 6.11). A 
 | `procurauth_evaluations_max_bytes` | `pdp.max_body_bytes`. A larger body gets `400`. |
 | `procurauth_evaluations_max_items` | `pdp.max_evaluations` (default 128). A batch with more items gets `400`. A service splits its questions into batches that fit. |
 | `procurauth_usage_max_seconds` | `5`. A question with `context.usage` gets a decision or status `503` within 5 seconds. The look at the approval, the count of the units and the consumption of the approval each end within 2 seconds, and the count ends within 1 second. |
+| `procurauth_directory_max_age_seconds` | `keys.directory_max_age` in whole seconds (default 30). Without the block `keys`, the value is 30. The value is rounded up when the duration is not whole, and it is never 0. When the directory is older, the PDP answers `false` for each key. |
 
 With the block `inbox.approvals`, the metadata also has the twelve members `procurauth_approval_*` (see "The approval gate").
 
@@ -559,7 +560,8 @@ An approval that the server did not consume before `consume_before` is `void`. A
 
 | Status | `error` | Cause |
 |---|---|---|
-| 401, 403 | | no valid token, or the service declares no approval |
+| 401 | `unauthorized` | no token, or a token that no `pdp_client` block has. The answer has the header `WWW-Authenticate: Bearer realm="portal-pdp"` |
+| 403 | `forbidden` | the block `inbox.approvals` is absent |
 | 404 | `not_found` | an unknown request, a request of another server, or of another subject |
 | 405, 415 | | a wrong method, or a body that is not `application/json` |
 | 409 | `no_device` | the owner has no phone, and `web_approval` is false |
@@ -639,7 +641,7 @@ portal reads the actions of each service at `/.well-known/procurauth/actions`. T
 ```
 
 - A `404` is a failed read like any other (protocol 5.3). The portal keeps the last good document. A service that never had a good document has only `access`. `access` is the full permission. portal lets the user in. The service does no other check.
-- Any other failure keeps the last good document. The Services settings page shows the problem. The PDP also uses this document: see "AuthZEN PDP".
+- Any other failure keeps the last good document, until it is older than `access.actions_max_age` (default 1h). After that age, the service has only `access` (see the block `access`). The Services settings page shows the problem. The PDP also uses this document: see "AuthZEN PDP".
 - The page of a user has one editor of grants, the same editor as the forms of the keys (see "Editor of grants"). The editor shows the tree of the resources of a service and the actions of the chosen node. A person who gives a grant on a resource does not type its id: the editor lists the resources. portal takes them from the member `resources` of the action document and from the options of the service (portal 3.1a, protocol 5.6).
 - One **Save access** sends every grant of the account, with its limit values. The form replaces the grants of the account. The grants on the service `portal` (the rights on the keys) have their own form. A grant that the document of the service does not name now stays in the editor. The editor shows it, so a person can remove it. A grant of the configuration shows a lock and cannot change on the page.
 - A limit field shows the largest value that the document allows. This is a hint. An empty field gives no value: the limits of the service still apply. The protocol has no default value for a limit.
@@ -1098,9 +1100,13 @@ The Inbox is a feature of the portal. It runs in the same process and in the sam
 - **Subscription.** A phone subscribes to a group. The account must hold `inbox.receive` on the group. For each group, the person chooses on the phone how it reacts: `alarm`, `ring` or `notify`.
 - **Exactly-once display.** The transport is at least once. The phone ignores a repeat. The user sees each alert one time. See the list of the guarantees in `docs/inbox/README.md`.
 - **Degraded mode.** If PostgreSQL has no writable primary, the Inbox goes on. It keeps alerts in memory, delivers them to the connected phones and writes them when the database returns.
-- **Keys.** An `api_` key sends. An `mcp_` key does not send alerts at this step. The Inbox verifies the `api_` keys in process.
+- **Keys.** An `api_` key sends alerts. An `mcp_` key does not send alerts: it uses the agent channel for approvals and questions. The Inbox verifies the `api_` keys in process.
 
-The roadmap has three steps. Step 1 (now): services and scripts send alerts with `api_` keys. Step 2: agents send alerts, first through the same route with an `api_` key of their own. Step 3: agents send questions and approvals, and a person answers on the phone. Step 3 ends the rule that alerts are one way. It needs a new protocol version. `docs/inbox/SPEC.md` marks these requirements as future.
+The roadmap had three steps. Step 1 is alerts: services and scripts send alerts with `api_` keys. Alerts are one way.
+
+Step 3 is built and shipped in the versions 5.1 to 5.5. Agents ask for approvals and ask questions. The owner answers on the phone or in the web pages. These items need an answer, so the one-way rule holds for alerts only. Protocol 5 carries the items.
+
+Step 2 as first written is not built. An `mcp_` key does not send alerts, and the MCP endpoint has no tool `send_alert`. An agent that must send an alert uses an `api_` key, as any sender does. See "Agents and senders" and `docs/inbox/SPEC.md`, section 8.
 
 ```hcl
 inbox {
@@ -1845,7 +1851,7 @@ This block is optional. If it is present, the server accepts keys: a user makes 
 | `mcp` | `true` or `false` | `true` | `true`: the kind `mcp` is on. A user can make MCP keys, with the prefix `mcp_`, and the key edge and the PDP accept them. `false`: the kind is off. The key edge refuses these keys, and the pages show no MCP key, no MCP right and no MCP chip. The value `true` needs the blocks `identity` and `pdp`. |
 | `api` | `true` or `false` | `false` | `true`: the kind `api` is on. A user can make API keys, with the prefix `api_`, and the API of the inbox accepts them. `false`: the kind is off. The API of the inbox refuses these keys, and the pages show no API key, no API right and no API chip. The value `true` needs the block `inbox`. A block `api_key` needs the value `true`. |
 | `default_lifetime` | duration, 1d to 365d | `"30d"` | The lifetime that the form of a new key proposes. The form uses the lower of this value and the longest lifetime of the owner (`max_key_lifetime`). |
-| `directory_max_age` | duration, 15s to 5m | `"30s"` | The longest age of the directory of the users and the keys. When the last good read of the database is older, the PDP answers `false` for each key and the edge refuses each key. The directory is read again every 5 seconds, so the minimum is 3 rounds. |
+| `directory_max_age` | duration, 15s to 5m | `"30s"` | The longest age of the directory of the users and the keys. When the last good read of the database is older, the PDP answers `false` for each key and the edge refuses each key. The directory is read again every 5 seconds, so the minimum is 3 rounds. The metadata of the PDP gives this value in whole seconds as `procurauth_directory_max_age_seconds` (30 without the block `keys`). |
 | `max_per_user` | number, 1 to 10000 | `100` | The largest number of active keys of one user. An expired key and a key that is too old do not count. |
 | `max_counter_rows` | number, 1 to 100000000 | `2000000` | The largest number of counter rows. The server refuses a write that makes more rows. A file that needs more rows stops the server at start. One row is approximately 300 bytes. |
 | `max_directory_grants` | number, 1 to 100000000 | `4000000` | The largest number of grants of the directory: the grants of the users and the keys. The server refuses a write that makes more grants. A file that needs more grants stops the server at start. One grant takes approximately 200 bytes of memory. |
@@ -2484,6 +2490,13 @@ Version 5.1.0 adds the agents of a key. Read these points before you upgrade fro
 - The Android app of 5.1.0 and the server of 5.1.0 go together. The app keeps its portals when it updates from an earlier build, and it drops its local items: they come back from the server at the next connection. A phone of an earlier build cannot read the new frames of the agents. Update the app and the server in one step.
 
 
+Unreleased changes the licence, adds one member to the metadata of the PDP, and corrects the documents. It changes no table of the database, no frame of the phone and no key of the file. Read these points before you upgrade from 5.5.1:
+
+- The licence of the whole workspace is `MIT OR Apache-2.0`. Before, the workspace package and the shared crates said `LicenseRef-Proprietary`, and the root package said `MIT OR Apache-2.0`. The file `LICENSE-APACHE` now holds the full text of the Apache License 2.0. The image has the label `org.opencontainers.image.licenses`.
+- The metadata of the PDP now has `procurauth_directory_max_age_seconds`. Its value is `keys.directory_max_age` in whole seconds (default 30). The value is rounded up when the duration is not whole, and it is never 0. A service that does not know the member ignores it.
+- The approval API answers `401` with the code `unauthorized` and the header `WWW-Authenticate: Bearer realm="portal-pdp"` for an unknown credential. It answers `403` with the code `forbidden` only when the block `inbox.approvals` is absent. The code did not change: the README and the specification now say it.
+- The documents now say that the agents, the questions and the approvals exist (5.1 to 5.5). They also say that an `mcp_` key does not send alerts. The README now says that a failed read keeps the last good document of a service until `access.actions_max_age`.
+
 Version 5.5.1 changes only the text of one refusal. It changes no key, no table and no frame of the phone. Read this point before you upgrade from 5.5.0:
 
 - A grant with `confirm` on the action `access`, on the action `mcp.session` or on the service `portal` gets its own refusal. The key form gives the code `bad_confirm`, and the form of an account gives the notice `bad-confirm`. The text names the lock `confirm`. Before, the forms gave a general text about a grant that was not valid.
@@ -2595,10 +2608,10 @@ Version 5.0.1 closes the findings of a security audit. Read these points before 
 - The pages that draw the matrices need script. Without script, the pages list the grants as text.
 - The count of the states in the zone **Sent** comes from the 500 newest alerts of the period. The graph counts every alert.
 - Each instance counts only the refused sign-ins that it sees. A burst on several instances can stay under the threshold of the alert of the portal.
-- Steps 2 and 3 of the roadmap (agents, questions, approvals) do not exist yet. Alerts are one way in this version.
+- Alerts are one way: no person acknowledges an alert. Agents, questions and approvals exist (versions 5.1 to 5.5), but an `mcp_` key cannot send an alert. There is no tool `send_alert`.
 - The release builds the binary for amd64 and for arm64. The image for arm64 is not built in this repository. No image is published.
 
 ## Licence
 
-The licence of the merged code is an open point. The root package says `MIT OR Apache-2.0`, and the shared crates say `LicenseRef-Proprietary`. The owner has not decided. The files `LICENSE-MIT` and `LICENSE-APACHE` come from the earlier portal. They do not decide the licence of the merged code.
+The portal is under the licence `MIT OR Apache-2.0`. You can use it under the terms of either licence. The files `LICENSE-MIT` and `LICENSE-APACHE` at the root hold the two texts. Each Cargo manifest of the workspace has the same SPDX expression.
 

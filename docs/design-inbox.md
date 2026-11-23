@@ -56,7 +56,7 @@ The owner answered these points. The plan of the rework lists them as answered.
   A key follows its owner for both kinds. No service account exists. The rights to make and to use a key are by kind.
 - **Switches.** The portal can run as a panel of services only. The switches are `keys.mcp`, `keys.api` and `users.allow_creation`, and the blocks `keys` and `inbox`.
 - **Pages.** Four tabs: Users, Services, Keys and Inbox. Dense pages with panels and chips. The row action is variant A: a selection and **Revoke (N)**.
-- **Roadmap.** Step 1 is alerts. Step 2 is agents that send alerts. Step 3 is questions and approvals. The one-way rule for alerts ends at step 3 for the new kinds (section 17). The field `kind` exists from step 1.
+- **Roadmap.** Step 1 is alerts. Step 3 is questions and approvals, and it shipped in 5.1 to 5.5. Step 2 (agents that send alerts) is not built. The one-way rule for alerts ends at step 3 for the new kinds (section 17). The field `kind` exists from step 1.
 - **Open questions with defaults.** The plan lists questions Q1 to Q6. The defaults apply. File keys replace the token blocks. The owner of a file key is a file account.
 
   The CRC-32 covers the prefix. The page of an account tells the number of keys. The switch defaults are `keys.mcp = true`, `keys.api = false` and `users.allow_creation = true`. Agents use an `api_` key of their own at step 2.
@@ -551,7 +551,6 @@ The commands are in the section "Build and release" of the README. The files are
 
 ## 16. Open points
 
-- **Licence.** The licence of the merged code is open. The root package says `MIT OR Apache-2.0`. The shared crates say `LicenseRef-Proprietary`. The files `LICENSE-MIT` and `LICENSE-APACHE` come from the earlier portal.
 - **QR code.** A QR code for enrollment needs a camera library in the app. It is not in this version. The code is text or a link.
 - **Arm64 image.** The release builds the arm64 binary on a native runner. The arm64 image is not built or tested here.
 - **K3s files.** The tests of the manifests are a render with kustomize and `check-config`. No cluster was used. The SQLite variant of the manifests is a comment only.
@@ -568,21 +567,22 @@ The commands are in the section "Build and release" of the README. The files are
 - **Old comments.** The comments of the moved code are not rewritten in Simplified Technical English.
 - **Source names.** The source text of an alert from an API key still uses the earlier word for a sender. So does one value of the metric label `source`. The rename did not touch these values. The pages and the documents do not show them as a name.
 - **Reserved prefix.** `whk_` is reserved and not implemented.
-- **Roadmap.** Steps 2 and 3 are not built (section 17).
+- **Roadmap.** Step 3 is built (section 17). Step 2, an alert from an `mcp_` key, is not built.
 - **Documents of the demo.** `demo/README.md` needs the changes that the report of batch F lists.
 
 ## 17. Roadmap: steps 2 and 3
 
-The papers of 2026-11-08 settled step 3. The owner accepted them as final product decisions. The specification of the Inbox (`inbox/SPEC.md`, sections 3.6 to 3.10, 4.11 and 5.11) holds the requirements. This section gives the reasons and the shape of the work.
+The papers of 2026-11-08 settled step 3. The owner accepted them as final product decisions. Step 3 is built and shipped in the versions 5.1 to 5.5. The specification of the Inbox (`inbox/SPEC.md`, sections 3.6 to 3.10, 4.11 and 5.11) holds the requirements. This section gives the reasons and the shape of the work.
 
-| Step | Who sends | Kinds of message | Key kind | What changes |
+| Step | Who sends | Kinds of message | Key kind | State |
 |---|---|---|---|---|
-| 1 (now, 5.0.x) | Services, scripts, Grafana webhooks | Alert | `api_` | The pages and the rename (batches A to F). |
-| 2 | Agents | Alert | `mcp_` | The agent sends alerts through the REST route first. The MCP side comes with the tools map. |
-| 3, release 5.1.0 | Agents | Approval, discussion | `mcp_` and `api_` | Protocol 5, the items engine, the grant `confirm`, sealed bodies, the agent channel and preferences. |
-| 3, release 5.2.0 | Agents, decision systems | Question | `mcp_` and `api_` | The tool `ask`, the rights `question.*`, the budget `questions` and the command `rekey`. |
+| 1 (5.0.x) | Services, scripts, Grafana webhooks | Alert | `api_` | Built. |
+| 2 | Agents | Alert | `mcp_` | Not built. An `mcp_` key does not send alerts, and there is no tool `send_alert`. |
+| 3, release 5.1.0 | Agents | Approval, discussion | `mcp_` and `api_` | Built. Protocol 5, the items engine, the grant `confirm`, sealed bodies, the agent channel and preferences. |
+| 3, release 5.2.0 | Agents, decision systems | Question | `mcp_` and `api_` | Built. The tool `ask`, the rights `question.*`, the budget `questions` and the command `rekey`. |
+| 3, releases 5.3.0 to 5.5.1 | Services | Approval for any action of any service | `pdp_client` token | Built. The approval API, the PDP answer `approval_required` and the alignment with the ProcurAuth specification. |
 
-### 17.1 What step 1 does now to leave room
+### 17.1 What step 1 did to leave room
 
 - **Name.** "Inbox" and "Sent" hold three kinds. No tab or path says "alerts".
 - **Permissions.** `inbox.receive` is the same for all kinds. A new kind adds actions. The matrix of the editor builds its columns from a list, so the columns Read and Cancel are two more columns, not a new editor.
@@ -593,9 +593,10 @@ The papers of 2026-11-08 settled step 3. The owner accepted them as final produc
 
 ### 17.2 Step 2
 
-- An agent sends alerts through the REST route first, with an `api_` key of its own.
-- The MCP side for alerts comes with the tools map: a tool `send_alert` maps to `alert.send`.
-- The sender cell of "Sent" shows a webhook icon for an `api_` key and a robot icon for an `mcp_` key.
+Step 2 is not built. An agent can send alerts through the REST route with an `api_` key of its own, as any sender does. The other parts of the first sketch do not exist:
+
+- The MCP side for alerts: a tool `send_alert` that maps to `alert.send`.
+- The icon of the sender cell of "Sent": a webhook icon for an `api_` key and a robot icon for an `mcp_` key.
 
 ### 17.3 Step 3: the decisions of the owner
 

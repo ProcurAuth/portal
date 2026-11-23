@@ -219,7 +219,7 @@ The page is `/auth/settings/inbox`. The pages of the requests are under it. The 
 | **Send alert** | `alert.send` on one group at least | The form of a manual alert. The field `to` has the value `group:<id>` or `user:<login>`. A target `user:<login>` needs `alert.send_user`. |
 | The book icon | `alert.send` or `alert.read` | The routes, the groups and the header of the key. |
 
-The zone **Sent** holds the 500 newest alerts of the period. The count shows `500+` when older alerts exist. The counts of the state chips come from these alerts. The graph counts every alert. The chips Question, Approval and Unanswered are dashed and do nothing. They show the place for a later step (see "Roadmap").
+The zone **Sent** holds the 500 newest alerts of the period. The count shows `500+` when older alerts exist. The counts of the state chips come from these alerts. The graph counts every alert. The zone lists alerts only. The items are in the panel "Open items" and in the zone "History".
 
 A session that the superadmin opens with **Log in as** can read the page and make a code. It cannot send an alert and it cannot revoke a phone. It reads no request and answers no request.
 
@@ -443,15 +443,17 @@ An alert that the Inbox accepts while the database is away exists only in memory
 
 ## Roadmap
 
-The Inbox has three steps. Only step 1 exists. The numbered requirements in [`SPEC.md`](SPEC.md) mark steps 2 and 3 as future.
+The Inbox had three steps. Steps 1 and 3 are built. Step 2 is not built. The numbered requirements in [`SPEC.md`](SPEC.md) say which release holds each requirement.
 
-| Step | Who sends | Kinds of message | Key kind |
-|---|---|---|---|
-| 1 (now) | Services, scripts, Grafana and Alertmanager | Alert | `api_` |
-| 2 | Agents | Alert | `mcp_` |
-| 3 | Agents | Question, approval | `api_` and `mcp_` |
+| Step | Who sends | Kinds of message | Key kind | State |
+|---|---|---|---|---|
+| 1 | Services, scripts, Grafana and Alertmanager | Alert | `api_` | Built (5.0.x). |
+| 2 | Agents | Alert | `mcp_` | Not built. |
+| 3 | Agents and services | Question, approval | `api_` and `mcp_` | Built (5.1 to 5.5). |
 
-At step 2, an agent first sends alerts through the same REST route with an `api_` key of its own. The MCP side comes later with the tools map. At step 3, an agent asks a question or asks for an approval, and a person answers on the phone. This ends the rule that alerts are one way. Step 3 needs a new protocol version, a state machine for each item, a timeout and an audit record.
+Alerts are one way: no person acknowledges an alert. An agent that must send an alert uses an `api_` key, as any sender does. An `mcp_` key does not send alerts, and there is no tool `send_alert`.
+
+Step 3 is in force. An agent asks for an approval or asks a question, and the owner answers on the phone or in the web pages. Protocol 5 carries these items. Each item has a state machine, a lease or a timeout, and an audit record. See [`agents.md`](agents.md) for the tools and [`protocol.md`](protocol.md) for the frames.
 
 ## Troubleshoot
 

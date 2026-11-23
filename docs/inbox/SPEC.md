@@ -4,7 +4,7 @@ This document states what the Inbox does and why. The Inbox is a feature of the 
 
 The words MUST, MUST NOT, SHOULD and MAY are the key words of RFC 2119 and RFC 8174.
 
-A requirement has one of three states. A requirement without a mark is in force in version 5.0.x (step 1 of the roadmap). A requirement with the mark **[5.1.0]**, **[5.2.0]** or **[5.3.0]** is for that release of step 3. A requirement with the mark **FUTURE** is for a later step. No code implements a marked requirement before its release. Section 8 lists the steps.
+A requirement has one of three states. A requirement without a mark is in force since version 5.0.x (step 1 of the roadmap). A requirement with a mark of a release, for example **[5.1.0]** or **[5.5.0]**, is in force since that release. The releases 5.1.0 to 5.5.1 built step 3. A requirement with the mark **FUTURE** is not built: no code implements it. Section 8 lists the steps.
 
 Each requirement has an id and a testable verb. Section 6.12 gives the lot and the test for each id of the releases 5.1.0, 5.2.0 and 5.3.0. A decision of the owner has the word **Decision** (section 3.10).
 
@@ -21,7 +21,7 @@ Each requirement has an id and a testable verb. Section 6.12 gives the lot and t
 | In scope | Out of scope |
 |---|---|
 | The Inbox feature of the binary `portal`. | A standalone alert server binary. |
-| The Android app Portal Inbox. It only receives alerts. | iOS. It cannot keep a connection in the background without the push service of Apple. |
+| The Android app Portal Inbox. It receives alerts and items, and the owner answers the items on it. | iOS. It cannot keep a connection in the background without the push service of Apple. |
 | The API for the senders, the webhooks for Alertmanager and Grafana, and the page of the tab Inbox. | A push service of a third party (Firebase or Apple). |
 | Alerts of the portal about itself. | An acknowledgement of an alert by a person. An alert stays one way. The items of 3.6 need an answer. |
 | Docker Compose and K3s files. | A Grafana plugin. Grafana contact points cannot be extended. |
@@ -194,7 +194,7 @@ An approval asks the owner of a key to allow one exact action of an agent. The p
 
 3.7.2c **[5.5.0]** The approval follows the action of the use of an operation alone (protocol 5.5a, 17.7). The PDP MUST ignore `confirm` for a question with `context.permission_only` equal to `true`. It MUST answer HTTP 400 for this member with `context.usage`, with `context.approval` or with another value, and `invalid_request` in a batch item. Tests: `pdp::approval_tests::a_question_of_another_permission_never_asks_for_an_approval`.
 
-3.7.2b **[5.3.0]** Any token of a block `pdp_client` MAY use the approval API when the block `inbox.approvals` exists. Else the API MUST answer `403`. The sealed `evaluation_id` MUST bind a submission to the service, the subject, the action, the resource and the effect of the answer `approval_required`. A submission for another action, resource or effect MUST get `422 invalid_evaluation`. The body of a submission MUST NOT name the action.
+3.7.2b **[5.3.0]** Any token of a block `pdp_client` MAY use the approval API when the block `inbox.approvals` exists. A request with no valid token of a block `pdp_client` MUST get `401` with the code `unauthorized` and the header `WWW-Authenticate: Bearer realm="portal-pdp"`. A valid token and no block `inbox.approvals` MUST get `403` with the code `forbidden`. The sealed `evaluation_id` MUST bind a submission to the service, the subject, the action, the resource and the effect of the answer `approval_required`. A submission for another action, resource or effect MUST get `422 invalid_evaluation`. The body of a submission MUST NOT name the action.
 
 3.7.3 **[5.1.0]** The `evaluation_id` MUST be stateless. It MUST hold a key id, the time of issue and an HMAC. The HMAC covers the service, the subject, the action, the resource, the effect and the time. It MUST also hold the subject, the action and the resource, sealed with the content key, because a submission does not have them. It MUST be valid for `inbox.approvals.evaluation_ttl`. A submission without a valid `evaluation_id` for the same subject, action and resource MUST be refused.
 
@@ -945,19 +945,21 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 
 ## 8. Roadmap: steps and releases
 
-The roadmap has three steps. Step 1 is version 5.0.x. Step 2 is not built. Step 3 is the items.
+The roadmap had three steps. Step 1 is version 5.0.x and it is built. Step 2 is not built. Step 3 is the items, and it is built in the releases 5.1.0 to 5.5.1.
 
-Release 5.1.0 has the approvals and the discussion. Release 5.2.0 has the questions. The requirements of step 3 are in 3.6 to 3.10, 4.11, 5.11 and 5.12. The decisions of the owner are final.
+Release 5.1.0 has the approvals and the discussion. Release 5.2.0 has the questions. Release 5.3.0 gives the approval to each service. The releases 5.4.0 to 5.5.1 align the portal with the ProcurAuth specification. The requirements of step 3 are in 3.6 to 3.10, 4.11, 5.11 and 5.12. The decisions of the owner are final.
 
-### 8.1 Step 2: agents send alerts (FUTURE)
+### 8.1 Step 2: agents send alerts (not built)
 
-8.1.1 **FUTURE.** An agent MUST send alerts through the REST route of 3.3, with an `api_` key of its own.
+An agent can send alerts today with an `api_` key of its own, through the route of 3.3, as any sender does. The requirements 8.1.2 and 8.1.3 are not built.
+
+8.1.1 An agent MUST send alerts through the REST route of 3.3, with an `api_` key of its own. No new code is needed: the route of 3.3 already accepts the key.
 
 8.1.2 **FUTURE.** The MCP side MAY accept an alert from an `mcp_` key. It comes with the tools map: a tool `send_alert` maps to the action `alert.send`.
 
 8.1.3 **FUTURE.** The zone **Sent** SHOULD show a webhook icon for an `api_` key and a robot icon for an `mcp_` key.
 
-### 8.2 Step 3: approvals and questions
+### 8.2 Step 3: approvals and questions (built)
 
 8.2.1 **[5.1.0]** Release 5.1.0 MUST hold the grant `confirm`, the approvals and the discussion. It MUST hold the agent channel with REST and `/mcp`, the sealed bodies, the preferences, the web pages and the phone screens. The key `interaction` and the variant `one_shot` MUST be in the same release.
 
