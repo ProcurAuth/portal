@@ -1,6 +1,6 @@
 # Android build toolchain: JDK 17, Android SDK/NDK, Gradle, Rust Android targets.
 # Used locally (tools/android/build-apk.sh) and by CI.
-FROM eclipse-temurin:17-jdk-jammy
+FROM eclipse-temurin:25-jdk-jammy
 
 ARG CMDLINE_TOOLS=11076708
 ARG ANDROID_PLATFORM=35
