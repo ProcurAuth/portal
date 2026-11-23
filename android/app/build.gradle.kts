@@ -69,5 +69,5 @@ dependencies {
     implementation("androidx.biometric:biometric:1.1.0")
     // The unit tests run on the JVM. The Android `org.json` is a stub there: use the real library.
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.json:json:20240303")
+    testImplementation("org.json:json:20260814")
 }
