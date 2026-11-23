@@ -18,7 +18,7 @@ jobs:
     name: Policy (no image is published)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Never publish container images
         # Images are built locally only. No workflow may log in to a registry or push to it.
         run: |
@@ -33,12 +33,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The tests of the series D (the PDP) and E (the edge) of the protocol read the cases of the procurauth repository.
       # The step pins one commit, so a change of the protocol never breaks a run by itself.
       # The commit below is on main of procurauth. Never pin a commit that is not on main.
       - name: Check out the conformance cases of the protocol
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ProcurAuth/procurauth
           ref: bb6f9b0088095b9f2a9ffa3ad7e94a6deb0f1db3
@@ -64,7 +64,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build the image (local only)
         run: tools/build.sh image
       - name: Check that the binary is static
@@ -85,7 +85,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Throwaway signing key (the APK is not uploaded)
         run: |
           keytool -genkeypair -noprompt -keystore "$RUNNER_TEMP/ci.jks" -storepass ci-store-pass \
