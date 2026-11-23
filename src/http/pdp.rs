@@ -385,6 +385,17 @@ async fn handle(
 /// statement have 500 ms each, portal 7.7). The sum is 5 s.
 pub(super) const USAGE_MAX_SECONDS: u64 = 5;
 
+/// The default of `keys.directory_max_age` in whole seconds. The metadata publishes it when the file has no block `keys`.
+const DEFAULT_DIRECTORY_MAX_AGE_SECONDS: u64 = 30;
+
+/// The value of `keys.directory_max_age` as a whole number of seconds, for the metadata (spec 3.9). A duration that
+/// is not whole is rounded up, and the result is never 0: a service that reads it never has a bound of zero.
+fn directory_max_age_seconds(age: Duration) -> u64 {
+    age.as_secs()
+        .saturating_add(u64::from(age.subsec_nanos() > 0))
+        .max(1)
+}
+
 /// The reason in the log for a key that the rules of its owner refuse (the right to use keys, the maximum life).
 const OWNER_RULES: &str = "the rules of the owner do not let the key work";
 
@@ -401,6 +412,13 @@ fn metadata(state: &AppState) -> HttpResponse {
         .pdp
         .as_ref()
         .map_or((0, 0), |p| (p.max_body_bytes, p.max_evaluations));
+    let directory_max_age = state
+        .config
+        .keys
+        .as_ref()
+        .map_or(DEFAULT_DIRECTORY_MAX_AGE_SECONDS, |keys| {
+            directory_max_age_seconds(keys.directory_max_age)
+        });
     let mut document = json!({
         "policy_decision_point": base,
         "access_evaluation_endpoint": format!("{base}{EVALUATION_PATH}"),
@@ -412,6 +430,8 @@ fn metadata(state: &AppState) -> HttpResponse {
         "procurauth_evaluations_max_bytes": max_bytes,
         "procurauth_evaluations_max_items": max_items,
         "procurauth_usage_max_seconds": USAGE_MAX_SECONDS,
+        // The longest age of the directory of the keys (spec 3.9): a service can bound the age of its own copy.
+        "procurauth_directory_max_age_seconds": directory_max_age,
     });
     if let Some(Value::Object(members)) = approval::metadata(&state.config) {
         if let Value::Object(document) = &mut document {
@@ -1558,6 +1578,29 @@ mod tests {
             kind: "user".into(),
             id: id.into(),
         }
+    }
+
+    #[test]
+    fn the_directory_age_of_the_metadata_is_a_whole_number_from_one() {
+        let seconds = |millis: u64| directory_max_age_seconds(Duration::from_millis(millis));
+        assert_eq!(seconds(30_000), 30);
+        assert_eq!(seconds(15_000), 15);
+        assert_eq!(seconds(300_000), 300);
+        // A duration that is not whole seconds is rounded up.
+        assert_eq!(seconds(30_001), 31);
+        assert_eq!(seconds(1_500), 2);
+        assert_eq!(seconds(1), 1);
+        // The value is never 0.
+        assert_eq!(seconds(0), 1);
+        assert_eq!(
+            directory_max_age_seconds(Duration::new(7, 1)),
+            8,
+            "one nanosecond over rounds up"
+        );
+        assert_eq!(
+            DEFAULT_DIRECTORY_MAX_AGE_SECONDS, 30,
+            "the default of keys.directory_max_age"
+        );
     }
 
     #[test]
