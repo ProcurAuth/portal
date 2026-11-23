@@ -3,7 +3,8 @@
 # with openssl for the keys and curl for the seed. Nothing is published to a registry: the portal
 # image stays on this machine.
 #
-# The superadmin password is `test`. This is for a demo on one machine only.
+# Each password is random, the superadmin password too. The script writes them to .secrets/credentials.txt.
+# This is for a demo on one machine only.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -19,7 +20,7 @@ docker build -q -t local/portal:demo -f ../docker/Dockerfile --target runtime ..
 umask 077
 # Each file is made one time. A file that exists stays: delete it to make it again.
 [ -f "$secrets/superadmin_login" ] || printf 'admin' > "$secrets/superadmin_login"
-[ -f "$secrets/superadmin_password" ] || printf 'test' > "$secrets/superadmin_password"
+[ -f "$secrets/superadmin_password" ] || random 20 > "$secrets/superadmin_password"
 for user in alice bob carol; do
   [ -f "$secrets/${user}_password" ] || random 20 > "$secrets/${user}_password"
 done

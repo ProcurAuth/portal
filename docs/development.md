@@ -23,7 +23,8 @@ All commands run in Docker. The host needs only Docker, and `python3` for the sc
 
 | Check | Command |
 |---|---|
-| Format and clippy | `tools/dev/lint.sh` |
+| Reads of the environment, format and clippy | `tools/dev/lint.sh` |
+| Reads of the environment only | `tools/dev/check-env-reads.sh` |
 | Tests | `tools/dev/test.sh --workspace --no-fail-fast` |
 | End-to-end tests of the Inbox on PostgreSQL | `INBOX_E2E_BACKEND=postgres tools/dev/test.sh --test inbox_e2e` |
 | STE limits of a document | `python3 tools/dev/ste-check.py docs/operations.md` |
@@ -38,7 +39,7 @@ To format the code, run `cargo fmt --all` in the same Rust image that `tools/dev
 
 ### The test script
 
-The script `tools/dev/test.sh [cargo test arguments]` starts a throwaway PostgreSQL 18 in Docker, then runs `cargo test --locked` in a Rust container with the arguments. It never writes in the source tree. The variables are these:
+The script `tools/dev/test.sh [cargo test arguments]` starts a throwaway PostgreSQL 18 in Docker, then runs `cargo test --locked` in a Rust container with the arguments. It never writes in the source tree. The exit status of the script is the exit status of `cargo test`. After the signal INT, the exit status is 130, and after TERM, it is 143. When a step of the set-up fails, the exit status is not 0. The variables are these:
 
 | Variable | Use |
 |---|---|
@@ -48,8 +49,33 @@ The script `tools/dev/test.sh [cargo test arguments]` starts a throwaway Postgre
 | `PROCURAUTH_CASES` | A list of case ids, for example `D97,D98`. The tests of the series D run only these cases. |
 | `INBOX_E2E_BACKEND` | Set it to `postgres` to run `tests/inbox_e2e.rs` on PostgreSQL instead of SQLite. |
 | `RUST_IMAGE` | The Rust image. The default is `rust:1.98`. |
+| `PORTAL_KEEP_PG` | Set it to `1` to keep the container `portal-pg` and the network `portal-net` at exit. Then the next run starts faster. |
+
+The PostgreSQL image is `postgres:18` with a fixed digest. To change the image, change the tag and the digest together in the script.
+
+At exit, the script removes the container `portal-pg` and the network `portal-net` that it created. This occurs after a success and after an error. The script does not remove them when you set `PORTAL_KEEP_PG=1`. It also does not remove them when a different container uses `portal-net`, for example a test run of a different worktree. The Docker volumes of the build output and of the Cargo registry stay: they are caches.
+
+When a container `portal-pg` of an earlier run is active, the script uses it again. The script did not create this container, so it does not remove it at exit. To remove it, run `docker rm -f portal-pg`, then `docker network rm portal-net`.
+
+The signals INT and TERM do not stop the test container. The shell runs a trap only after the foreground `docker run` returns. Also, `cargo` is the first process of the container, and it ignores the signals that Docker sends to it. Thus the removal and the exit occur when the test container stops.
 
 To regenerate the configuration reference, run `portal config-reference` and put the output between the markers of `docs/configuration.md`. A test fails when the text is not the generated text. To regenerate the pages of the site, run `python3 tools/docs/build_site.py`.
+
+### The guard of the environment reads
+
+The configuration file is the only source of the configuration. In the Rust code of this project, only `src/config.rs` reads an environment variable directly. It reads a variable only when the file names it with `<name>_env`. The script `tools/dev/check-env-reads.sh` checks this rule. It looks for `std::env::var`, `var_os`, `vars`, `vars_os`, `set_var` and `remove_var` in the Rust files of `src/` and `crates/`.
+
+The script does not see the reads in the dependencies. For example, the HTTP client `reqwest` reads the proxy variables `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`. The portal makes its `reqwest` clients with the default settings, so these variables apply to its HTTP calls.
+
+The script does not examine test code. These parts are test code:
+
+- A file with the name `tests.rs` or `*_tests.rs`, and each file in a directory with the name `tests`.
+- The lines of an inline module after `#[cfg(test)]`, up to the end brace `}` at the same indent. A comment `// ...` can follow this brace.
+- The file of an out-of-line module after `#[cfg(test)]`, for example `mod fixtures;`.
+
+The script also ignores comment lines. It reads the files only. It needs `sh`, `find`, `grep` and `awk`. The exit status is 0 when the script finds no read, and 1 when it finds a read. It then gives the file, the line and the text of each read.
+
+`tools/dev/lint.sh` runs the script first, before the format check and clippy. Set `CARGO_BUILD_JOBS` to limit the parallel jobs of cargo in the lint container.
 
 ## Test layout
 

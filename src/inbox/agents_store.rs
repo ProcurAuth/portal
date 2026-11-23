@@ -5,9 +5,6 @@
 //! actions of the owner. The operations are in `agents_ops.rs`. The hints are the only sealed values here: the
 //! engine opens them for the owner and never logs them.
 
-// The channel (G1b), the phones (G2) and the web (G3) call this API in the next lots.
-#![allow(dead_code)]
-
 use super::agents::{
     check_binding, merge_hints, new_token, token_digest, token_has_form, AgentCall, AgentError,
     AgentEventRow, AgentKind, AgentMode, AgentRow, AgentSummary, Hints, Observed, Resolved,
@@ -87,7 +84,7 @@ impl Items<'_> {
         }))
     }
 
-    /// Finds the agent of a call, or makes it (section 4.3 of the proposal).
+    /// Finds the agent of a call, or makes it.
     ///
     /// - The mode `key`: the bucket of the key (made at the first item). The token is ignored.
     /// - A token: its agent. An unknown token, a token of another key and a token of another owner give the same
@@ -195,7 +192,7 @@ impl Items<'_> {
         Ok(target)
     }
 
-    /// The rule of section 4.4 for a call that names an item (see [`check_binding`]). `resolved` is what
+    /// The rule for a call that names an item (see [`check_binding`]). `resolved` is what
     /// [`Items::resolve_agent`] gave with `creating = false`. A read goes by the key: no token is allowed, and a token
     /// must be the agent of the item. A write on the item of a real agent needs the token. An item of the bucket needs
     /// the key only.

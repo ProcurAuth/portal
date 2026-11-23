@@ -1,17 +1,16 @@
 use std::collections::HashMap;
 use zeroize::Zeroize;
 
+/// Compares two secrets and tells if they are equal. The time does not change with the content of
+/// the bytes, so an attacker cannot learn a secret from the time of the answer. The time can change
+/// with the lengths, and two slices of different lengths are not equal. The comparison comes from
+/// `aws_lc_rs::constant_time`, so the compiler cannot change it into a comparison that stops early.
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (&x, &y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    aws_lc_rs::constant_time::verify_slices_are_equal(a, b).is_ok()
 }
 
+/// Escapes a text for HTML. The function replaces the characters `&`, `<`, `>`, `"` and `'` with
+/// their entities. Use the result in the content of an element or in a quoted attribute value.
 pub fn html_escape(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for c in input.chars() {
@@ -27,6 +26,8 @@ pub fn html_escape(input: &str) -> String {
     out
 }
 
+/// Escapes a text for the inside of a JSON string. The function escapes the quote, the backslash
+/// and each control character. The result does not include the quotes around the string.
 pub fn json_escape(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for c in input.chars() {
@@ -747,6 +748,15 @@ mod tests {
         assert_eq!(short_agent("curl/8.5.0"), "curl 8");
         assert_eq!(short_agent(""), "unknown");
         assert_eq!(short_agent(&"x".repeat(100)).len(), 40);
+    }
+
+    #[test]
+    fn secrets_are_equal_only_with_the_same_bytes_and_length() {
+        assert!(constant_time_eq(b"", b""));
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secreT"));
+        assert!(!constant_time_eq(b"secret", b"secret2"));
+        assert!(!constant_time_eq(b"", b"x"));
     }
 
     #[test]

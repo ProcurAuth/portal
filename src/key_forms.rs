@@ -19,8 +19,6 @@
 //! A field that is unknown, or a field name that has none of these forms, is a bad request (HTTP
 //! 400). The caller reads the fields with `parse_form`, which refuses a repeated field.
 
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 

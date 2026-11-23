@@ -781,11 +781,11 @@ fn source_of(r: &Resolved, key: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The superadmin passwords that the repository publishes as examples: `.env.example` of the
-/// repository root, `.env.example` and the quick start of the documentation. Anybody who reads the
-/// repository knows them.
+/// Superadmin passwords that earlier examples of the portal used. They are public, so the program
+/// refuses them.
 const EXAMPLE_PASSWORDS: [&str; 2] = ["change-me-use-a-long-random-secret", "test1234"];
-/// The session secret that `.env.example` of the repository root publishes as an example.
+/// The session secret that an earlier example of the portal used. It is public, so the program
+/// refuses it.
 const EXAMPLE_SESSION_SECRETS: [&str; 1] = ["change-me-with-a-long-random-value"];
 
 /// Tells whether `value` is one of the published example values. The error never shows the value.

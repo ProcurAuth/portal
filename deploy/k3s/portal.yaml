@@ -189,9 +189,11 @@ spec:
         emptyDir:
           medium: Memory
           sizeLimit: 16Mi
-      # Servers only, one instance for each node: the loss of a node never takes both instances.
-      nodeSelector:
-        home.server: 'true'
+      # One instance for each node: the loss of a node never takes both instances. An update starts the new pod
+      # before it stops an old one, so it needs a third node.
+      # To keep the portal on some nodes only, add a `nodeSelector` with a label of these nodes, for example:
+      # nodeSelector:
+      #   example.com/role: server
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -200,10 +202,11 @@ spec:
               matchLabels:
                 app: portal
       tolerations:
-      - key: home.server
-        operator: Equal
-        value: 'true'
-        effect: NoSchedule
+      # When these nodes have a taint, add its toleration, for example:
+      # - key: example.com/role
+      #   operator: Equal
+      #   value: server
+      #   effect: NoSchedule
       # Kubernetes waits 5 minutes before it evicts a pod from a lost node. The gate of every page must not wait so long.
       - {key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30}
       - {key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30}

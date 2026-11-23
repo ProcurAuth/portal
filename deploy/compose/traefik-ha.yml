@@ -13,9 +13,11 @@ http:
       priority: 1000
       middlewares: [inbox-retry]
       service: pages
+    # The proxy does not route metrics.path (`/metrics` in deploy/compose/config.hcl). To read the metrics, connect
+    # Prometheus to the Compose network and read each instance on port 4181.
     pages:
       entryPoints: [pages]
-      rule: "PathPrefix(`/`)"
+      rule: "PathPrefix(`/`) && !Path(`/metrics`)"
       service: pages
   middlewares:
     inbox-retry:

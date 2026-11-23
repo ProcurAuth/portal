@@ -13,8 +13,6 @@
 //! A grant below the service applies only when the document of the service declares its chain
 //! and lists its type for its action. A grant on the whole service needs no declaration.
 
-#![allow(dead_code)]
-
 use crate::actions::Document;
 use crate::grants::{CounterId, Grant, Segment, ACCESS};
 use crate::limits::{Kind, Limits, Value};

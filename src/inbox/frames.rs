@@ -24,9 +24,6 @@
 //!   the answer to a form: `[{question_id, choice?: [id], text?}]`. A text that is not such an object reads as the
 //!   text of the owner, with no intent.
 
-// The agent channel writes the sealed turns with the types of this module.
-#![allow(dead_code)]
-
 use inbox_core::effect::{Op, View};
 use inbox_core::proto::{
     is_untrusted_line, AgentKind as WireKind, AgentMsg, AgentState as WireState, ApprovalBody,

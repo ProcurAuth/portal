@@ -9,6 +9,8 @@ version = "5.6.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/ProcurAuth/portal"
+homepage = "https://procurauth.github.io/portal/"
 publish = false
 
 [workspace.dependencies]
@@ -27,13 +29,16 @@ pulldown-cmark = { version = "=0.13.4", default-features = false }
 
 [package]
 name = "portal"
+# tools/version.sh reads this field and stops when it is not equal to the version of [workspace.package].
 version = "5.6.0"
+# The server stays on the 2021 edition. The crates under crates/ take the edition of [workspace.package].
 edition = "2021"
-rust-version = "1.88"
-license = "MIT OR Apache-2.0"
+rust-version.workspace = true
+license.workspace = true
 description = "Launcher, accounts, keys with limits, AuthZEN decision point and inbox for a homelab"
-repository = "https://github.com/ProcurAuth/portal"
-publish = false
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
 
 [dependencies]
 hyper = { version = "=1.11.0", features = ["http1", "server"] }
@@ -81,6 +86,11 @@ unicode-normalization = { version = "=0.1.25", default-features = false, feature
 [dev-dependencies]
 # The tests of the inbox drive the real binary with the real protocol.
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "handshake"] }
+
+# The lint floor of the server. tools/dev/lint.sh runs clippy with -D warnings.
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
 
 [profile.release]
 opt-level = "z"

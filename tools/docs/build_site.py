@@ -8,6 +8,9 @@ Usage:
 The script needs only Python 3. It has no other dependency and no network access.
 The Markdown files are the single source of each page. The pages in docs/*.html are
 generated: do not edit them by hand. The home page comes from tools/docs/home.html.
+The script also writes docs/sitemap.xml, docs/site.webmanifest and docs/robots.txt.
+The exit code is 1 when a page keeps a Markdown link ("](") outside its code blocks.
+Give each new page of pages.json a menu section in SECTION, or the build stops.
 
 The Markdown reader supports the subset that the documents use: headings, paragraphs,
 lists, tables, code blocks, block quotes, images, links, bold, italic and inline code.
@@ -30,12 +33,9 @@ VERSION = None  # read from Cargo.toml
 PAGES = [p for p in json.load(open(os.path.join(os.path.dirname(__file__), "pages.json"), encoding="utf-8"))
          if os.path.exists(os.path.join(ROOT, p[2])) or print("warning: missing source " + p[2], file=sys.stderr)]
 
-ICON = ("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' "
-        "fill='%234338ca'/%3E%3Cpath d='M10.6 23.6V16.8a5.4 5.4 0 0 1 10.8 0v6.8' fill='none' stroke='white' stroke-width='4'/%3E%3C"
-        "circle cx='16' cy='19.6' r='2' fill='%237dd3fc'/%3E%3C/svg%3E")
 MARK = ('<svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect width="32" height="32" rx="8" fill="var(--accent)"/>'
         '<path d="M10.6 23.6V16.8a5.4 5.4 0 0 1 10.8 0v6.8" fill="none" stroke="var(--accent-ink)" stroke-width="4"/>'
-        '<circle cx="16" cy="19.6" r="2" fill="#38b6ff"/></svg>')
+        '<circle cx="16" cy="19.6" r="2" fill="#7dd3fc"/></svg>')
 GH_ICON = ('<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 '
            '3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 '
            '3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605'
@@ -46,8 +46,29 @@ GH_ICON = ('<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path 
 THEME_ICON = ('<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" '
               'stroke-width="2"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor"/></svg>')
 
-NAV = [("index", "Home"), ("getting-started", "Getting started"), ("documentation", "Documentation"), ("configuration", "Configuration"),
-       ("security", "Security"), ("reference", "Reference")]
+# The main menu. It is the same as the menu of the Stowr site.
+NAV = [("index", "Overview"), ("getting-started", "Getting started"), ("configuration", "Configuration"),
+       ("architecture", "Architecture"), ("security", "Security"), ("operations", "Operations"), ("reference", "Reference"),
+       ("changelog", "Changelog")]
+
+# The menu entry of each page that is not in the menu. The menu marks this entry as the current section.
+SECTION = {
+    "overview": "index", "documentation": "index",
+    "authentication": "security", "grants-and-gate": "security", "keys-and-limits": "security",
+    "inbox-security": "security", "design-login-hardening": "security",
+    "identity-and-pdp": "architecture", "launcher": "architecture", "inbox": "architecture",
+    "inbox-agents": "architecture", "inbox-android": "architecture", "design-inbox": "architecture",
+    "inbox-configuration": "configuration",
+    "settings-and-history": "operations", "several-instances": "operations", "traefik": "operations",
+    "build-and-release": "operations", "development": "operations",
+    "inbox-protocol": "reference", "inbox-requirements": "reference", "limitations": "reference", "conformance": "reference",
+}
+
+OG_ALT = "portal: the gate, the keys and the inbox for your services. One static binary."
+TWITTER_ALT = "portal: the gate, the keys and the inbox for your services."
+# These files of the 404 page load from the public address: the page can show at any depth.
+ABSOLUTE_IN_404 = ("assets/favicon.svg", "assets/favicon-32.png", "assets/favicon.ico", "assets/apple-touch-icon.png",
+                   "assets/site.css", "assets/site.js", "site.webmanifest")
 
 
 def read_version():
@@ -106,34 +127,84 @@ class Resolver:
 
 
 INLINE_CODE = re.compile(r"(`+)(.+?)\1")
+LINK_TAIL = re.compile(r'\(([^)\s]+)(?:\s+"[^"]*")?\)')
+TOKEN = re.compile("\x00(\\d+)\x00")
 
 
-def inline(text, res):
-    """Convert the inline Markdown of one text to HTML."""
-    out = []
-    pos = 0
-    pieces = []
-    # Protect the code spans first.
-    for m in INLINE_CODE.finditer(text):
-        pieces.append((text[pos:m.start()], None))
-        pieces.append((m.group(2).strip() if m.group(2).strip() else m.group(2), "code"))
-        pos = m.end()
-    pieces.append((text[pos:], None))
-    for chunk, kind in pieces:
-        if kind == "code":
-            out.append("<code>" + html.escape(chunk, quote=False) + "</code>")
-            continue
-        chunk = html.escape(chunk, quote=False)
-        chunk = re.sub(r"&lt;br\s*/?&gt;", "<br>", chunk)
-        chunk = re.sub(r"!\[([^\]]*)\]\(([^)\s]+)\)", lambda m: f'<img src="{res.asset(m.group(2))}" alt="{html.escape(m.group(1))}">', chunk)
-        chunk = re.sub(r"\[([^\]]+)\]\(([^)\s]+)(?:\s+&quot;[^)]*&quot;)?\)",
-                       lambda m: f'<a href="{html.escape(res.link(html.unescape(m.group(2))), quote=True)}">{m.group(1)}</a>', chunk)
-        chunk = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", chunk)
-        chunk = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"<em>\1</em>", chunk)
-        chunk = re.sub(r"(?<![\w])_(?!\s)(.+?)(?<!\s)_(?![\w])", r"<em>\1</em>", chunk)
-        chunk = re.sub(r"(?<![\"'>=(])(https?://[^\s<)]+[^\s<).,;:])", r'<a href="\1">\1</a>', chunk)
-        out.append(chunk)
-    return "".join(out)
+def closing_bracket(text, start):
+    """The index of the "]" that closes the "[" at start, or -1. The search skips a code span inside the brackets."""
+    depth = 0
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if ch == "`":
+            m = INLINE_CODE.match(text, i)
+            if m:
+                i = m.end()
+                continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def inline(text, res, autolink=True):
+    """Convert the inline Markdown of one text to HTML.
+
+    The code spans, the links and the images become tokens first, so a link text can hold a
+    code span ([`name`](target)). The other marks apply to the text around the tokens.
+    """
+    tokens = []
+    plain = []
+
+    def keep(markup):
+        tokens.append(markup)
+        return f"\x00{len(tokens) - 1}\x00"
+
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "`":
+            m = INLINE_CODE.match(text, i)
+            if m:
+                code = m.group(2).strip() or m.group(2)
+                plain.append(keep("<code>" + html.escape(code, quote=False) + "</code>"))
+                i = m.end()
+                continue
+        image = ch == "!" and text.startswith("[", i + 1)
+        if ch == "[" or image:
+            start = i + 1 if image else i
+            end = closing_bracket(text, start)
+            tail = LINK_TAIL.match(text, end + 1) if end > start + (0 if image else 1) else None
+            if tail:
+                label, target = text[start + 1:end], tail.group(1)
+                if image:
+                    plain.append(keep(f'<img src="{html.escape(res.asset(target), quote=True)}" alt="{html.escape(label, quote=True)}">'))
+                else:
+                    plain.append(keep(f'<a href="{html.escape(res.link(target), quote=True)}">{inline(label, res, autolink=False)}</a>'))
+                i = tail.end()
+                continue
+        plain.append(ch)
+        i += 1
+    chunk = html.escape("".join(plain), quote=False)
+    chunk = re.sub(r"&lt;br\s*/?&gt;", "<br>", chunk)
+    chunk = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", chunk)
+    chunk = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"<em>\1</em>", chunk)
+    chunk = re.sub(r"(?<![\w])_(?!\s)(.+?)(?<!\s)_(?![\w])", r"<em>\1</em>", chunk)
+    if autolink:
+        chunk = re.sub(r"(?<![\"'>=(])(https?://[^\s<)\x00]+[^\s<).,;:\x00])", r'<a href="\1">\1</a>', chunk)
+    return TOKEN.sub(lambda m: tokens[int(m.group(1))], chunk)
+
+
+def leftover_links(page):
+    """True when the text of a page (outside the code blocks) keeps a Markdown link."""
+    text = re.sub(r"<pre\b.*?</pre>", "", page, flags=re.S)
+    text = re.sub(r"<code>.*?</code>", "<code></code>", text, flags=re.S)
+    return "](" in text
 
 
 def split_row(line):
@@ -261,7 +332,6 @@ class Doc:
             if stripped.startswith("|") and i + 1 < n and re.match(r"^\s*\|?[\s:|-]+\|[\s:|-]*$", lines[i + 1]) and "-" in lines[i + 1]:
                 flush_para()
                 head = split_row(lines[i])
-                aligns = split_row(lines[i + 1])
                 i += 2
                 rows = []
                 while i < n and lines[i].strip().startswith("|"):
@@ -290,14 +360,16 @@ class Doc:
     def code_block(self, body, lang):
         label = {"hcl": "HCL", "sh": "Shell", "bash": "Shell", "console": "Shell", "json": "JSON", "yaml": "YAML", "text": "", "toml": "TOML",
                  "sql": "SQL", "rust": "Rust", "python": "Python", "http": "HTTP", "kotlin": "Kotlin", "xml": "XML", "dockerfile": "Dockerfile",
-                 "ini": "INI", "js": "JavaScript", "javascript": "JavaScript", "html": "HTML", "": ""}.get(lang, lang)
+                 "ini": "INI", "js": "JavaScript", "javascript": "JavaScript", "html": "HTML", "diagram": "", "": ""}.get(lang, lang)
         lns = []
         for raw in body:
             expanded = raw.expandtabs(2)
             indent = len(expanded) - len(expanded.lstrip(" "))
             lns.append(f'<span class="ln" style="--i:{indent}">{html.escape(expanded.strip(chr(10))) if expanded.strip() else ""}</span>')
         tag = f'<span class="label">{html.escape(label)}</span>' if label else ""
-        return (f'<div class="code-wrap">{tag}<pre data-copy tabindex="0"><code>{"".join(lns)}</code></pre></div>')
+        # A block of plain text is a drawing in characters: the site keeps its lines and does not wrap them.
+        cls = ' class="diagram"' if lang in ("text", "diagram") else ""
+        return (f'<div class="code-wrap">{tag}<pre{cls} data-copy tabindex="0"><code>{"".join(lns)}</code></pre></div>')
 
     def table(self, head, rows):
         labels = [strip_marks(h) for h in head]
@@ -360,7 +432,6 @@ class Doc:
                     continue
                 text_lines.append(ln)
                 k += 1
-            paras = [p for p in " ".join(text_lines).split("  ") if p]
             body = inline(" ".join(t for t in text_lines if t != ""), self.res)
             pos += 1
             nested = ""
@@ -377,24 +448,38 @@ def head_html(title, description, slug):
     url = SITE_URL if slug == "index" else f"{SITE_URL}{slug}.html"
     d = html.escape(description, quote=True)
     t = html.escape(title, quote=True)
+    # The 404 page is not a page to index, and it has no address of its own.
+    robots = '<meta name="robots" content="noindex">\n' if slug == "404" else ""
+    canonical = "" if slug == "404" else f'<link rel="canonical" href="{url}">\n'
+    og_url = "" if slug == "404" else f'<meta property="og:url" content="{url}">\n'
     return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
+{robots}<meta name="color-scheme" content="light dark">
 <meta name="description" content="{d}">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="portal">
 <meta property="og:title" content="{t}">
 <meta property="og:description" content="{d}">
-<meta name="twitter:card" content="summary">
+{og_url}<meta property="og:image" content="{SITE_URL}assets/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="{html.escape(OG_ALT, quote=True)}">
+<meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{t}">
 <meta name="twitter:description" content="{d}">
-<link rel="canonical" href="{url}">
-<meta property="og:url" content="{url}">
-<title>{t}</title>
-<link rel="icon" href="{ICON}">
+<meta name="twitter:image" content="{SITE_URL}assets/og.png">
+<meta name="twitter:image:alt" content="{html.escape(TWITTER_ALT, quote=True)}">
+{canonical}<title>{t}</title>
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="assets/favicon-32.png" sizes="32x32" type="image/png">
+<link rel="icon" href="assets/favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<link rel="manifest" href="site.webmanifest">
+<meta name="theme-color" content="#fafafd" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0c0e15" media="(prefers-color-scheme: dark)">
 <link rel="stylesheet" href="assets/site.css">
 <script src="assets/site.js"></script>
 </head>
@@ -404,9 +489,11 @@ def head_html(title, description, slug):
 
 
 def header_html(slug):
+    section = SECTION.get(slug)
     items = []
     for s, label in NAV:
-        cur = ' aria-current="page"' if s == slug else ""
+        # "page" marks the page itself. "true" marks the menu entry of the section that holds the page.
+        cur = ' aria-current="page"' if s == slug else ' aria-current="true"' if s == section else ""
         items.append(f'<li><a href="{s}.html"{cur}>{label}</a></li>')
     items.append(f'<li class="nav-gh"><a href="{REPO_URL}">GitHub</a></li>')
     return f"""<header class="site-header">
@@ -429,6 +516,8 @@ def footer_html():
     cols = []
     for g in ("Start", "Use", "Configure and operate", "Reference"):
         links = "".join(f'<li><a href="{s}.html">{html.escape(l)}</a></li>' for s, l in groups.get(g, [])[:8])
+        if g == "Start":
+            links = '<li><a href="documentation.html">All the documentation</a></li>' + links
         cols.append(f"<div><h2>{g}</h2><ul>{links}</ul></div>")
     cols.append(f'<div><h2>Project</h2><ul><li><a href="{REPO_URL}">Repository</a></li>'
                 f'<li><a href="{REPO_URL}/releases/latest">Downloads</a></li>'
@@ -543,21 +632,129 @@ def build_home():
     return page
 
 
-def main():
-    global VERSION
-    VERSION = read_version()
-    check = "--check" in sys.argv
+def not_found():
+    """The 404 page. GitHub Pages shows it at any depth, so its links use the public address."""
+    page = (head_html("Page not found | portal", "This page does not exist. Go to the home page or to the documentation of portal.", "404")
+            + header_html("404")
+            + '<div class="page-head"><div class="wrap"><p class="eyebrow"><span class="badge">Error 404</span> Page not found</p>'
+            '<h1>This page does not exist</h1><p class="lede">The address is wrong, or the page moved. '
+            'Go to the home page or to the documentation.</p></div></div>'
+            '<div class="page-body"><div class="wrap"><div class="btn-row"><a class="btn primary" href="index.html">Home page</a>'
+            '<a class="btn" href="documentation.html">Documentation</a></div></div></div>\n'
+            + footer_html())
+    for rel in ABSOLUTE_IN_404:
+        page = page.replace(f'"{rel}"', f'"{SITE_URL}{rel}"')
+    return re.sub(r'href="([a-z0-9-]+\.html)"', lambda m: f'href="{SITE_URL}{m.group(1)}"', page)
+
+
+def image_size(path):
+    """The intrinsic (width, height) of a PNG, WebP or SVG file, or None."""
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(4096)
+    except OSError:
+        return None
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR":
+        return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        kind = data[12:16]
+        if kind == b"VP8X":
+            return 1 + int.from_bytes(data[24:27], "little"), 1 + int.from_bytes(data[27:30], "little")
+        if kind == b"VP8 ":
+            return int.from_bytes(data[26:28], "little") & 0x3FFF, int.from_bytes(data[28:30], "little") & 0x3FFF
+        if kind == b"VP8L":
+            bits = int.from_bytes(data[21:25], "little")
+            return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+        return None
+    if path.endswith(".svg"):
+        root = re.search(r"<svg\b[^>]*>", data.decode("utf-8", "replace"), re.S)
+        if not root:
+            return None
+        tag = root.group(0)
+        box = re.search(r'viewBox="\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)\s*"', tag)
+        width = re.search(r'\swidth="([\d.]+)"', tag)
+        height = re.search(r'\sheight="([\d.]+)"', tag)
+        if width and height:
+            return round(float(width.group(1))), round(float(height.group(1)))
+        if box:
+            return round(float(box.group(1))), round(float(box.group(2)))
+    return None
+
+
+def size_images(page):
+    """Write the intrinsic width and height on each local image, so the layout does not move while it loads.
+
+    The image in the hero of a page loads first. The other images keep their lazy load.
+    """
+    hero = re.search(r'<section class="hero".*?</section>', page, re.S)
+    hero_span = hero.span() if hero else (0, 0)
+
+    def fix(m):
+        tag = m.group(0)
+        src = re.search(r'\ssrc="([^"]+)"', tag)
+        if src and " width=" not in tag and not re.match(r"^[a-z][a-z0-9+.-]*:", src.group(1)):
+            size = image_size(os.path.join(DOCS, html.unescape(src.group(1)).partition("#")[0]))
+            if size:
+                tag = tag.replace(src.group(0), f'{src.group(0)} width="{size[0]}" height="{size[1]}"', 1)
+        if hero_span[0] <= m.start() < hero_span[1]:
+            tag = re.sub(r'\sloading="[^"]*"', "", tag)
+            tag = tag[:-1] + ' loading="eager" fetchpriority="high">'
+        return tag
+
+    return re.sub(r"<img\b[^>]*>", fix, page)
+
+
+def small_files():
+    """The sitemap, the web manifest and the robots file."""
+    urls = [SITE_URL] + [f"{SITE_URL}{p[1]}.html" for p in PAGES] + [f"{SITE_URL}documentation.html"]
+    sitemap = '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+    sitemap += "".join(f"  <url><loc>{u}</loc></url>\n" for u in urls) + "</urlset>\n"
+    manifest = """{
+  "name": "portal",
+  "short_name": "portal",
+  "description": "The gate, the keys and the inbox of ProcurAuth: sign-in, access control, keys for agents and alerts to phones.",
+  "start_url": "index.html",
+  "scope": "./",
+  "display": "browser",
+  "background_color": "#fafafd",
+  "theme_color": "#4338ca",
+  "icons": [
+    { "src": "assets/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "assets/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
+"""
+    robots = f"User-agent: *\nAllow: /\n\nSitemap: {SITE_URL}sitemap.xml\n"
+    return {"sitemap.xml": sitemap, "site.webmanifest": manifest, "robots.txt": robots}
+
+
+def build():
+    """Every generated file of docs/, by name."""
+    missing = [p[1] for p in PAGES if p[1] not in SECTION and p[1] not in dict(NAV)]
+    if missing:
+        raise SystemExit("error: give a menu section to these pages in SECTION: " + ", ".join(missing))
     outputs = {}
     depth_of = {"configuration": 4}
     for group, slug, src, label, eyebrow in PAGES:
         outputs[slug + ".html"] = build_page(group, slug, src, label, eyebrow, depth_of.get(slug, 3))
     outputs["documentation.html"] = build_documentation_index()
     outputs["index.html"] = build_home()
-    outputs["404.html"] = (head_html("Page not found | portal", "This page does not exist.", "404") + header_html("404")
-                           + '<div class="page-head"><div class="wrap"><h1>Page not found</h1><p class="lede">This page does not exist. '
-                           'Go to the <a href="index.html">home page</a> or to the <a href="documentation.html">documentation</a>.</p></div></div>'
-                           + footer_html())
+    outputs["404.html"] = not_found()
+    outputs = {name: size_images(text) for name, text in outputs.items()}
+    outputs.update(small_files())
+    return outputs
+
+
+def main():
+    global VERSION
+    VERSION = read_version()
+    check = "--check" in sys.argv
+    outputs = build()
     bad = 0
+    for name, text in outputs.items():
+        if name.endswith(".html") and leftover_links(text):
+            print(f"Markdown link left in the text: docs/{name}")
+            bad += 1
     for name, text in outputs.items():
         path = os.path.join(DOCS, name)
         old = open(path, encoding="utf-8").read() if os.path.exists(path) else None
@@ -577,8 +774,8 @@ def main():
             else:
                 os.remove(os.path.join(DOCS, name))
                 print(f"removed docs/{name}")
-    if check and bad:
-        print("run tools/docs/build_site.py")
+    if bad:
+        print("run tools/docs/build_site.py" if check else "fix the pages above")
         return 1
     return 0
 

@@ -257,9 +257,9 @@ pub struct ApiKeyConfig {
     /// The key can send an alert to an account. The owner holds `alert.send_user`.
     pub direct_alerts: bool,
     pub webhook_send_resolved: bool,
-    /// The attribute `interaction` of the block. The default is `one_shot`. The agent channel reads
-    /// it: this lot only stores and checks it.
-    #[allow(dead_code)]
+    /// The attribute `interaction` of the block. The default is `one_shot`. The program parses and
+    /// checks the value, but no code reads this field.
+    #[allow(dead_code)] // parsed and checked, not read
     pub interaction: crate::keys::Interaction,
 }
 

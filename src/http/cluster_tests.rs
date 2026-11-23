@@ -3097,8 +3097,15 @@ fn the_instance_serves_five_seconds_after_the_stop_and_then_closes() {
     let mut idle = TcpStream::connect(("127.0.0.1", node.port)).unwrap();
     idle.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
         .unwrap();
-    let mut first = [0_u8; 512];
-    assert!(idle.read(&mut first).unwrap() > 0);
+    // Read the whole first answer: its body `ok\n` comes after the headers. Bytes that stay in the
+    // socket would look like an open connection at the end of the test.
+    let mut first = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    while !first.ends_with(b"\r\n\r\nok\n") {
+        let n = idle.read(&mut chunk).unwrap();
+        assert!(n > 0, "the first answer is complete");
+        first.extend_from_slice(&chunk[..n]);
+    }
     // The probe connections of the start end in the background: the server drops their marks
     // a little after the client sees the close. On a loaded machine this takes longer.
     wait_until(Duration::from_secs(10), || node.state.stop.live() == 1);

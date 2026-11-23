@@ -4,23 +4,43 @@
 #          [--cases U04,U05,...]
 #
 #   --no-build      Do not build access-conformance. Use the program of the last build.
+#                   The script does not check the commit of that build.
 #   --refusal-cases Use notes-refusal-profile.json and run only the cases with the
 #                   operation use_plain that expect a refusal. README.md tells why.
 #
-# The variable PROCURAUTH gives the checkout of the ProcurAuth repository. The default is
-# the directory procurauth next to the portal checkout.
+# The variable PROCURAUTH_DIR gives the checkout of the ProcurAuth repository. The old
+# variable PROCURAUTH applies when PROCURAUTH_DIR is not set. The default is the directory
+# procurauth next to the portal checkout. The checkout must be at the commit of ProcurAuth 1.1
+# below (procurauth_commit). The script does not change the checkout.
 #
 # The script starts notes in a container with no network (--network none). The runner
 # access-conformance then runs in the network namespace of that container: the two share
 # only the loopback address. The runner acts as the client, as the edge (it signs the
 # identity tokens with the test key of ProcurAuth) and as the PDP (127.0.0.1:8181).
-# notes never reaches a real portal. The exit code is the code of the runner.
+# notes never reaches a real portal.
+#
+# Exit codes:
+#   0  The runner ran, and no case failed.
+#   1  The runner ran, and a case failed.
+#   2  A problem of the set-up: a bad option, no ProcurAuth checkout, another commit of
+#      ProcurAuth or a missing tool. The runner also gives 2, for example for a bad profile.
+# 124  The runner did not stop in the time limit (840 seconds in the container, 900 in all).
+# A build or a docker command that fails stops the script with the code of that command.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 portal="$(cd "$here/../.." && pwd)"
-procurauth="${PROCURAUTH:-$(cd "$portal/.." && pwd)/procurauth}"
+procurauth="${PROCURAUTH_DIR:-${PROCURAUTH:-$(cd "$portal/.." && pwd)/procurauth}}"
+# ProcurAuth 1.1 (tag v1.1). The test keys come from this commit. Without --no-build, the script
+# builds the runner from this commit, and the runner holds the cases of this commit.
+# The continuous integration pins the same commit for the series D and E (.github/workflows/ci.yml).
+procurauth_commit="c820b4ac0e37c4769394876105fd549a6c8b38cc"
 notes_image="portal-demo-notes"
+
+die() {
+    echo "ERROR: $*" >&2
+    exit 2
+}
 
 build=1
 profile=notes-profile.json
@@ -38,12 +58,12 @@ while [ "$#" -gt 0 ]; do
             cases="${cases:-$refusal}"
             ;;
         --cases)
-            [ "$#" -ge 2 ] || { echo "The option $1 needs a value." >&2; exit 2; }
+            [ "$#" -ge 2 ] || die "The option $1 needs a value."
             cases="$2"
             shift
             ;;
         --format)
-            [ "$#" -ge 2 ] || { echo "The option $1 needs a value." >&2; exit 2; }
+            [ "$#" -ge 2 ] || die "The option $1 needs a value."
             runner_args+=("$1" "$2")
             shift
             ;;
@@ -58,9 +78,17 @@ if [ -n "$cases" ]; then
     runner_args+=(--cases "$cases")
 fi
 
+for tool in docker git; do
+    command -v "$tool" >/dev/null 2>&1 || die "The tool $tool is missing."
+done
 if [ ! -f "$procurauth/scripts/docker-env.sh" ]; then
-    echo "The ProcurAuth checkout is not at $procurauth. Set PROCURAUTH." >&2
-    exit 2
+    die "The file $procurauth/scripts/docker-env.sh is missing. Set PROCURAUTH_DIR to the ProcurAuth checkout."
+fi
+# Docker mounts only an absolute path.
+procurauth="$(cd "$procurauth" && pwd)"
+found_commit="$(git -C "$procurauth" rev-parse HEAD 2>/dev/null || true)"
+if [ "$found_commit" != "$procurauth_commit" ]; then
+    die "The checkout $procurauth is at the commit ${found_commit:-unknown}. Check out $procurauth_commit (ProcurAuth 1.1)."
 fi
 # This sets image, target_volume, uid and gid, as the scripts of ProcurAuth do.
 # shellcheck source=/dev/null

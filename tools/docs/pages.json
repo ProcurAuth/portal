@@ -23,6 +23,7 @@
   ["Configure and operate", "build-and-release", "docs/build-and-release.md", "Build and release", "Build and release"],
   ["Configure and operate", "development", "docs/development.md", "Development", "Tests and tools"],
   ["Reference", "reference", "docs/reference.md", "Reference", "HTTP endpoints and error codes"],
+  ["Reference", "conformance", "docs/conformance.md", "Conformance", "ProcurAuth conformance cases"],
   ["Reference", "limitations", "docs/limitations.md", "Limitations", "Known limits"],
   ["Reference", "design-inbox", "docs/design/inbox.md", "Design: the Inbox", "Design"],
   ["Reference", "design-login-hardening", "docs/design/login-hardening.md", "Design: sign-in protection", "Design"],

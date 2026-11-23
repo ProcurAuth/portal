@@ -5,8 +5,6 @@
 //! reads or writes a database row. The checks that passed are counted in memory and written by
 //! [`crate::sync`] at most 15 seconds later.
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -307,13 +305,11 @@ impl FailureLog {
         self.unlogged.swap(0, std::sync::atomic::Ordering::Relaxed)
     }
 
+    #[cfg(test)]
     pub fn entries(&self) -> usize {
         self.seen.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 }
-
-/// The longest time between two writes of the checks of the keys.
-pub const WRITE_EVERY: Duration = Duration::from_secs(15);
 
 /// The checks that passed, since the last write, and for a key of the file, since the start.
 #[derive(Default)]

@@ -38,11 +38,11 @@ The app asks for these permissions on its first screen.
 | Do Not Disturb access | Let `alarm` and `ring` override silent mode and do-not-disturb. |
 | Display over other apps | Let an alarm open full screen when the phone is in use. |
 
-The app also starts again after a reboot. On some vendor ROMs, allow background activity for Portal Inbox. Examples are Xiaomi, Huawei and Samsung. "Force stop" stops the app until the user opens it again. The Inbox then shows the phone as unreachable.
+The app also starts again after a reboot. On some vendor ROMs, give Portal Inbox the permission for background activity. Examples are Xiaomi, Huawei and Samsung. "Force stop" stops the app until the user opens it again. The Inbox then shows the phone as unreachable.
 
 A message of a kind other than `alert` shows as a generic message. The app never drops a message because of its kind. A person cannot change the login of a phone. The app shows it read-only. The source drawings of the app icon are in `assets/brand/`.
 
-The app accepts an address with `http://` or `https://`. For `https://` it uses the trust store of the phone. The manifest allows clear text, because the portal is often on a private network.
+The app accepts an address with `http://` or `https://`. For `https://` it uses the trust store of the phone. The manifest lets the app use clear text, because the portal is often on a private network.
 
 ## Several portals on one phone
 
@@ -120,9 +120,9 @@ When a new agent calls, the phone shows a card **New agent** above **To answer**
 3. Press **Block** to refuse the agent. The phone asks you to confirm. The portal cancels the open requests of the agent.
 4. If the agent is one that you know, press the merge button. Choose the known agent of the same key. A merge cannot be undone.
 
-With `inbox.agents.lock_new = true`, the card shows the line "Approve is locked until you allow this agent". The approval screen then turns **Approve** off. **Decline** still works. By default the portal does not lock a new agent, and the card has no lock line.
+With `inbox.agents.lock_new = true`, the card shows the line `Approve is locked until you allow this agent.` The approval screen then locks **Approve**. **Decline** still works. By default the portal does not lock a new agent, and the card has no lock line.
 
-The screen of an agent shows its name, key, state, last call, counts, the box of hints and its open requests. It also has **Rename**, **Merge**, **Block** and **Unblock**, as the state allows. The screen of a portal has the row **Agents**. Use it to find a blocked agent.
+The screen of an agent shows its name, key, state, last call, counts, the box of hints and its open requests. It also has **Rename**, **Merge**, **Block** and **Unblock**. The state of the agent decides which of them show. The screen of a portal has the row **Agents**. Use it to find a blocked agent.
 
 The phone sends each action to the portal and waits for the answer. The action stays on the phone until the portal answers, also when the phone is offline. A line at the bottom tells the result. These actions do not ask for your fingerprint. An approval still asks for it.
 
@@ -144,7 +144,7 @@ The two flags of the agent decide the rows under the options. With no flag, the 
 
 A key `one_shot` is an automatic system. Its screen has the header "Automatic system (no conversation)". It shows the suggestion and its confidence above the options. It has no free field and no discussion.
 
-Send asks for the fingerprint or the device PIN. **Decline to answer** asks for nothing. The phone saves the answer in its outbox and sends it again after each reconnection, until the portal gives the result. When the agent is new and `inbox.agents.lock_new` is true, Send stays off until the owner allows the agent.
+Send asks for the fingerprint or the device PIN. **Decline to answer** asks for nothing. The phone saves the answer in its outbox and sends it again after each reconnection, until the portal gives the result. When the agent is new and `inbox.agents.lock_new` is true, Send stays off until the agent has the state `known`.
 
 The list "Done" shows how each question ended: answered, declined, abandoned, replaced, expired or cancelled. The portal does not send the answer to the other phones. A phone shows what the owner chose only for an answer that it sent itself.
 

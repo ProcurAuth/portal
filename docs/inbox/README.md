@@ -198,7 +198,7 @@ So the key works when the portal is not ready and when PostgreSQL is away. It ha
 
 A decision no gives `403` with the code `forbidden_group`, or `forbidden_user` for an alert to an account. A key can also read the status of an alert with `alert.read` on its group. A key sends no notification of the type resolved. When the directory of the portal is not ready, the Inbox answers `503` with the code `directory_not_ready`.
 
-The switch `keys.api` turns the kind on. The default is `false`. The kind needs the block `inbox`. The example in [Configure the Inbox](#configure-the-inbox) shows a file key and the account that owns it.
+Set `keys.api` to `true` to use the kind. The default is `false`. The kind needs the block `inbox`. The example in [Configure the Inbox](#configure-the-inbox) shows a file key and the account that owns it.
 
 ## Send an alert
 
@@ -415,7 +415,7 @@ It must enroll again.
 
 **When an account ends.** When the superadmin deletes an account, the Inbox ends the state of the account. It revokes the phones of the account and deletes its codes that are not used. The sessions of these phones close with the code 4403. If the Inbox cannot do this, the account stays and the portal shows an error.
 
-The end of an account also detaches the rows that carry its login. These are the phones, the alerts to the account, the alerts that it sent with the form, and its notification state. These rows then carry the login with the suffix `:ended:` and a random part. The connection log keeps the login. A new account with the same login thus gets no phone, no alert and no notification of the old account. The superadmin and the recipients still see the old alerts.
+The end of an account also detaches the rows that carry its login. These are the phones, the alerts to the account, the alerts that it sent with the form, and its notification state. These rows then carry the login with the suffix `:ended:` and a random part. The connection log keeps the login. So a new account with the same login gets no phone, no alert and no notification of the old account. The superadmin and the recipients still see the old alerts.
 
 The creation of an account of the database does the same end first. It removes what an earlier holder of the login left, also an account of the file.
 
@@ -523,16 +523,16 @@ Several agents can use one key. The web page of the Inbox shows them apart. This
 1. Open the tab **Inbox**. The panel **Open items** has one group for each agent that has a request that waits. The header of a group has the name, the key, the state and the count. A group opens and closes without script.
 2. Read the name of the group. It is text of the server: the name that the owner gave, else the key name and a number, such as `ops-key #4`. The new agents come first. The other groups follow by the age of their oldest request. The group **Unattributed** of a key comes last. A key with no agent has one group with the name of the key.
 3. Do not trust the line **Observed, not verified**. It shows what the agent said about itself, its client and its address range. The agent or its connection wrote it. Anyone who holds the key can send the same text. The page escapes the values and marks each hidden character. It never uses them as a name.
-4. When a notice shows a new agent, decide. The notice has a form to name the agent and allow it. Type a name and press **Name and allow**, or press **Allow** to keep the number.
+4. When a notice shows a new agent, decide. The notice has a form to name the agent and give it the state `known`. Type a name and press **Name and allow**, or press **Allow as** to keep the number.
 5. Press **Block** to refuse the agent. The server cancels its open requests and refuses its calls. The page of the agent has **Unblock**.
 6. If the new agent is one that you know, merge it. This happens when an agent loses its token. Choose the known agent of the same key and press **Merge into it**.
 7. Open **Agents** in the control at the top to reach each agent, also a blocked one. The page of an agent (`/auth/settings/inbox/agents/{id}`) shows the open requests, the observed values, the events and the forms **Rename**, **Merge** and **Block**. A blocked agent has the form **Unblock**.
 
-A notice warns when the text of the agent is the name of a known agent. A new agent is not locked by default. With `inbox.agents.lock_new = true`, the notice also says that **Approve** is locked. The server refuses `accept` for an item of a new agent until you allow it. The page answers `409` with the reason. **Decline** and the question stay open.
+A notice warns when the text of the agent is the name of a known agent. A new agent is not locked by default. With `inbox.agents.lock_new = true`, the notice also says that **Approve** is locked. The server refuses `accept` for an item of a new agent until the agent has the state `known`. The page answers `409` with the reason. **Decline** and the question stay open.
 
 A group is not a sandbox. The agents of one key share the key. An approval stays bound to its effect, not to an agent.
 
-The POST routes of the forms are `rename`, `allow`, `block`, `unblock` and `merge` under `/auth/settings/inbox/agents`. Each needs the owner of the agent, the session, the field `csrf` and the right `Origin`. A name that is not valid or that is taken gives `422`. A state that does not allow the action gives `409`. An agent of another owner gives the same answer as an agent that does not exist.
+The POST routes of the forms are `rename`, `allow`, `block`, `unblock` and `merge` under `/auth/settings/inbox/agents`. Each needs the owner of the agent, the session, the field `csrf` and the right `Origin`. A name that is not valid or that is taken gives `422`. An action that is not possible in the state of the agent gives `409`. An agent of another owner gives the same answer as an agent that does not exist.
 
 **Enrolled mode.** For a key in the mode `enrolled`, the list **Agents** has the form **Add agent** (route `POST /auth/settings/inbox/agents/enroll`, fields `key` and `name`). The answer is a page with the token once, a copy button, and the header line `Agent-Token: agt_...` to paste in the MCP client. The page of an agent that the owner made has the button **Reset token** (route `POST /auth/settings/inbox/agents/reset`, field `agent_id`). It says that the old token stops at once. Both routes follow the rules of the other forms of the agents, and only the web has them.
 
@@ -608,7 +608,7 @@ The rest is one link "+2 more" to the tab Inbox. A toast has no sound, does not 
 
 **Alert** is an alert for another group. **Ring** is an alert for an account. The phones choose their own action, so the portal has no other level. **Alerts** means Alert and Critical only: a Ring alert gives no toast. It stays in the list, and the badge counts it. **Off** gives no toast and no badge, and the script sends no request.
 
-The icon stays, so the person can turn the level on again. The store keeps the level for each account, in the table `web_notify`.
+The icon stays, so the person can choose a level again. The store keeps the level for each account, in the table `web_notify`.
 
 **Unread.** The store keeps a marker "read up to" for each account. It is the time of the newest alert that the person has seen. An alert that is newer than the marker is unread. The marker only moves forward. It moves when the person opens the tab Inbox and when the person uses **Mark all read**.
 
@@ -746,7 +746,7 @@ An instance that owns the lease serves. A standby instance waits until the lease
 
 The orchestrator starts it again as a standby.
 
-Each owner writes its epoch into the table `inbox_replica_epoch` before its first snapshot. An instance that starts keeps its own local file when the file names the epoch of the newest snapshot and passes the check. That file is the live database of the owner that wrote the snapshot, so it is newer. Thus a restart on the same disk after a crash keeps the changes after the last snapshot.
+Each owner writes its epoch into the table `inbox_replica_epoch` before its first snapshot. An instance that starts keeps its own local file when the file names the epoch of the newest snapshot and passes the check. That file is the live database of the owner that wrote the snapshot, so it is newer. So a restart on the same disk after a crash keeps the changes after the last snapshot.
 
 With `sync_alerts = true`, the Inbox confirms an alert only after the snapshot that holds it exists. A form of the portal that changes the database answers only after the copy holds the change. A sender that gets no answer sends the alert again, and the idempotency key makes one alert. If the shared directory fails, the sender gets `503 replication_unavailable`. With `sync_alerts = false`, the Inbox confirms after the local commit, and a failed copy is only logged (`portal_inbox_replica_sync_failures_total`). The metrics `portal_inbox_replica_*` show the state of the copy.
 

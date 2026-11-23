@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DURATION_BUCKETS_US: [u64; 11] = [
     1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000, 2_500_000,
@@ -43,6 +43,8 @@ impl DurationHistogram {
 #[derive(Debug)]
 pub struct Metrics {
     started_at: Instant,
+    /// The Unix time of the start, in whole seconds.
+    start_time_seconds: u64,
     http_requests: Mutex<HashMap<(String, String, u16), u64>>,
     http_duration: DurationHistogram,
 
@@ -90,6 +92,10 @@ impl Metrics {
     pub fn new() -> Self {
         Self {
             started_at: Instant::now(),
+            start_time_seconds: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
             http_requests: Mutex::new(HashMap::new()),
             http_duration: DurationHistogram::new(),
             login_success: AtomicU64::new(0),
@@ -325,6 +331,13 @@ impl Metrics {
         out.push_str(&format!(
             "portal_uptime_seconds {:.3}\n",
             self.started_at.elapsed().as_secs_f64()
+        ));
+
+        out.push_str("# HELP portal_start_time_seconds The Unix time of the start, in seconds.\n");
+        out.push_str("# TYPE portal_start_time_seconds gauge\n");
+        out.push_str(&format!(
+            "portal_start_time_seconds {}\n",
+            self.start_time_seconds
         ));
 
         out.push_str("# HELP portal_http_requests_total HTTP requests handled by route, method and status.\n");
@@ -809,6 +822,30 @@ mod tests {
         assert!(rendered.contains("portal_http_request_duration_seconds_bucket"));
         assert!(rendered.contains("portal_forward_auth_requests_total{result=\"denied\"} 0"));
         assert!(rendered.contains("portal_origin_rejections_total{route=\"users\"} 0"));
+    }
+
+    #[test]
+    fn render_gives_the_start_time_next_to_the_uptime() {
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let metrics = Metrics::new();
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let rendered = metrics.render("1.2.3", 1, 1, 5, 100, 4, 1, 2, 4096);
+        assert!(rendered.contains("# TYPE portal_start_time_seconds gauge\n"));
+        assert!(rendered.contains("portal_build_info{version=\"1.2.3\"} 1\n"));
+        assert!(rendered.contains("# TYPE portal_uptime_seconds gauge\n"));
+        let start: u64 = rendered
+            .lines()
+            .find_map(|line| line.strip_prefix("portal_start_time_seconds "))
+            .expect("the series portal_start_time_seconds")
+            .parse()
+            .expect("whole seconds");
+        assert!((before..=after).contains(&start), "{start}");
     }
 
     #[test]

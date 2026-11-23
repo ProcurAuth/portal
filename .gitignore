@@ -1,20 +1,26 @@
-# Android
+# Build output stays in a Docker volume, but a local build can write here (target/, target-android/ and others).
+/target*/
+/dist/
+
+# The Android build output and the local files of the IDE.
 /android/app/src/main/jniLibs/
 /android/**/build/
 /android/.gradle/
 /android/.idea/
 /android/local.properties
-/dist/
-.DS_Store
+*.iml
+
+# Local files and secrets. A signing key or a certificate never goes into the repository.
 .env
 .env.*
 !.env.example
-*.iml
+*.pem
 *.jks
 *.keystore
 /secrets/
-*.swp
-/target*/
-/target/
 deploy/compose/secrets/
+*.swp
+.DS_Store
+
+# Python caches.
 __pycache__/

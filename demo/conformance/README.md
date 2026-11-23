@@ -2,6 +2,8 @@
 
 This directory runs the ProcurAuth conformance series U against the demo service `notes`. The series U tests a PEP: the service side of the protocol. The runner is `access-conformance` of the ProcurAuth repository. Nothing in this directory changes the demo that runs, and nothing calls a real portal.
 
+The portal itself is a PDP and an edge, not a PEP. Its own conformance runs are the series D and E. [Conformance](../../docs/conformance.md) describes them.
+
 ## Files
 
 | File | Content |
@@ -12,13 +14,25 @@ This directory runs the ProcurAuth conformance series U against the demo service
 
 ## Run the series U
 
-1. Put the ProcurAuth checkout next to the portal checkout, or set the variable `PROCURAUTH` to its path.
-2. Run `demo/conformance/run-conformance-u.sh` from the portal checkout.
-3. Read one line for each case and the summary line on the standard output.
-4. To run the refusal cases, add the option `--refusal-cases`.
-5. To skip the build of the runner, add the option `--no-build`.
+1. Put the ProcurAuth checkout next to the portal checkout, or set the variable `PROCURAUTH_DIR` to its path.
+2. Set the ProcurAuth checkout to the commit `c820b4ac0e37c4769394876105fd549a6c8b38cc` (the tag `v1.1`).
+3. Run `demo/conformance/run-conformance-u.sh` from the portal checkout.
+4. Read one line for each case and the summary line on the standard output.
+5. To run the refusal cases, add the option `--refusal-cases`.
+6. To skip the build of the runner, add the option `--no-build`. The script then uses the runner of the last build and does not check its commit.
 
-The exit code is the code of the runner: 0 when no case failed, 1 when a case failed, and 2 for a usage error. The option `--format json` gives one JSON document. The option `--cases U04,U62` runs only these cases.
+The old variable `PROCURAUTH` applies when `PROCURAUTH_DIR` is not set. The script does not change the ProcurAuth checkout. It stops with the exit code 2 when the checkout is at another commit. Without `--no-build`, the script builds the runner from this commit, and the runner holds the cases of this commit. Thus, without `--no-build`, a change in the ProcurAuth repository never changes the result by itself. The continuous integration pins the same commit for the series D and E.
+
+The option `--format json` gives one JSON document. The option `--cases U04,U62` runs only these cases.
+
+| Exit code | Result |
+| --- | --- |
+| 0 | The runner ran, and no case failed. |
+| 1 | The runner ran, and a case failed. |
+| 2 | A problem of the set-up: a bad option, no ProcurAuth checkout, another commit of ProcurAuth, an absent tool or a bad profile. |
+| 124 | The runner did not stop in the time limit (840 seconds in the container, 900 seconds in all). |
+
+A build or a Docker command that fails stops the script with the code of that command.
 
 ## How the run works
 
@@ -36,7 +50,7 @@ The values of the profile agree with `notes`. These are the service `notes`, the
 
 ## Result
 
-This directory keeps no count of passed cases, because the series U grows with the protocol. Run the profile to get the count for your checkout. The runner skips a case for these reasons:
+This directory records no count of passed cases. A count belongs to one commit of ProcurAuth and to one version of `notes`, so it becomes old. Run the profile to get the count for your checkout. The runner skips a case for these reasons:
 
 | Reason | Skipped cases |
 | --- | --- |
@@ -45,6 +59,7 @@ This directory keeps no count of passed cases, because the series U grows with t
 | `notes` has no action without a budget (operation `use_plain`). | Most cases of the identity token. |
 | `notes` has no use on the service itself (operation `use_service`). | The cases of the service node. |
 | `notes` trusts one Ed25519 key only, so no token can use ES256. | The case of ES256. |
+| The profile has no operation `use_no_action`: the route `/notes/` asks no `access`, so this step fails (see [Limits of the result](#limits-of-the-result)). The profile also has no operation `read_health`. | The steps of U127: the health probe and a route with no action (protocol 10.1c). |
 
 ## The refusal run
 
@@ -56,9 +71,14 @@ This run does not replace a true action without a budget. The other cases with `
 
 ## Limits of the result
 
+Protocol 1.1 (10.1c) gives two rules for a route that runs no action of the action document. A health-probe route gives no data of the service. It needs no token, and the PEP asks no question for it. Each other route needs a valid identity token, and the PEP asks the action `access` on the service. A static file follows the second rule too.
+
 The series U does not test these points of `notes`:
 
-- The routes `/health` and `/notes/` answer without a token. Protocol 10.0 refuses each route except the action document. The portal reads `/health` directly, without the edge.
-- The route `/notes/api/whoami` asks the PDP no question (protocol 10.1).
-- The playground `/notes/api/pdp` takes the action and the chain from the client (protocol 4.5). It runs no use, and it does not show `context.reason`.
+- The route `/health` answers `{"ok": true}` with no token and no question. This text gives no data of the service, so `/health` is a health-probe route of 10.1c. The portal reads it directly, without the edge, for the health of the service.
+- The route `/notes/` gives the static page with no token and no question. This does not agree with 10.1c: the route must ask `access` on the service.
+- The route `/notes/api/whoami` checks the token, but it asks the PDP no question. This does not agree with 10.1c: the route must ask `access` on the service.
+- The playground `/notes/api/pdp` takes the action and the chain from the client (protocol 4.5). It runs no use, and it does not show `context.reason`. It asks the question of the client, not the question `access` of 10.1c.
 - `notes` opens a new connection for each question (protocol 10.7, a SHOULD rule).
+
+`notes` is a demo of the portal, not a reference PEP. The `reference-service` of the ProcurAuth repository passes the series U. The script `tools/dev/pep-e2e.sh` runs the series U against it.

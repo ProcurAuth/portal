@@ -143,8 +143,8 @@ The portal refuses a bad label with `invalid_agent_label`. It never cleans a lab
 
 | `agent_status` | Use |
 |---|---|
-| `new` | The agent has the state `new`. The call made it now, or the owner did not allow it yet. With `inbox.agents.lock_new` true, the owner cannot approve its items until the owner allows it. The default is false: the agent works at once. |
-| `known` | The owner allowed the agent. |
+| `new` | The agent has the state `new`. The call made it now, or the owner did not give it the state `known` yet. With `inbox.agents.lock_new` true, the owner cannot approve its items until it is `known`. The default is false: the agent works at once. |
+| `known` | The owner gave the agent the state `known` with `allow` or `unblock`, or made it with **Add agent** (mode `enrolled`). |
 | `unattributed` | The key reached `max_per_key` or `new_per_hour`. The call is not an error. The item goes to the bucket "Unattributed" of the key. There is no token. |
 | `key` | The key is in the mode `key`, or the file has no block `inbox.agents`. There is nothing to keep. |
 
@@ -458,7 +458,7 @@ A tool error is a result with `isError` set to `true`. Its `structuredContent` h
 | `interaction_not_allowed` | 422 | The key is not conversational |
 | `invalid_flags`, `invalid_command_chars`, `command_too_large`, `body_too_large` | 422 | The rules of a question |
 | `idempotency_conflict` | 409 | The `idempotency_key` names another question of the key |
-| `chain_full` | 409 | The thread has the most items that the portal allows |
+| `chain_full` | 409 | The thread has the most items that the portal accepts |
 | `forbidden` | 403 | The key has no permission `question.ask` or `question.cancel` |
 | `unauthorized` | 401 | The key is not valid (REST door) |
 | `invalid_query`, `invalid_idempotency_key` | 400 | A parameter of the query is not a whole number, or occurs two times, or holds a token. The header `Idempotency-Key` is not 1 to 128 printable ASCII characters. |
@@ -491,7 +491,7 @@ It sends no request to the client. It supports the protocol version `2026-07-28`
 | Status | Cause | Body |
 |---|---|---|
 | 401 | No key, an unknown key, an expired key, or a key of another kind | Empty. The header `WWW-Authenticate` has `Bearer realm`. |
-| 403 | The `Origin` or the client address is not allowed | Empty |
+| 403 | The `Origin` is not in `allowed_origins`, or the client address is not in `allowed_client_cidrs` | Empty |
 | 405 | The method is not `POST`. The header `Allow` has `POST`. | Empty |
 | 413 | The body is larger than `max_body_bytes` | Empty |
 | 415 | The `Content-Type` is not `application/json` | Empty |

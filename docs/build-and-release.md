@@ -24,6 +24,8 @@ The `<arch>` is `amd64` or `arm64`, the architecture of the machine. The archive
 
 The image is described by [`docker/Dockerfile`](../docker/Dockerfile). It builds on `rust:1.98-alpine3.24`, so the binary is static. The build stage refuses a binary that has a program interpreter or a shared library. The runtime stage is `scratch`, with the user `10001`, and it works with a read-only root file system. The image exposes the ports 4181 and 4182 and has the volume `/var/lib/portal`. Its `HEALTHCHECK` is `portal healthcheck`.
 
+With a read-only root, mount a tmpfs of 16 MiB on `/tmp`, and mount a volume on `/var/lib/portal` when you use SQLite. The page [Operations](operations.md#container-and-read-only-root) shows the Compose form and the Kubernetes form of the repository files.
+
 For the other architecture, use `docker buildx build --platform linux/arm64`. The build runs natively on that architecture, with a native builder or with QEMU. There is no cross compilation.
 
 The image is for tests and for your own deployment. The repository publishes no image. No tool and no workflow of the repository authenticates to a registry or pushes to one. The workflow `ci.yml` has a check that fails when a workflow mentions a container registry.

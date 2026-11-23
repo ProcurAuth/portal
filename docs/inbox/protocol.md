@@ -80,8 +80,9 @@ portal-inbox://enroll?s=<address>&k=<server key>&c=<secret>
 - White space around the whole text is ignored.
 - The key `k` is the pin. The app trusts no other key for this server.
 - The app shows the address and the fingerprint of `k` before it connects. The fingerprint is
-  the first 20 hexadecimal characters (80 bits) of the SHA-256 digest of the 32 bytes of `k`,
-  in five groups of 4 characters. The person can compare it with the value of the administrator.
+  the first 20 hexadecimal characters (80 bits) of the SHA-256 digest of the 32 bytes of `k`.
+  The app shows it in five groups of 4 characters. The person can compare it with the value of
+  the administrator.
 - The secret never leaves the core. Kotlin code does not see it.
 
 ## Enrollment: `GET /v1/enroll` (WebSocket, binary frames)
@@ -471,12 +472,12 @@ The result of an `answer` or a `reply`.
 |---|---|
 | `accepted` | The server took the frame. An `answer` is then the only answer of the item. |
 | `already_answered` | Another answer won. The same `client_msg_id` sent again also gets this status. |
-| `closed` | The item is final in another way. A question gets `closed` with no `state` when the answer does not fit it: an option that the question does not have, a wrong number of ticks, or a text where a choice is due. The server writes nothing, and the device drops the entry of its outbox. |
+| `closed` | The item is final in another way. A question gets `closed` with no `state` when the answer does not fit it. Examples: an option that the question does not have, a wrong number of ticks, or a text where a choice is due. The server writes nothing, and the device drops the entry of its outbox. |
 | `abandoned`, `superseded`, `expired`, `cancelled` | The item is in this state. |
 | `effect_mismatch` | `shown_effect` is not the effect of the item. |
 | `device_revoked` | The device is revoked. The state of the item does not change, and the server closes the session with 4403. |
 | `custom_not_allowed` | The item has `allow_custom` false, and the frame has a text. |
-| `ask_back_not_allowed` | The item has `allow_ask_back` false, or the thread has the most turns that the file allows. |
+| `ask_back_not_allowed` | The item has `allow_ask_back` false, or the thread has the most turns that the file accepts. |
 | `agent_locked` | The agent of the item is `new`, and `inbox.agents.lock_new` is true. The frame was an `accept`. The item stays open and nothing is written. A `decline` and a `reply` work. |
 
 A `reply` or an `answer` for an item that the owner does not have gets `closed` and no `state`.
@@ -540,8 +541,8 @@ A bucket has the state `known`, `named` false, no `observed`, no `similar` and n
 The server sends the frame of a bucket in the answer to a `sync` only: it never changes.
 The label of a bucket depends on the mode of its key. The server computes it when it builds the frame.
 
-**When the server sends it.** The server writes one message for each device of the owner after each change that raises `rev`:
-a new agent, new hints and each action of the owner (a merge also writes one for the target).
+**When the server sends it.** The server writes one message for each device of the owner after each change that raises `rev`.
+These changes are a new agent, new hints and each action of the owner. A merge also writes one message for the target.
 It sends the message from the queue, with a receipt, so the notice of a new agent is not lost.
 
 The frame holds the state of the agent when the server sends it. The server withdraws a message with an older `rev` when a newer message waits.
@@ -571,7 +572,7 @@ The result of an `agent_do`. It has no delivery id: the device sends no receipt.
 | `not_found` | The agent does not exist, or it belongs to another owner. One answer for both cases. |
 | `invalid_name` | The name has a control character, a format character, a white space at an end, or a bad length. |
 | `name_taken` | Another agent of the same key has this name, after NFKC and lower case. |
-| `bad_state` | The state or the kind of the agent does not allow the action. Examples: the bucket, a rename of a `merged` agent, an `allow` of a `blocked` agent, a merge into itself. |
+| `bad_state` | The action is not possible for the state or the kind of the agent. Examples: the bucket, a rename of a `merged` agent, an `allow` of a `blocked` agent, a merge into itself. |
 | `cross_key` | A merge across two keys. |
 | `not_enabled` | The server has no block `inbox.agents`. |
 

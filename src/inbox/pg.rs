@@ -2481,6 +2481,20 @@ pub struct Imported {
     pub notifications: usize,
 }
 
+/// Reads the column `index` of a row that `import_sqlite` got from the SQLite table `table`. A value of a wrong type
+/// gives an error that names the table and the column. Then the command stops with this error, not with a panic.
+fn lite_column<T: rusqlite::types::FromSql>(
+    row: &rusqlite::Row<'_>,
+    table: &str,
+    index: usize,
+) -> Result<T, String> {
+    row.get(index).map_err(|e| {
+        let stmt: &rusqlite::Statement<'_> = row.as_ref();
+        let column = stmt.column_name(index).unwrap_or("?");
+        format!("cannot read the column {column} of the SQLite table {table}: {e}")
+    })
+}
+
 impl PgStore {
     /// Copies a SQLite database (an Inbox SQLite file or one of its snapshots) into this empty PostgreSQL database, in one
     /// transaction: devices, subscriptions, alerts, deliveries, the connection log, the enrollment codes and the settings of the notifications. Refuses a database
@@ -2558,19 +2572,19 @@ impl PgStore {
         let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
         while let Some(r) = rows.next().map_err(|e| e.to_string())? {
             let (id, name, user, key, at, ip): (String, String, String, Vec<u8>, i64, String) = (
-                r.get(0).unwrap(),
-                r.get(1).unwrap(),
-                r.get(2).unwrap(),
-                r.get(3).unwrap(),
-                r.get(4).unwrap(),
-                r.get(5).unwrap(),
+                lite_column(r, "devices", 0)?,
+                lite_column(r, "devices", 1)?,
+                lite_column(r, "devices", 2)?,
+                lite_column(r, "devices", 3)?,
+                lite_column(r, "devices", 4)?,
+                lite_column(r, "devices", 5)?,
             );
             let (ver, connected, seen, last_ip, revoked): DeviceTail = (
-                r.get(6).unwrap(),
-                r.get(7).unwrap(),
-                r.get(8).unwrap(),
-                r.get(9).unwrap(),
-                r.get(10).unwrap(),
+                lite_column(r, "devices", 6)?,
+                lite_column(r, "devices", 7)?,
+                lite_column(r, "devices", 8)?,
+                lite_column(r, "devices", 9)?,
+                lite_column(r, "devices", 10)?,
             );
             tx.execute(
                 "INSERT INTO devices (id, name, user_name, public_key, enrolled_at, enrolled_ip, app_version, last_connected_at,
@@ -2588,8 +2602,11 @@ impl PgStore {
             .map_err(|e| e.to_string())?;
         let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
         while let Some(r) = rows.next().map_err(|e| e.to_string())? {
-            let (device, group, at): (String, String, i64) =
-                (r.get(0).unwrap(), r.get(1).unwrap(), r.get(2).unwrap());
+            let (device, group, at): (String, String, i64) = (
+                lite_column(r, "subscriptions", 0)?,
+                lite_column(r, "subscriptions", 1)?,
+                lite_column(r, "subscriptions", 2)?,
+            );
             tx.execute(
                 "INSERT INTO subscriptions (device_id, group_id, updated_at) VALUES ($1, $2, $3)",
                 &[&device, &group, &at],
@@ -2606,7 +2623,7 @@ impl PgStore {
             .map_err(|e| e.to_string())?;
         let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
         while let Some(r) = rows.next().map_err(|e| e.to_string())? {
-            let service: Option<String> = r.get(8).map_err(|e| e.to_string())?;
+            let service: Option<String> = lite_column(r, "alerts", 8)?;
             let (id, target_kind, target_id, title, source, key, at): (
                 String,
                 String,
@@ -2616,15 +2633,15 @@ impl PgStore {
                 String,
                 i64,
             ) = (
-                r.get(0).unwrap(),
-                r.get(1).unwrap(),
-                r.get(2).unwrap(),
-                r.get(3).unwrap(),
-                r.get(4).unwrap(),
-                r.get(5).unwrap(),
-                r.get(6).unwrap(),
+                lite_column(r, "alerts", 0)?,
+                lite_column(r, "alerts", 1)?,
+                lite_column(r, "alerts", 2)?,
+                lite_column(r, "alerts", 3)?,
+                lite_column(r, "alerts", 4)?,
+                lite_column(r, "alerts", 5)?,
+                lite_column(r, "alerts", 6)?,
             );
-            let kind: String = r.get(7).unwrap();
+            let kind: String = lite_column(r, "alerts", 7)?;
             let kind = Kind::parse(&kind)
                 .ok_or_else(|| format!("alert {id} has the unknown message kind {kind:?}"))?;
             tx.execute(
@@ -2642,13 +2659,16 @@ impl PgStore {
         let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
         while let Some(r) = rows.next().map_err(|e| e.to_string())? {
             let (seq, alert, device, attempts): (i64, String, String, i64) = (
-                r.get(0).unwrap(),
-                r.get(1).unwrap(),
-                r.get(2).unwrap(),
-                r.get(3).unwrap(),
+                lite_column(r, "deliveries", 0)?,
+                lite_column(r, "deliveries", 1)?,
+                lite_column(r, "deliveries", 2)?,
+                lite_column(r, "deliveries", 3)?,
             );
-            let (first, last, received): (Option<i64>, Option<i64>, Option<i64>) =
-                (r.get(4).unwrap(), r.get(5).unwrap(), r.get(6).unwrap());
+            let (first, last, received): (Option<i64>, Option<i64>, Option<i64>) = (
+                lite_column(r, "deliveries", 4)?,
+                lite_column(r, "deliveries", 5)?,
+                lite_column(r, "deliveries", 6)?,
+            );
             tx.execute(
                 "INSERT INTO deliveries (seq, alert_id, device_id, attempts, first_sent_at, last_sent_at, received_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -2668,15 +2688,17 @@ impl PgStore {
         let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
         while let Some(r) = rows.next().map_err(|e| e.to_string())? {
             let (id, device, user, ip, ver, connected): (i64, String, String, String, String, i64) = (
-                r.get(0).unwrap(),
-                r.get(1).unwrap(),
-                r.get(2).unwrap(),
-                r.get(3).unwrap(),
-                r.get(4).unwrap(),
-                r.get(5).unwrap(),
+                lite_column(r, "connections", 0)?,
+                lite_column(r, "connections", 1)?,
+                lite_column(r, "connections", 2)?,
+                lite_column(r, "connections", 3)?,
+                lite_column(r, "connections", 4)?,
+                lite_column(r, "connections", 5)?,
             );
-            let (disconnected, reason): (Option<i64>, Option<String>) =
-                (r.get(6).unwrap(), r.get(7).unwrap());
+            let (disconnected, reason): (Option<i64>, Option<String>) = (
+                lite_column(r, "connections", 6)?,
+                lite_column(r, "connections", 7)?,
+            );
             // A session still open in the file belongs to the instance that wrote it: it is over.
             let disconnected = disconnected.or(Some(connected));
             let reason = reason.or_else(|| Some("imported".to_string()));
@@ -2698,12 +2720,12 @@ impl PgStore {
         let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
         while let Some(r) = rows.next().map_err(|e| e.to_string())? {
             let (digest, login, created, expires): (Vec<u8>, String, i64, i64) = (
-                r.get(0).unwrap(),
-                r.get(1).unwrap(),
-                r.get(2).unwrap(),
-                r.get(3).unwrap(),
+                lite_column(r, "enrollment_codes", 0)?,
+                lite_column(r, "enrollment_codes", 1)?,
+                lite_column(r, "enrollment_codes", 2)?,
+                lite_column(r, "enrollment_codes", 3)?,
             );
-            let used: Option<i64> = r.get(4).unwrap();
+            let used: Option<i64> = lite_column(r, "enrollment_codes", 4)?;
             tx.execute(
                 "INSERT INTO enrollment_codes (digest, login, created_at_ms, expires_at_ms, used_at_ms) VALUES ($1, $2, $3, $4, $5)",
                 &[&digest, &login, &created, &expires, &used],
@@ -2718,8 +2740,11 @@ impl PgStore {
             .map_err(|e| e.to_string())?;
         let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
         while let Some(r) = rows.next().map_err(|e| e.to_string())? {
-            let (login, read_up_to, level): (String, i64, String) =
-                (r.get(0).unwrap(), r.get(1).unwrap(), r.get(2).unwrap());
+            let (login, read_up_to, level): (String, i64, String) = (
+                lite_column(r, "web_notify", 0)?,
+                lite_column(r, "web_notify", 1)?,
+                lite_column(r, "web_notify", 2)?,
+            );
             tx.execute(
                 "INSERT INTO web_notify (login, read_up_to, level) VALUES ($1, $2, $3)",
                 &[&login, &read_up_to, &level],
@@ -2748,6 +2773,28 @@ impl PgStore {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    /// `lite_column` gives an error that names the table and the column when a value has a wrong type. A value of the
+    /// correct type stays the same.
+    #[test]
+    fn lite_column_names_the_table_and_the_column_of_a_value_of_a_wrong_type() {
+        let lite = rusqlite::Connection::open_in_memory().unwrap();
+        lite.execute_batch(
+            "CREATE TABLE subscriptions (device_id TEXT, group_id TEXT, updated_at);
+             INSERT INTO subscriptions VALUES ('dev1', 'infra', 'not a number');",
+        )
+        .unwrap();
+        let mut stmt = lite
+            .prepare("SELECT device_id, group_id, updated_at FROM subscriptions")
+            .unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        let r = rows.next().unwrap().unwrap();
+        let device: String = lite_column(r, "subscriptions", 0).unwrap();
+        assert_eq!(device, "dev1");
+        let err = lite_column::<i64>(r, "subscriptions", 2).unwrap_err();
+        let want = "cannot read the column updated_at of the SQLite table subscriptions: ";
+        assert!(err.starts_with(want), "{err}");
+    }
 
     #[test]
     fn notifications_are_parsed() {

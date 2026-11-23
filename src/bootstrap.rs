@@ -6,8 +6,6 @@
 //! the subjects of the file are made at each start, and the rows of a subject that the file no
 //! longer has are deleted.
 
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 
 use crate::config::Config;

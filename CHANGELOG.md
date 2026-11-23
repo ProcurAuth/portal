@@ -4,7 +4,28 @@ This file lists the notable changes of each release of portal. The layout follow
 
 ## [Unreleased]
 
-Nothing yet.
+This version changes no key of the configuration file, no table and no frame of the phone.
+
+### Added
+
+- The route `/livez` gives the same answer as `/healthz`. Its metric label is `live`.
+- The probes `/healthz`, `/livez` and `/readyz` answer `HEAD` with the status and the headers of `GET`, without a body. The answer of a probe has `Cache-Control: no-store`.
+- The command `print-config` makes the checks of `check-config` and prints only the effective configuration.
+- A command with `--config` accepts its options in any order, the short form `-c FILE` and the form `--config=FILE`.
+- The usage text gives the exit status: 0 for success, 1 for an error.
+- The metric `portal_start_time_seconds` gives the Unix time of the start.
+- The log event `request` has two more fields after the four earlier fields: `duration_ms` and `route`.
+- Each answer with the security headers has `Cross-Origin-Opener-Policy: same-origin` and a `Permissions-Policy` that refuses the camera, the microphone, the geolocation, the payment and USB features.
+- The configuration reference has a column `Forms`. It tells which keys accept `_env` and `_file`.
+
+### Changed
+
+- The comparison of secrets uses `aws_lc_rs::constant_time`.
+- The check of the signature of a peer refuses a hex text with a sign or with a character that is not a hex digit.
+
+### Fixed
+
+- `portal inbox import-sqlite` stops with an error that names the table and the column when a row has a value of a wrong type. Before, the command stopped with a panic.
 
 ## [5.6.0] - 2026-11-23
 

@@ -9,9 +9,6 @@
 //! are final, except `abandoned` during `lease.revive_window`. An approval that is `answered` has a decision.
 //! The consumption and the lapse of an approval are marks of the row of the approval, not states.
 
-// The approval API, the agent channel, the phones and the web call this API in the next lots.
-#![allow(dead_code)]
-
 #[cfg(test)]
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
@@ -329,19 +326,6 @@ pub fn state_str(state: ItemState) -> &'static str {
     }
 }
 
-pub fn parse_state(text: &str) -> Option<ItemState> {
-    Some(match text {
-        "pending" => ItemState::Pending,
-        "replied" => ItemState::Replied,
-        "answered" => ItemState::Answered,
-        "abandoned" => ItemState::Abandoned,
-        "expired" => ItemState::Expired,
-        "cancelled" => ItemState::Cancelled,
-        "superseded" => ItemState::Superseded,
-        _ => return None,
-    })
-}
-
 pub fn status_str(status: AnswerStatus) -> &'static str {
     match status {
         AnswerStatus::Accepted => "accepted",
@@ -374,6 +358,9 @@ pub fn closed_status(state: ItemState) -> AnswerStatus {
 // ---------------------------------------------------------------- the state machine
 
 /// What can happen to an item.
+///
+/// The tests build every event. The engine sets the states of `Cancel`, `Supersede`, `Abandon`, `Expire` and `Renew`
+/// directly, so only the tests build these five.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     /// The owner answers.
@@ -383,16 +370,21 @@ pub enum Event {
     /// The agent speaks.
     Say,
     /// The agent or the server withdraws the item.
+    #[allow(dead_code)] // tests build it; the engine sets the state directly
     Cancel,
     /// The agent replaces the item with a new one.
+    #[allow(dead_code)] // tests build it; the engine sets the state directly
     Supersede,
     /// The lease and its grace ended.
+    #[allow(dead_code)] // tests build it; the engine sets the state directly
     Abandon,
     /// `until` or `max_lifetime` was reached.
+    #[allow(dead_code)] // tests build it; the engine sets the state directly
     Expire,
     /// The agent comes back after an abandon.
     Revive,
     /// The agent renews the lease.
+    #[allow(dead_code)] // tests build it; the engine sets the state directly
     Renew,
 }
 
@@ -699,8 +691,9 @@ pub fn approval_key_hash(
 }
 
 /// The sealed payload of a text of the owner: a `decline` with a comment or a change request. It is the compact JSON
-/// `{"text": ..., "intent": "comment" | "change_request"}`. The phone path and the web path build it with
-/// [`owner_text_payload`]. The agent channel reads it with [`read_owner_text`].
+/// `{"text": ..., "intent": "comment" | "change_request"}`. Only the tests call this function.
+/// The agent channel reads it with [`read_owner_text`].
+#[cfg(test)]
 pub fn owner_text_payload(
     text: &str,
     intent: inbox_core::proto::Intent,

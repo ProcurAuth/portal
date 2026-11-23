@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose a new function or a change of behavior.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What do you want to do? What stops you? Who needs it?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your idea
+      description: Describe the behavior that you want. If the configuration file changes, show the new keys.
+    validations:
+      required: false
+  - type: textarea
+    id: other
+    attributes:
+      label: Other ways to solve it
+      description: Name the options that you considered, and tell why you do not choose them.
+    validations:
+      required: false

@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" role="img" aria-label="portal: the gate, the keys and the inbox for your services. One static binary.">
+  <title>portal: the gate, the keys and the inbox for your services</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#312e81"/>
+      <stop offset="0.55" stop-color="#1b1a45"/>
+      <stop offset="1" stop-color="#0c0e15"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.2" cy="0.3" r="0.6">
+      <stop offset="0" stop-color="#818cf8" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#818cf8" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+  <g fill="none" stroke="#a5b4fc" stroke-opacity="0.3" stroke-width="3">
+    <path d="M910 356V170a100 100 0 0 1 200 0v186"/>
+    <path d="M970 356V170a40 40 0 0 1 80 0v186"/>
+  </g>
+  <path d="M910 170a100 100 0 0 1 200 0V356H1050V170a40 40 0 0 0-80 0V356H910z" fill="#a5b4fc" fill-opacity="0.16"/>
+  <circle cx="1010" cy="289" r="22" fill="#7dd3fc" fill-opacity="0.55"/>
+  <g transform="translate(84 72) scale(5)">
+    <rect width="32" height="32" rx="8" fill="#4338ca"/>
+    <path d="M10.6 23.6V16.8a5.4 5.4 0 0 1 10.8 0v6.8" fill="none" stroke="#ffffff" stroke-width="4"/>
+    <circle cx="16" cy="19.6" r="2" fill="#7dd3fc"/>
+  </g>
+  <g font-family="Inter, 'Segoe UI', -apple-system, Helvetica, Arial, sans-serif">
+    <text x="80" y="370" font-size="112" font-weight="800" fill="#ffffff" letter-spacing="-3">port<tspan fill="#a5b4fc">al</tspan></text>
+    <text x="84" y="436" font-size="38" font-weight="500" fill="#e0e7ff">The gate, the keys and the inbox for your services</text>
+    <text x="84" y="490" font-size="28" fill="#b4bbe6">One static binary. A key never has more rights than its owner.</text>
+    <text x="84" y="570" font-size="26" font-weight="600" fill="#c7d2fe" xml:space="preserve">ProcurAuth 1.1 PDP  ·  Traefik ForwardAuth  ·  SQLite or PostgreSQL</text>
+  </g>
+</svg>

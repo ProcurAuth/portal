@@ -10,9 +10,6 @@
 //! [`settle_due`], so the server clock decides an abandon or an expiry at each read and each write.
 //! A refusal is a value, not an error, and its writes (an abandon that the clock decided) are committed.
 
-// The approval API, the agent channel, the phones and the web call this API in the next lots.
-#![allow(dead_code)]
-
 use std::future::Future;
 
 use inbox_core::proto::{
@@ -23,7 +20,7 @@ use super::agents_ops::{item_agent, ItemAgentFault};
 use super::db::DbError;
 use super::items::{
     can_revive, check_wait, finish, renew, settle_due, transition, ApprovalRow, Caller, Effects,
-    Event, ItemRow, Loaded, NewEvent, NoRevive, Notice, OwnerAlert, Rules, Wait, WaitError,
+    Event, ItemRow, Loaded, NewEvent, Notice, OwnerAlert, Rules, Wait, WaitError,
     MIN_AGENT_TURN_GAP_MS,
 };
 
@@ -930,11 +927,6 @@ pub async fn renew_lease<T: ItemTx>(
     done(tx, cx, value, fx).await
 }
 
-/// Why a call cannot revive, for the answer `410`.
-pub fn revive_refusal(l: &Loaded, cx: &Cx) -> Option<NoRevive> {
-    can_revive(&l.item, cx.now, &cx.rules).err()
-}
-
 // ---------------------------------------------------------------- turns
 
 #[derive(Clone, Debug)]
@@ -1382,6 +1374,7 @@ pub enum SupersedeOut {
     /// The agent of the new item does not exist, is blocked, or belongs to another key.
     BadAgent,
     Created {
+        #[allow(dead_code)] // the tests read it
         old: Box<Loaded>,
         new: Box<Loaded>,
     },
@@ -1479,8 +1472,10 @@ pub async fn supersede<T: ItemTx>(
 #[derive(Debug)]
 pub enum Consumed {
     /// The approval is used.
+    #[allow(dead_code)] // the PDP reads only the variant; the tests read the row
     Used(Box<Loaded>),
     /// The approval can be used. Only `status` gives this value: it consumes nothing.
+    #[allow(dead_code)] // the PDP reads only the variant
     Usable(Box<Loaded>),
     /// No approval has this `key_hash`.
     NoApproval,

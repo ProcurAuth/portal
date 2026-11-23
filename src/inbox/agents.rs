@@ -21,9 +21,6 @@
 //! run in one transaction (the resolution, the limits, the human actions). `agents_store.rs` is the API of the engine
 //! for the channel, the phones and the web.
 
-// The channel (G1b), the phones (G2) and the web (G3) call this API in the next lots.
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
@@ -158,6 +155,7 @@ pub enum AgentMode {
     Enrolled,
 }
 
+#[cfg(test)]
 impl AgentMode {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -493,18 +491,6 @@ pub enum TextError {
     LineSeparator,
 }
 
-impl TextError {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            TextError::Length => "length",
-            TextError::Untrimmed => "untrimmed",
-            TextError::Control => "control",
-            TextError::Format => "format",
-            TextError::LineSeparator => "line_separator",
-        }
-    }
-}
-
 // The format characters (the class Cf of Unicode) are the same for the checks of the portal and for the frames of the
 // phones: the core crate holds the one list, so a name that the portal accepts is a name that a frame can carry.
 pub use inbox_core::proto::is_format_char;
@@ -555,6 +541,7 @@ pub fn fold(text: &str) -> String {
 }
 
 /// Whether what an agent says folds to the name of a known agent. The screens warn the owner: the text can be a copy.
+#[cfg(test)]
 pub fn says_equals_name(says: &str, name_key: &str) -> bool {
     !name_key.is_empty() && fold(says) == name_key
 }
@@ -748,7 +735,7 @@ pub fn find_similar<'a>(
 
 // ---------------------------------------------------------------- the binding of a call to an item
 
-/// The rule of section 4.4 for a call that names an item: a read goes by the key, a write goes by the agent.
+/// The rule for a call that names an item: a read goes by the key, a write goes by the agent.
 ///
 /// - A **read** (`get_answer`, `keepalive`) needs the key only. A token that is present must still be the agent of the
 ///   item. A call with no token is allowed: a lost token must not stop a read.

@@ -7,8 +7,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Body as _, Bytes, Incoming};
 use hyper::header::{
-    HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE, COOKIE, HOST, LOCATION, ORIGIN, REFERER,
-    RETRY_AFTER, SET_COOKIE, USER_AGENT,
+    HeaderMap, HeaderName, HeaderValue, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST,
+    LOCATION, ORIGIN, REFERER, RETRY_AFTER, SET_COOKIE, USER_AGENT,
 };
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -57,6 +57,8 @@ const LOGOUT_PATH: &str = "/auth/logout";
 const VERIFY_PATH: &str = "/auth/verify";
 const VERIFY_KEY_PATH: &str = "/auth/verify-key";
 const HEALTH_PATH: &str = "/healthz";
+/// The liveness of the process: the same answer as `/healthz`, under the name that the other programs of the family use.
+const LIVE_PATH: &str = "/livez";
 /// The readiness of the instance. With the block `inbox`, the inbox answers (see `crate::inbox`).
 const READY_PATH: &str = "/readyz";
 const SUCCESS_PATH: &str = "/auth/success";
@@ -805,8 +807,10 @@ async fn handle_request(
     // The listener is open for the inbox before the catalogue is complete (see `AppState::serving`).
     // Any other route fails closed: the gate must not decide with an incomplete catalogue.
     let starting = inbox_app.is_none() && !state.serving.load(std::sync::atomic::Ordering::SeqCst);
+    // The probes answer `GET` and `HEAD`. A `HEAD` gets the status and the headers of the `GET`, without the body.
+    let probe_method = method == Method::GET || method == Method::HEAD;
 
-    let response = if starting {
+    let mut response = if starting {
         text_response(StatusCode::SERVICE_UNAVAILABLE, "starting\n")
     } else if state.config.metrics.enabled
         && method == Method::GET
@@ -817,11 +821,23 @@ async fn handle_request(
         handle_verify(&state, request.headers(), &client)
     } else if path == VERIFY_KEY_PATH {
         edge::handle_verify_key(&state, request.headers(), &client)
-    } else if method == Method::GET && path == HEALTH_PATH {
+    } else if probe_method && path == HEALTH_PATH {
         text_response(StatusCode::OK, "ok\n")
     } else if let Some(app) = inbox_app {
-        crate::inbox::serve(app, found_ip, request).await
-    } else if method == Method::GET && path == READY_PATH && state.config.inbox.is_none() {
+        if method == Method::HEAD && path == READY_PATH {
+            // The inbox answers `GET /readyz` only: a `HEAD` gets the same answer, without its body (see below).
+            let (mut parts, body) = request.into_parts();
+            parts.method = Method::GET;
+            crate::inbox::serve(app, found_ip, Request::from_parts(parts, body)).await
+        } else {
+            crate::inbox::serve(app, found_ip, request).await
+        }
+    } else if probe_method && route_metric == "live" {
+        // The label is `live` only for `/livez`, unless the metrics are on with `metrics.path = "/livez"` or
+        // `inbox.mcp.path` is `/livez`: such a path keeps its route, for all the methods. The configuration refuses a
+        // `metrics.path` when the metrics are off.
+        text_response(StatusCode::OK, "ok\n")
+    } else if probe_method && path == READY_PATH && state.config.inbox.is_none() {
         // Without the block `inbox`, the instance is ready whenever it runs.
         text_response(StatusCode::OK, "ready\n")
     } else if inbox_page::is_inbox_path(&path) {
@@ -941,12 +957,17 @@ async fn handle_request(
         state.inbox.sync_replica().await;
     }
 
+    if probe_method && is_probe_route(route_metric) {
+        finish_probe(&mut response, method == Method::HEAD);
+    }
+
     let status = response.status().as_u16();
+    let elapsed = started.elapsed();
     state
         .metrics
-        .observe_http_request(method_metric, route_metric, status, started.elapsed());
+        .observe_http_request(method_metric, route_metric, status, elapsed);
 
-    let request_log_level = if matches!(route_metric, "metrics" | "health" | "ready") {
+    let request_log_level = if route_metric == "metrics" || is_probe_route(route_metric) {
         LogLevel::Debug
     } else {
         LogLevel::Info
@@ -955,20 +976,57 @@ async fn handle_request(
         &state,
         request_log_level,
         "request",
-        &[
-            ("method", method.as_str().to_string()),
-            ("path", path),
-            ("status", status.to_string()),
-            (
-                "client_ip",
-                client_ip
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "unknown".into()),
-            ),
-        ],
+        &request_log_fields(&method, path, status, client_ip, elapsed, route_metric),
     );
 
     Ok(response)
+}
+
+/// True for the route labels of the probes: `/healthz`, `/livez` and `/readyz`.
+fn is_probe_route(route: &str) -> bool {
+    matches!(route, "health" | "live" | "ready")
+}
+
+/// Finishes the answer of a probe to `GET` or `HEAD`: no cache keeps it. The answer of a `HEAD` has the status and
+/// the headers of the `GET` and no body. Its `Content-Length` gives the size of the body of the `GET`.
+fn finish_probe(response: &mut HttpResponse, head: bool) {
+    if !response.headers().contains_key(CACHE_CONTROL) {
+        response
+            .headers_mut()
+            .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
+    if head {
+        let length = response.body().size_hint().exact().unwrap_or(0);
+        response
+            .headers_mut()
+            .insert(CONTENT_LENGTH, HeaderValue::from(length));
+        *response.body_mut() = Full::new(Bytes::new());
+    }
+}
+
+/// The fields of the log event `request`, in their order. The first four fields are the fields of the released
+/// versions. `duration_ms` (whole milliseconds) and `route` (the label of the metrics) come after them.
+fn request_log_fields(
+    method: &Method,
+    path: String,
+    status: u16,
+    client_ip: Option<IpAddr>,
+    elapsed: Duration,
+    route: &'static str,
+) -> [(&'static str, String); 6] {
+    [
+        ("method", method.as_str().to_string()),
+        ("path", path),
+        ("status", status.to_string()),
+        (
+            "client_ip",
+            client_ip
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "unknown".into()),
+        ),
+        ("duration_ms", elapsed.as_millis().to_string()),
+        ("route", route.to_string()),
+    ]
 }
 
 /// In the mode `static`, the server does not use the grants that the database keeps.
@@ -5050,6 +5108,9 @@ fn secure_headers(mut response: HttpResponse, status: StatusCode) -> HttpRespons
     response
 }
 
+/// The browser features that no page of the portal uses. The value is the value of Stowr.
+const PERMISSIONS_POLICY: &str = "camera=(), microphone=(), geolocation=(), payment=(), usb=()";
+
 fn apply_secure_headers(response: &mut HttpResponse, no_store: bool) {
     if no_store {
         response.headers_mut().insert(
@@ -5072,6 +5133,14 @@ fn apply_secure_headers(response: &mut HttpResponse, no_store: bool) {
     response.headers_mut().insert(
         HeaderName::from_static("x-frame-options"),
         HeaderValue::from_static("DENY"),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("cross-origin-opener-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static(PERMISSIONS_POLICY),
     );
     response.headers_mut().insert(
         HeaderName::from_static("content-security-policy"),
@@ -5148,6 +5217,7 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
         HEALTH_PATH => "health",
         READY_PATH => "ready",
         _ if crate::inbox::owns_at(path, mcp_path(state)) => "inbox_api",
+        LIVE_PATH => "live",
         STYLE_PATH | SETTINGS_STYLE_PATH | THEME_JS_PATH | SETTINGS_JS_PATH | NOTIFY_JS_PATH => {
             "assets"
         }
@@ -5231,6 +5301,8 @@ mod pdp;
 mod cluster_tests;
 #[cfg(test)]
 mod conformance_tests;
+#[cfg(test)]
+mod ops_probe_tests;
 #[cfg(test)]
 mod pdp_rig;
 

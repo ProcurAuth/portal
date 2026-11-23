@@ -5,10 +5,11 @@
 <p align="center">
   <a href="https://github.com/ProcurAuth/portal/actions/workflows/ci.yml"><img src="https://github.com/ProcurAuth/portal/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/ProcurAuth/portal/releases/latest"><img src="https://img.shields.io/github/v/release/ProcurAuth/portal?color=4338ca&label=release" alt="Latest release"></a>
-  <img src="https://img.shields.io/badge/licence-MIT%20OR%20Apache--2.0-lightgrey" alt="Licence: MIT OR Apache-2.0">
+  <a href="#licence"><img src="https://img.shields.io/badge/licence-MIT%20OR%20Apache--2.0-lightgrey" alt="Licence: MIT OR Apache-2.0"></a>
+  <a href="https://procurauth.github.io/procurauth/implementations.html"><img src="https://img.shields.io/badge/ProcurAuth-1.1-4338ca" alt="ProcurAuth 1.1"></a>
   <img src="https://img.shields.io/badge/profile%20of-AuthZEN%201.0-0ea5e9" alt="Profile of AuthZEN 1.0">
-  <img src="https://img.shields.io/badge/ProcurAuth-1.1-4338ca" alt="ProcurAuth 1.1">
-  <img src="https://img.shields.io/badge/binary-static%20(musl)-34d399" alt="Static binary">
+  <img src="https://img.shields.io/badge/binary-static%2C%20linux%20amd64%20%7C%20arm64-34d399" alt="Static binary for Linux amd64 and arm64">
+  <img src="https://img.shields.io/badge/config-HCL%2C%20closed%20schema-818cf8" alt="Configuration: one HCL file with a closed schema">
 </p>
 
 <p align="center">
@@ -105,7 +106,64 @@ When the budget is spent, the answer is `{ "decision": false, "context": { "reas
 
 ## Quick start
 
-Docker is the only tool that you need.
+This section gives two paths: the release binary and the Compose stack.
+
+### The release binary
+
+This path takes five minutes on Linux (amd64 or arm64). Docker is not necessary. You need `curl`, `sha256sum`, `tar` and `openssl`.
+
+These commands download portal and check the archive. For arm64, use the archive `portal_5.6.0_linux_arm64.tar.gz`. The archive holds one static file, `portal`.
+
+```sh
+curl -fsSLO https://github.com/ProcurAuth/portal/releases/download/v5.6.0/portal_5.6.0_linux_amd64.tar.gz
+curl -fsSLO https://github.com/ProcurAuth/portal/releases/download/v5.6.0/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
+tar -xzf portal_5.6.0_linux_amd64.tar.gz
+./portal version
+```
+
+Make the secret files. The first two files hold the login and the password of the superadmin. The third file holds the key that encrypts the secrets of the second factor.
+
+```sh
+mkdir -p secrets data
+echo admin > secrets/superadmin_login
+openssl rand -base64 24 > secrets/superadmin_password
+openssl rand -hex 32 > secrets/totp_key
+chmod 600 secrets/*
+```
+
+These commands write the configuration, check it and start portal. A path in the file must be absolute. The shell replaces `$PWD` with the current directory.
+
+```sh
+cat > config.hcl <<EOF
+server {
+  listen_address  = "127.0.0.1:4181"
+  trusted_proxies = []
+}
+
+authentication {
+  superadmin_login_file    = "$PWD/secrets/superadmin_login"
+  superadmin_password_file = "$PWD/secrets/superadmin_password"
+  totp_key_file            = "$PWD/secrets/totp_key"
+}
+
+storage {
+  database = "$PWD/data/portal.db"
+}
+EOF
+./portal check-config --config config.hcl
+./portal run --config config.hcl
+```
+
+`check-config` prints the value of each key and its source: `file`, `default`, or `file:` and the path of a secret file. It shows `<hidden>` in place of the values of the secret files. Its last line is `configuration ok`.
+
+Open <http://127.0.0.1:4181/auth/login>. Use the login `admin` and the password in `secrets/superadmin_password`. Press Ctrl+C to stop portal.
+
+The file has no `keys`, `pdp` or `inbox` block, and it trusts no proxy. With SQLite, the sessions stay in the memory of the process, so a restart ends them. [Configuration](docs/configuration.md) gives each block and each default.
+
+### The Compose stack
+
+The stack has portal with the inbox, and PostgreSQL. You need `git` and Docker. The image stays on your machine.
 
 ```sh
 git clone https://github.com/ProcurAuth/portal && cd portal
@@ -114,13 +172,27 @@ deploy/compose/init-secrets.sh        # makes the secret files
 docker compose up -d                  # starts portal and PostgreSQL on 127.0.0.1:4181
 ```
 
-Open <http://127.0.0.1:4181/auth/login>. Use the login and the password from the files `superadmin_login` and `superadmin_password` in `deploy/compose/secrets/`. Stop the stack and delete its data with `docker compose down -v`.
+Open <http://127.0.0.1:4181/auth/login>. Use the login and the password from the files `superadmin_login` and `superadmin_password` in `deploy/compose/secrets/`. The command `docker compose down -v` stops the stack and deletes its data.
 
 For a stack with Traefik, example services, three users and grants, run `./demo/up.sh`. See [Getting started](docs/getting-started.md).
 
 ## The ProcurAuth family
 
 portal is a program of the [ProcurAuth](https://github.com/ProcurAuth) organisation. The organisation holds the open specification and the programs that follow it. The [implementations page](https://procurauth.github.io/procurauth/implementations.html) lists them, with the results of the conformance runs.
+
+<p align="center">
+  <img src="https://procurauth.github.io/procurauth/assets/family.svg" alt="The specification defines the protocol, the schemas and the conformance cases. The reference tools read them and test the programs. The portal is a backend, an edge and a PDP. Stowr, Hune and ClickHouse Dash are services that ask the portal." width="90%">
+</p>
+
+| Part | Role | Repository | Site |
+| --- | --- | --- | --- |
+| **procurauth** | The specification and the reference tools | [ProcurAuth/procurauth](https://github.com/ProcurAuth/procurauth) | [procurauth.github.io/procurauth](https://procurauth.github.io/procurauth/) |
+| **portal** | Backend, edge and PDP | [ProcurAuth/portal](https://github.com/ProcurAuth/portal) | [procurauth.github.io/portal](https://procurauth.github.io/portal/) |
+| **Stowr** | PEP: a browser for S3, Google Cloud Storage and folders | [ProcurAuth/stowr](https://github.com/ProcurAuth/stowr) | [procurauth.github.io/stowr](https://procurauth.github.io/stowr/) |
+| **Hune** | PEP: dashboards over ClickHouse, PostgreSQL and MongoDB | [ProcurAuth/hune](https://github.com/ProcurAuth/hune) | No public site yet |
+| **ClickHouse Dash** | PEP and MCP server: a query console for ClickHouse | Outside this organisation | [Implementations page](https://procurauth.github.io/procurauth/implementations.html#programs) |
+
+To add a program to this list, open an issue in the [specification repository](https://github.com/ProcurAuth/procurauth/issues).
 
 ## Documentation
 

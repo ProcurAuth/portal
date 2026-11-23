@@ -25,8 +25,6 @@
 //! does not have the action that it needs. A key never holds a `keys.*` action. An
 //! API key can hold `alert.send`, `alert.send_user` and `alert.read` (see [`KEY_ACTIONS`]).
 
-#![allow(dead_code)]
-
 use std::sync::Arc;
 
 use crate::actions::{Document, Resource};
@@ -154,6 +152,7 @@ impl Features {
     }
 
     /// Whether the document of these features holds this action.
+    #[cfg(test)]
     pub fn has_action(&self, action: &str) -> bool {
         (self.has_keys() && KEY_GROUP.contains(&action))
             || (self.has_inbox() && INBOX_GROUP_ACTIONS.contains(&action))
@@ -328,6 +327,7 @@ pub fn key_document(features: &Features, kind: KeyKind) -> Option<Arc<Document>>
 }
 
 /// The names of the actions of the document for these features, in the order of the document.
+#[cfg(test)]
 pub fn action_names(features: &Features) -> Vec<&'static str> {
     KEY_GROUP
         .iter()
@@ -338,6 +338,7 @@ pub fn action_names(features: &Features) -> Vec<&'static str> {
 }
 
 /// Whether the name is the name of an action of the service `portal`, with every feature on.
+#[cfg(test)]
 pub fn is_action(name: &str) -> bool {
     KEY_GROUP.contains(&name) || INBOX_GROUP_ACTIONS.contains(&name)
 }

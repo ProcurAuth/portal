@@ -1,15 +1,17 @@
-## What this change does
+## What changes
 
-<!-- Say what changes and why. Link the issue if there is one. -->
+Describe the change in a few sentences.
 
-## How you checked it
+## Why
 
-- [ ] `tools/dev/lint.sh` passes.
-- [ ] `tools/dev/test.sh` passes (see [Development](../docs/development.md)).
-- [ ] The documentation changes with the code. `python3 tools/docs/build_site.py --check` and `python3 tools/docs/check_links.py` pass.
-- [ ] The documents follow ASD-STE100: `python3 tools/dev/ste-check.py` reports no problem for the files that you changed.
-- [ ] A new configuration key is in the table of keys (`src/config/keys.rs`) and the reference in `docs/configuration.md` is generated again.
-- [ ] The change has a line in `CHANGELOG.md` under Unreleased.
-- [ ] The change holds no secret, no real host name and no personal data.
+Give the reason. Link the issue.
 
-When you send this change, you agree that it is licensed under `MIT OR Apache-2.0`.
+## Checks
+
+- [ ] I ran `tools/dev/lint.sh`.
+- [ ] I ran `tools/dev/test.sh --workspace`. `docs/development.md` tells how.
+- [ ] The documents change with the code, and I ran `python3 -I scripts/check-docs.py`.
+- [ ] A change of a document follows ASD-STE100: `python3 -I tools/dev/ste-check.py` finds no problem in the files that I changed.
+- [ ] A new configuration key is in the table of keys (`src/config/keys.rs`), and I made the reference in `docs/configuration.md` again.
+- [ ] I updated `CHANGELOG.md` under "Unreleased".
+- [ ] The files have no secret, no real host name, no real address and no personal data.

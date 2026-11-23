@@ -1,0 +1,62 @@
+name: Defect
+description: portal or the Android app Portal Inbox does not do what the documents say.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report a vulnerability here. Use the private report of this repository. Read [SECURITY.md](https://github.com/ProcurAuth/portal/blob/main/SECURITY.md).
+        Do not paste a secret, a key, a session cookie or a password. Replace each real host name with example.com.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `portal version`, or the version of the app.
+      placeholder: 5.6.0
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Gate and sign-in
+        - Keys and limits
+        - AuthZEN decision point
+        - Launcher and discovery
+        - Settings pages
+        - Inbox and Android app
+        - Configuration
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: The database (SQLite or PostgreSQL), the proxy and its version, Docker or Kubernetes, and the Android version if it applies.
+    validations:
+      required: false
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: The output of `portal check-config`. It hides the secrets. Remove each real host name.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to repeat the problem
+      description: Give the shortest steps that show the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: What you expected, and what happened
+      description: Add the lines of the log, with the secrets removed.
+    validations:
+      required: true

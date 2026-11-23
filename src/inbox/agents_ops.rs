@@ -4,7 +4,7 @@
 //! implement [`AgentTx`], the few steps that touch SQL: SQLite in `agents_db.rs`, PostgreSQL in `agents_pg.rs`.
 //! The order of the checks and of the writes is in this file only, so the two databases cannot differ.
 //!
-//! - [`resolve`] finds the agent of a call, or makes it (section 4.3 of the proposal). The limits of a key are
+//! - [`resolve`] finds the agent of a call, or makes it. The limits of a key are
 //!   counted in the transaction of the insert, with the lock of the creations, so two instances cannot both pass them.
 //! - [`item_agent`] gives the agent that a new item belongs to, and checks it. The composite foreign key of the
 //!   database is the last defence: an item cannot name an agent of another key, whatever the code does.
@@ -13,9 +13,6 @@
 //!
 //! Each change that raises `rev` also writes a message for the devices of the owner: the phones get the frame
 //! `agent` from the queue of deliveries, with a receipt, so the notice of a new agent is not lost. See [`agent_notice`].
-
-// The channel (G1b), the phones (G2) and the web (G3) call this API in the next lots.
-#![allow(dead_code)]
 
 use std::future::Future;
 
@@ -240,7 +237,7 @@ pub struct ResolveReq {
     pub mode: AgentMode,
     /// The digest of the token of the call. `None` for a call with no token.
     pub digest: Option<String>,
-    /// True for a call that makes an item (`approval_intent`, later `ask`).
+    /// True for a call that makes an item (`approval_intent` or `ask`).
     pub creating: bool,
     /// Set for a creating call with no token in the mode `discover`.
     pub new: Option<NewAgent>,
@@ -598,6 +595,7 @@ pub enum OpError {
     CrossKey,
 }
 
+#[cfg(test)]
 impl OpError {
     /// The member `status` of the frame `agent_result`.
     pub fn status(&self) -> &'static str {

@@ -1,4 +1,4 @@
-//! The approval API for a service over HTTP, on SQLite and on PostgreSQL (portal-owned series A).
+//! The approval API cases: a service calls the approval API over HTTP, on SQLite and on PostgreSQL.
 //!
 //! The first tests are the recording client: it keeps every answer that the portal sends to the service, and it proves
 //! that the service learns the verdict, the id and the code of a request, and nothing of the text of the agent or of
@@ -768,7 +768,7 @@ fn intent_content_not_readable_by_pep() {
     });
 }
 
-// ---------------------------------------------------------------- A01, A02, A03
+// ---------------------------------------------------------------- the submission, the lease and the renewal
 
 #[test]
 fn a01_idempotent_repost_same_id_no_renewal_no_body_swap() {
@@ -1279,7 +1279,7 @@ fn a03_renew_only_with_subject_of_requester() {
     });
 }
 
-// ---------------------------------------------------------------- A08
+// ---------------------------------------------------------------- the effect
 
 #[test]
 fn a08_effect_mismatch_invalid_view_command_too_large() {
@@ -1379,7 +1379,7 @@ fn a08_effect_mismatch_invalid_view_command_too_large() {
     });
 }
 
-// ---------------------------------------------------------------- A10, A11
+// ---------------------------------------------------------------- the intent and the reference
 
 #[test]
 fn a10_intent_rules_explanation_one_shot() {

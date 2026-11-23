@@ -477,7 +477,7 @@ fn regex_escape(text: &str) -> String {
 
 // The bulk action ------------------------------------------------------------------------------
 
-/// The bulk action of a table (variant A of the plan): a checkbox in each row, and one button in
+/// The bulk action of a table: a checkbox in each row, and one button in
 /// the head of the panel that shows the count of the ticked rows: "Revoke (3)". A click on it asks
 /// "Revoke 3 phones?" in the same place.
 ///

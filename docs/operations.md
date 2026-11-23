@@ -1,6 +1,6 @@
 # Operations
 
-This page is for the operator of a portal. It covers start and stop, backups, the rotation of a key, the metrics to watch and the commands of the binary. It also gives the notes for each upgrade.
+This page is for the operator of a portal. It covers start and stop, the probes, the effective configuration, the container and the reverse proxy. It also covers backups, the rotation of a key, the metrics and the events of the log. The last parts give the commands of the binary, the exit status and the notes for each upgrade.
 
 ## Start and stop
 
@@ -10,7 +10,7 @@ The instance opens its ports only when these tasks end:
 2. The catalogue has the full list of the services.
 3. The first read of the document of each service ended, or `access.start_read_deadline` passed.
 
-The startup probe of a pod MUST wait longer than the sum of these times. The liveness probe reads `/healthz`, which never reads the database. While the start runs, the log has the events `start_waits` and `start_read_deadline`.
+The startup probe of a pod MUST wait longer than the sum of these times. The liveness probe reads `/healthz`, which never reads the database (see [Probes](#probes)). While the start runs, the log has the events `start_waits` and `start_read_deadline`.
 
 With the block `inbox`, one exception exists. The portal listener opens at once and serves the routes of the Inbox. These are `/v1/`, `/api/v1/`, `/readyz`, `/api/version` and the path of `inbox.mcp`. An alert and a phone then never wait for the catalogue. Every other route of the portal, `/healthz` included, answers `503` with `starting` until the three tasks end.
 
@@ -19,6 +19,126 @@ The gate never decides with an incomplete catalogue. The PDP listener opens when
 On `SIGTERM`, the instance serves 5 seconds more, so the cluster can remove it from the endpoints of its service. Then it closes its listeners and tells each connection to close. It waits at most 10 seconds for the answers in progress. Set `terminationGracePeriodSeconds` to 20.
 
 The instance reads the action documents of the services at equal intervals, 64 at the same time at most. The catalogue reads the IngressRoutes and the pods in two lists, page by page, and it probes 64 services at the same time at most.
+
+## Probes
+
+The probes are on the listener of the pages. They need no session. Each probe answers `GET` and `HEAD`.
+
+| Path | Answer |
+|---|---|
+| `/healthz` | `200` with the body `ok`. While the start runs, `503` with the body `starting`. It never reads the database. |
+| `/livez` | The same answer as `/healthz`. When `metrics.path` or `inbox.mcp.path` is `/livez`, that route keeps the path. |
+| `/readyz` without the block `inbox` | `200` with the body `ready`. While the start runs, `503` with the body `starting`. |
+| `/readyz` with the block `inbox` | The Inbox answers, also while the start runs. `200` with `ready`. With PostgreSQL, `200` with `degraded` while the Inbox holds alerts in memory. `503` with `draining` after `SIGTERM`. With SQLite, `503` with `storage unavailable` when the file does not answer in 2 seconds. |
+
+The answer of a `HEAD` has the status and the headers of the `GET`, and no body. Its `Content-Length` gives the size of the body of the `GET`. Each answer of a probe has the header `Cache-Control: no-store`. The event `request` of a probe has the level `debug`, so a log at the level `info` does not show the probes.
+
+Use `/healthz` for the startup probe and for the liveness probe. Use `/readyz` for the readiness probe. The file [deploy/k3s/portal.yaml](../deploy/k3s/portal.yaml) shows the three probes. The command `portal healthcheck --config FILE` asks `/healthz`, and `/readyz` too with the block `inbox`. The image uses this command as its `HEALTHCHECK`.
+
+## Effective configuration
+
+Two commands check the configuration and print the value that applies to each key. They read and check the file and decode the secrets as `run` does. They do not open the database and they do not start the server.
+
+- `portal check-config --config FILE` checks the file, the variables and the files that it names. It also checks that the identity key and the keys of the Inbox decode. It prints one line for each key and then the line `configuration ok`. With the block `identity`, it also prints the line `identity.key_id`, which the portal derives from `identity.signing_key`.
+- `portal print-config --config FILE` does the same checks. It prints only the lines of the keys, so a script can read them.
+
+Each line has the form `key = value  # source`:
+
+```text
+server.workers = 4  # default
+logging.level = "info"  # file
+authentication.superadmin_login = <hidden>  # env:PORTAL_SUPERADMIN_LOGIN
+session.secret = <hidden>  # file:/run/secrets/portal_session_secret
+```
+
+The source is `default`, `file`, `env:VAR` or `file:/path`. A value that the portal derives from another key names that key, for example `derived from inbox.at_rest.active_key`. A secret and the superadmin login always show `<hidden>`. An error stops the command with the exit status 1, and the message names the key.
+
+At start, the server writes the same values to its log at the level `info`. It writes one event `config` for each key, with the fields `key`, `value` and `source`. The event hides the secrets in the same way. The page [Configuration](configuration.md#effective-configuration) gives the rules of the keys.
+
+## Container and read-only root
+
+The image runs as the user `10001`, and it works with a read-only root file system. Mount a tmpfs of 16 MiB on `/tmp`, and mount a volume on `/var/lib/portal` when you use SQLite. The default SQLite file is `/var/lib/portal/portal.db`. The Compose stack and the K3s manifests of the repository use PostgreSQL, so they mount no volume on `/var/lib/portal`.
+
+The service `portal` of [docker-compose.yml](../docker-compose.yml) uses this form:
+
+```yaml
+read_only: true
+tmpfs:
+  - /tmp:size=16m,mode=1777
+```
+
+The pod of [deploy/k3s/portal.yaml](../deploy/k3s/portal.yaml) uses this form. The excerpt shows only the keys of the read-only root. The key `volumes` is in the specification of the pod, next to `containers`.
+
+```yaml
+spec:
+  containers:
+  - name: portal
+    securityContext:
+      readOnlyRootFilesystem: true
+    volumeMounts:
+    - name: tmp
+      mountPath: /tmp
+  volumes:
+  - name: tmp
+    emptyDir:
+      medium: Memory
+      sizeLimit: 16Mi
+```
+
+## Reverse proxy and path prefix
+
+The portal serves plain HTTP and has no TLS server. Put a reverse proxy in front of it for HTTPS. The page [Traefik and TLS](traefik.md) gives the routes, the ForwardAuth middlewares and the rules of the headers.
+
+- Set `server.trusted_proxies` to the network of the proxy. The portal reads `X-Forwarded-For` only from a peer in these networks.
+- The scheme comes from `X-Forwarded-Proto`. Only the single value `https` counts as HTTPS. It gives the session cookie its `__Host-` name and its `Secure` attribute. The portal reads this header from every peer, so the proxy MUST set it and replace the value of the client.
+- Publish the pages at the root of a host name. The pages use absolute paths, for example `/auth/login`, and the session cookie has `Path=/`.
+
+The portal has no base path. A proxy can publish the routes of the Inbox under a path prefix, but it MUST remove the prefix before it sends the request. These routes are `/v1/` for the phones and `/api/v1/` for the senders. The key `inbox.devices.public_address` can hold the prefix, for example `https://example.com/portal`. The phones add `/v1/enroll` and `/v1/session` to it. The routes of the phones are HTTP upgrades to WebSocket, so the proxy MUST send the headers `Upgrade` and `Connection`.
+
+To publish the routes of the Inbox at `/portal/`, use these nginx rules. Put the `map` in the block `http` and the `location` in the block `server`.
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+location ~ ^/portal/(v1|api/v1)/ {
+    rewrite ^/portal(/.*)$ $1 break;
+    proxy_pass http://127.0.0.1:4181;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 300s;
+}
+```
+
+The `rewrite` removes the prefix `/portal`. Set `proxy_read_timeout` longer than `inbox.devices.session_timeout`. Then the proxy does not close a quiet session of a phone first.
+
+With Traefik, the middleware `stripPrefix` removes the prefix. Traefik carries the WebSocket upgrade and needs no other rule for it.
+
+```yaml
+http:
+  middlewares:
+    portal-prefix:
+      stripPrefix:
+        prefixes: ["/portal"]
+  routers:
+    portal-inbox:
+      rule: "Host(`example.com`) && (PathPrefix(`/portal/v1/`) || PathPrefix(`/portal/api/v1/`))"
+      entryPoints: [websecure]
+      middlewares: [portal-prefix]
+      service: portal
+      tls: {}
+  services:
+    portal:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:4181"
+```
 
 ## Backups
 
@@ -143,9 +263,223 @@ The PDP metrics exist only with the block `pdp`. `portal_key_checks_total` and `
 
 ## Logs
 
-The portal writes its log to the standard error stream. Each line is one JSON object with the fields `ts` (Unix time in seconds), `level` and `event`, and the fields of the event as strings. The key `logging.level` sets the lowest level: `error`, `warn`, `info` or `debug`. The Inbox writes to the same log.
+The portal writes its log to the standard error stream. Each line is one JSON object with the fields `ts` (Unix time in seconds), `level` and `event`, and the fields of the event as strings. One exception exists: the event `postgres_unreachable` of the portal gives `retry_for_s` as a JSON number. The key `logging.level` sets the lowest level: `error`, `warn`, `info` or `debug`. The Inbox writes to the same log.
 
-At start, the event `config` gives each configuration value with its source: see [Configuration](configuration.md#effective-configuration). The log never holds a password, a key text or a secret.
+At start, the event `config` gives each configuration value with its source: see [Effective configuration](#effective-configuration). The log never holds a password, a key text or a secret.
+
+The tables below list each event that the code writes, with its level and its fields. A field can be absent from some lines of an event. When a row gives two levels, the level depends on the case:
+
+- The event `request` has the level `debug` for the probes and for `metrics.path`, and `info` for the other routes. Its field `duration_ms` is the time of the answer in whole milliseconds. Its field `route` is the label `route` of the metrics.
+- The event `access_decision` has the level `info` for a refusal and `debug` for an access.
+- The events `approval_<event>` and `question_<event>` follow an item of the Inbox. The `<event>` is `requested`, `revived`, `replied`, `resumed`, `answered`, `muted`, `consumed` or `lapsed`. It can also be a final state: `abandoned`, `expired`, `cancelled` or `superseded`.
+
+### Events of the portal
+
+| Event | Level | Fields |
+|---|---|---|
+| `accept_error` | error | `error` |
+| `access_decision` | info, debug | `subject`, `action`, `resource`, `decision`, `path` |
+| `access_model` | info | `grants_mode`, `configured_users`, `identity_token`, `identity_key_id`, `pdp` |
+| `config` | info | `key`, `value`, `source` |
+| `connection_closed_with_error` | debug | `remote_addr`, `error` |
+| `counter_rows_failed` | error | `error` |
+| `directory_refresh_failed` | error | `error` |
+| `end_sessions_failed` | error | `error` |
+| `external_delete_failed` | error | `error` |
+| `external_icon_refused` | info | `reason` |
+| `external_insert_failed` | error | `error` |
+| `grant_to_check` | warn | `login`, `grant`, `problem`, `detail` |
+| `history_unreadable` | error | `error` |
+| `inbox_admin_revoke` | info | `actor`, `device` |
+| `inbox_admin_send` | info | `actor`, `target` |
+| `inbox_enrollment_code` | info | `actor` |
+| `inbox_key_decision` | info | `key`, `action`, `group`, `counted`, `decision` |
+| `inbox_notify_level` | info | `actor`, `level` |
+| `inbox_web_answer` | info | `actor`, `request`, `action` |
+| `inbox_web_cancel` | info | `actor`, `request` |
+| `inbox_web_reply` | info | `actor`, `request` |
+| `key_check` | info | `key`, `owner`, `service`, `result` |
+| `key_check_failed` | info | `source`, `cause`, `not_logged` |
+| `key_checks_write_failed` | error | `error` |
+| `key_created` | info | `key`, `owner`, `kind`, `expires_at` |
+| `key_edited` | info | `key`, `owner` |
+| `key_insert_failed` | error | `error` |
+| `key_prune_failed` | error | `error` |
+| `key_revoked` | info | `key`, `by`, `section` |
+| `key_update_failed` | error | `error` |
+| `login_body_capacity_reached` | warn | `client_ip`, `max_login_body_reads` |
+| `login_failed` | warn | `client_ip`, `login`, `known`, `reason` |
+| `login_password_check_wait_timeout` | warn | `client_ip` |
+| `login_rate_limited` | warn | `scope`, `client_ip`, `retry_after_seconds` |
+| `login_success` | info | `client_ip`, `login`, `second_factor` |
+| `mfa_check_failed` | error | `error` |
+| `mfa_enrol_failed` | error | `error` |
+| `mfa_read_failed` | error | `error` |
+| `options_failed` | debug | `service`, `error` |
+| `origin_check_failed` | warn | `route`, `client_ip` |
+| `postgres_unreachable` | warn | `retry_for_s`, `error` |
+| `request` | info, debug | `method`, `path`, `status`, `client_ip`, `duration_ms`, `route` |
+| `server_started` | info | `listen`, `workers`, `icons`, `max_connections` |
+| `session_capacity_reached` | error | `capacity` |
+| `session_check_failed` | error | `error` |
+| `session_count_failed` | error | `error` |
+| `session_end_all_failed` | error | `error` |
+| `session_generation_cleanup_failed` | error | `error` |
+| `session_history_cleanup_failed` | error | `error` |
+| `session_insert_failed` | error | `error` |
+| `session_revoke_failed` | error | `error` |
+| `session_revoke_user_failed` | error | `error` |
+| `session_sweep_failed` | error | `error` |
+| `sessions_ended` | warn | `count` |
+| `start_read_deadline` | warn | `detail` |
+| `start_waits` | warn | `detail` |
+| `stopped` | info | `connections_left` |
+| `stopping` | info | `serve_seconds` |
+| `stored_grants_not_used` | warn | `users`, `detail` |
+| `tracking_flush_failed` | error | `error` |
+| `tracking_prune_failed` | error | `error` |
+| `user_add_inbox_failed` | error | `error` |
+| `user_delete_failed` | error | `error` |
+| `user_delete_inbox_failed` | error | `error` |
+| `user_insert_failed` | error | `error` |
+| `user_insert_undo_failed` | error | `error` |
+| `user_update_failed` | error | `error` |
+| `watch_failed` | error | `kind`, `subject`, `error`, `message` |
+| `watch_sent` | info | `kind`, `subject`, `duplicate` |
+| `watch_started` | info | `group`, `service_unhealthy`, `sign_in_burst` |
+
+### Events of the PDP
+
+| Event | Level | Fields |
+|---|---|---|
+| `actions_read_early` | info | `service`, `request_id` |
+| `pdp_accept_error` | error | `error` |
+| `pdp_approval_store_error` | warn | `error` |
+| `pdp_approval_unavailable` | warn | `detail` |
+| `pdp_decision` | info | `client`, `subject`, `action`, `resource`, `match`, `usage`, `effect`, `decision`, `reason`, `request_id` |
+| `pdp_evaluation_id_unavailable` | warn | `detail` |
+| `pdp_request` | debug | `method`, `path`, `status`, `remote_addr`, `request_id` |
+| `pdp_started` | info | `listen`, `clients` |
+| `pdp_unavailable` | warn | `cause` |
+| `pdp_without_client` | warn | `detail` |
+
+### Events of the Inbox
+
+| Event | Level | Fields |
+|---|---|---|
+| `absent_account_end_failed` | error, warn | `user.name`, `error` |
+| `absent_account_ended` | warn | `user.name`, `devices` |
+| `account_inbox_ended` | info | `user.name`, `devices` |
+| `agent_action` | info | `op`, `agent.id`, `actor`, `via` |
+| `agent_channel_store_error` | error | `error` |
+| `agent_enrolled` | info | `agent.id`, `actor`, `via` |
+| `agent_frame_refused` | error | `agent.id`, `error` |
+| `agent_hints_failed` | warn | `agent.id`, `error` |
+| `agent_state_not_sent` | info | `agent.id`, `reason` |
+| `alert_accepted` | info | `alert.id`, `targets` |
+| `alert_spooled` | warn | `alert.id`, `targets` |
+| `alert_without_targets` | warn | `alert.id` |
+| `approval_api_store_error` | error | `error` |
+| `approval_<event>`, `question_<event>` | info | `request.id`, `actor` |
+| `body_effect_mismatch` | error | `request.id`, `reason` |
+| `body_read` | info | `request.id`, `actor` |
+| `body_served` | info | `request.id` |
+| `cache_refresh_failed` | warn | `error` |
+| `content_key_loaded` | info | `kid`, `active` |
+| `content_key_rows_to_rekey` | warn | `kid`, `count`, `active`, `hint` |
+| `database_close_timeout` | warn | none |
+| `database_closed` | info | none |
+| `deliveries_withdrawn_by_rights` | info | `device.id`, `user.name`, `count` |
+| `device_connected` | info | `recorded`, `device.id`, `device.name`, `user.name`, `client.address`, `app.version` |
+| `device_disconnected` | info | `reason`, `device.id`, `device.name`, `user.name`, `client.address` |
+| `device_enrolled` | info | `device.id`, `device.name`, `user.name`, `client.address` |
+| `device_revoked` | info | `device.id` |
+| `digest_failed` | warn | `error` |
+| `digest_plan_refused` | warn | `owner`, `reason` |
+| `digest_queued` | info | `count` |
+| `enroll_accept_failed` | error | `device.id`, `error` |
+| `enroll_cleanup_failed` | error | `device.id`, `error` |
+| `enroll_code_cleanup_failed` | warn | `error` |
+| `enroll_code_created` | info | `user.name`, `expires_at_ms` |
+| `enroll_refused` | info | `reason`, `client.address` |
+| `enroll_store_failed` | error | `error` |
+| `handshake_ended_by_newer` | info | `client.address` |
+| `heartbeat_failed` | warn | `error` |
+| `inbox_started` | info | `public_address`, `groups`, `api_keys`, `replica`, `cluster`, `storage` |
+| `inbox_stopped` | info | `sockets_left` |
+| `instance_shutdown_failed` | warn | `error` |
+| `item_delivery_withdrawn` | info | `device.id`, `request.id`, `kind`, `reason` |
+| `item_frame_failed` | error | `request.id`, `error` |
+| `item_frame_refused` | error | `error`, `request.id` |
+| `item_queue_failed` | error | `error` |
+| `item_state_not_sent` | info | `request.id`, `reason` |
+| `item_store_failed` | error | `error` |
+| `items_cancel_failed` | warn | `user.name`, `error`, `key.id` |
+| `items_cancelled` | info | `user.name`, `count`, `key.id` |
+| `items_catch_up_failed` | warn | `device.id`, `error` |
+| `items_caught_up` | info | `device.id`, `count` |
+| `items_retention` | info | `bodies_purged`, `items_deleted`, `events_deleted`, `agents_purged` |
+| `items_retention_failed` | warn | `error` |
+| `items_sweep_failed` | warn | `error` |
+| `last_seen_flush_failed` | warn | `error` |
+| `leases_extended` | warn | `count`, `reason` |
+| `lost_instance_sessions_closed` | warn | `count` |
+| `mcp_call` | info | `tool`, `key`, `agent`, `outcome` |
+| `migration_applied` | info | `version` |
+| `peer_request_refused` | warn | `path` |
+| `peers_changed` | info | `peers` |
+| `phone_agent_do` | info | `device.id`, `agent.id`, `status` |
+| `phone_answer` | info | `device.id`, `request.id`, `action`, `status` |
+| `phone_answer_invalid` | warn | `device.id`, `request.id`, `rule` |
+| `postgres_listen_lost` | warn | `error` |
+| `postgres_ready` | info | `instance`, `host`, `database` |
+| `postgres_unreachable` | warn | `error`, `retry_for_s` |
+| `prefs_read_failed` | warn | `error` |
+| `replica_fenced` | error | `reason`, `action` |
+| `replica_final_snapshot_failed` | error | `error` |
+| `replica_first_snapshot` | info | `epoch`, `bytes`, `dir` |
+| `replica_lease_contended` | warn | `epoch` |
+| `replica_lease_release_failed` | warn | `error` |
+| `replica_lease_released` | info | `epoch` |
+| `replica_lease_unreadable` | warn | `error` |
+| `replica_local_rejected` | error | `error` |
+| `replica_ready` | info | `epoch`, `restored_epoch`, `kept_local` |
+| `replica_renew_failed` | warn | `error` |
+| `replica_snapshot` | debug | `epoch`, `bytes` |
+| `replica_snapshot_failed` | warn | `error` |
+| `replica_snapshot_rejected` | error | `epoch`, `error` |
+| `replica_sync_failed` | warn | `error` |
+| `replica_waiting` | info | `reason`, `ttl_ms` |
+| `retention_failed` | warn | `error` |
+| `retention_purged` | info | `alerts`, `connections`, `codes` |
+| `rights_read_failed` | warn | `error` |
+| `rights_unsubscribe_failed` | warn | `error` |
+| `session_budget_full` | warn | `client.address` |
+| `session_disconnect_record_failed` | error | `error` |
+| `session_lookup_failed` | error | `error` |
+| `session_record_failed` | error | `error` |
+| `session_refused` | info | `reason`, `device.id`, `user.name` |
+| `session_storage_error` | error | `error` |
+| `spool_alert_conflict` | warn | `alert.id`, `alert.source` |
+| `spool_alert_refused` | error | `alert.id`, `alert.source`, `error` |
+| `spool_full` | error | `capacity` |
+| `spool_lost` | error | `alerts`, `message`, `error` |
+| `spool_replay_failed` | warn | `error` |
+| `spool_replayed` | info | `alerts` |
+| `spool_unreplicated` | warn | `alert.id` |
+| `stale_connections_closed` | info | `count` |
+| `stats_failed` | warn | `error` |
+| `storage_degraded` | warn | `reason`, `spooled` |
+| `storage_error` | error | `error` |
+| `storage_recovered` | info | `down_ms`, `spooled` |
+| `subscription_changed` | info | none |
+| `subscription_removed` | info | none |
+| `subscription_removed_by_rights` | info | `device.id`, `user.name`, `group` |
+| `subscriptions_pruned` | warn | `count`, `reason` |
+| `subscriptions_removed_by_rights` | warn | `count` |
+| `wal_checkpoint_failed` | warn | `error` |
+| `watch_key_in_use` | warn | `error` |
+| `webhook_alert_refused` | warn | `group`, `error` |
 
 ## Native commands
 
@@ -154,7 +488,8 @@ The binary has these commands. Each command that reads the configuration takes `
 | Command | What it does |
 |---|---|
 | `portal run --config FILE` | Starts the server. |
-| `portal check-config --config FILE` | Checks the file, the variables and the files that it names. Prints the value and the source of each key. See [Configuration](configuration.md#effective-configuration). |
+| `portal check-config --config FILE` | Checks the file, the variables and the files that it names. Prints the value and the source of each key, then `configuration ok`. See [Effective configuration](#effective-configuration). |
+| `portal print-config --config FILE` | Does the checks of `check-config`. Prints only the value and the source of each key. |
 | `portal config-reference` | Prints the configuration reference in Markdown, from the table of keys. |
 | `portal identity-public-key --config FILE` | Prints the public key of the identity tokens as a JWK Set. A service uses it. |
 | `portal healthcheck --config FILE` | Asks `/healthz` of the listener, and `/readyz` with the block `inbox`. The exit code is 0 when the answer is good. The container image uses it. |
@@ -171,9 +506,14 @@ The binary has these commands. Each command that reads the configuration takes `
 | `portal inbox import-sqlite --config FILE --from SQLITE_FILE` | Copies the data of a SQLite file of the Inbox into the PostgreSQL database. |
 | `portal inbox healthcheck --config FILE` | Asks `/readyz` of the listener. |
 | `portal render-demo [ICONS_DIR\|-] [PAGE]` | Prints a synthetic page as HTML on the standard output. Use it to look at the design with no session. |
-| `portal version` | Prints the version. |
+| `portal version` | Prints the version. `portal --version` and `portal -V` do the same. |
+| `portal help` | Prints the usage. `portal --help`, `portal -h` and the program without a command do the same. |
 
 The commands `keygen`, `token` and `content-key` refuse to overwrite a file.
+
+## Exit status
+
+Each command exits with the status `0` when it succeeds. It exits with the status `1` for any error, also for an error of the command line or of the configuration. It then writes `portal: ` and the message to the standard error stream. A panic stops the process with the signal `SIGABRT`, so a shell shows the status `134`. `portal healthcheck` exits with `0` only when each answer has the status `200`. The page [Reference](reference.md#exit-codes) also gives the exit codes.
 
 ## Upgrades
 

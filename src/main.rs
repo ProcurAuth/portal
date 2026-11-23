@@ -65,7 +65,7 @@ fn real_main() -> Result<(), String> {
     let command = args.next().unwrap_or_else(|| "help".into());
     match command.as_str() {
         "run" => {
-            let config_path = parse_config_arg(args.collect())?;
+            let config_path = parse_config_arg(&args.collect::<Vec<_>>())?;
             let (config, mut secrets) = Config::load(&config_path)?;
             inbox::log::set_level(config.logging.level);
             let signing_secret = take_session_secret(&mut secrets)?;
@@ -173,7 +173,7 @@ fn real_main() -> Result<(), String> {
         // Copies the accounts and the history of a SQLite file into the (empty) PostgreSQL database.
         // The configuration names the database. The file is only read.
         "import-sqlite" => {
-            let (config_path, from) = parse_import_args(args.collect())?;
+            let (config_path, from) = parse_import_args(&args.collect::<Vec<_>>())?;
             let (config, secrets) = Config::load(&config_path)?;
             if !matches!(config.storage.backend, StorageBackend::Postgres(_)) {
                 return Err("import-sqlite needs a configuration with a postgres block".into());
@@ -196,7 +196,7 @@ fn real_main() -> Result<(), String> {
         // The incident command. It ends every session of the shared database, the superadmin sessions too.
         // A running portal stops accepting a session within 5 s. With a SQLite file the command fails.
         "end-sessions" => {
-            let config_path = parse_config_arg(args.collect())?;
+            let config_path = parse_config_arg(&args.collect::<Vec<_>>())?;
             let (config, secrets) = Config::load(&config_path)?;
             require_shared_sessions(&config)?;
             let store = open_store(&config, &secrets)?;
@@ -209,7 +209,7 @@ fn real_main() -> Result<(), String> {
         // change within one round of the directory. With a SQLite file, the command writes only when
         // the portal does not run.
         "revoke-keys" => {
-            let (config_path, who) = parse_revoke_args(args.collect())?;
+            let (config_path, who) = parse_revoke_args(&args.collect::<Vec<_>>())?;
             let (config, secrets) = Config::load(&config_path)?;
             if let StorageBackend::Sqlite(path) = &config.storage.backend {
                 if store::sqlite_instance_running(path) {
@@ -229,7 +229,7 @@ fn real_main() -> Result<(), String> {
         // SQLite file, the command writes only when the portal does not run. With PostgreSQL, it ends the sessions of
         // the account too. The command writes one audit event, with the actor `cli`.
         "reset-two-factor" => {
-            let (config_path, who) = parse_revoke_args(args.collect())?;
+            let (config_path, who) = parse_revoke_args(&args.collect::<Vec<_>>())?;
             let (config, secrets) = Config::load(&config_path)?;
             if let StorageBackend::Sqlite(path) = &config.storage.backend {
                 if store::sqlite_instance_running(path) {
@@ -272,16 +272,8 @@ fn real_main() -> Result<(), String> {
         // Then print the value that applies to each key, with its source.
         // The secrets are hidden.
         "check-config" => {
-            let config_path = parse_config_arg(args.collect())?;
-            let (config, mut secrets) = Config::load(&config_path)?;
-            let mut signing_secret = take_session_secret(&mut secrets)?;
-            let mut superadmin = load_superadmin(&secrets, &signing_secret)?;
-            superadmin.password_hash.zeroize();
-            signing_secret.zeroize();
-            // The key must be a valid Ed25519 key. The check reads it as `run` does.
-            let signer = identity_signer(&config, &mut secrets)?;
-            // The secrets of the inbox must decode: the key and the tokens.
-            inbox::check_secrets(&config, &mut secrets)?;
+            let config_path = parse_config_arg(&args.collect::<Vec<_>>())?;
+            let (config, signer) = load_and_check(&config_path)?;
             print!("{}", config.render_effective());
             if let Some(signer) = signer {
                 println!(
@@ -292,9 +284,17 @@ fn real_main() -> Result<(), String> {
             println!("configuration ok");
             Ok(())
         }
+        // The same checks as `check-config`. The output is only the effective configuration, one
+        // line for each key, so a script can read it.
+        "print-config" => {
+            let config_path = parse_config_arg(&args.collect::<Vec<_>>())?;
+            let (config, _signer) = load_and_check(&config_path)?;
+            print!("{}", config.render_effective());
+            Ok(())
+        }
         // The public key of the identity tokens. Each service uses it in `identity.public_keys_file`.
         "identity-public-key" => {
-            let config_path = parse_config_arg(args.collect())?;
+            let config_path = parse_config_arg(&args.collect::<Vec<_>>())?;
             let (config, mut secrets) = Config::load(&config_path)?;
             let signer = identity_signer(&config, &mut secrets)?
                 .ok_or("the configuration has no identity block")?;
@@ -310,7 +310,7 @@ fn real_main() -> Result<(), String> {
             Ok(())
         }
         "healthcheck" => {
-            let config_path = parse_config_arg(args.collect())?;
+            let config_path = parse_config_arg(&args.collect::<Vec<_>>())?;
             healthcheck(&config_path)
         }
         "hash-password" => hash_password_command(),
@@ -344,39 +344,144 @@ fn release_version() -> &'static str {
     option_env!("PORTAL_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
-fn parse_config_arg(args: Vec<String>) -> Result<PathBuf, String> {
-    if args.len() != 2 || args[0] != "--config" {
-        return Err("expected: --config <FILE>".into());
-    }
-    Ok(PathBuf::from(&args[1]))
+/// One option of a command of this file. The commands under `portal inbox` have their own parser.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Opt {
+    /// `--config FILE`, `--config=FILE` or `-c FILE`.
+    Config,
+    /// `--user LOGIN` or `--user=LOGIN`.
+    User,
+    /// `--all`, without a value.
+    All,
+    /// `--from FILE` or `--from=FILE`.
+    From,
 }
 
-/// The arguments of `revoke-keys`: `--config <FILE>` and `--user <LOGIN>` or `--all`. The result
-/// is the login, or `None` for all the keys of the database.
-fn parse_revoke_args(args: Vec<String>) -> Result<(PathBuf, Option<String>), String> {
-    match args.as_slice() {
-        [config_flag, config, who_flag, login]
-            if config_flag == "--config" && who_flag == "--user" =>
-        {
-            Ok((PathBuf::from(config), Some(login.clone())))
+impl Opt {
+    fn name(self) -> &'static str {
+        match self {
+            Opt::Config => "--config",
+            Opt::User => "--user",
+            Opt::All => "--all",
+            Opt::From => "--from",
         }
-        [config_flag, config, all] if config_flag == "--config" && all == "--all" => {
-            Ok((PathBuf::from(config), None))
-        }
-        _ => Err("expected: --config <FILE> --user <LOGIN>, or --config <FILE> --all".into()),
     }
 }
 
-/// Parses the arguments of the import command: `--config <FILE> --from <FILE>`.
-fn parse_import_args(args: Vec<String>) -> Result<(PathBuf, PathBuf), String> {
-    match args.as_slice() {
-        [config_flag, config, from_flag, from]
-            if config_flag == "--config" && from_flag == "--from" =>
-        {
-            Ok((PathBuf::from(config), PathBuf::from(from)))
+/// The options that a command line gives. Each option comes at most one time.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Options {
+    config: Option<PathBuf>,
+    user: Option<String>,
+    from: Option<PathBuf>,
+    all: bool,
+}
+
+/// Reads the options of a command, in any order. `accepts` lists the options of the command.
+///
+/// An option with a value accepts `--name VALUE` and `--name=VALUE`. `--config` also accepts
+/// `-c VALUE`. The value is used as it is, also when it starts with `-`. An unknown option, a
+/// repeated option, an option without its value and a free argument give an error. The error
+/// ends with `usage`.
+fn parse_options(args: &[String], accepts: &[Opt], usage: &str) -> Result<Options, String> {
+    let fail = |problem: String| format!("{problem}; expected: {usage}");
+    let mut options = Options::default();
+    let mut seen: Vec<Opt> = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        let (name, inline) = match arg.split_once('=') {
+            Some((name, value)) if name.starts_with("--") => (name, Some(value)),
+            _ => (arg.as_str(), None),
+        };
+        let opt = match name {
+            "--config" | "-c" => Opt::Config,
+            "--user" => Opt::User,
+            "--all" => Opt::All,
+            "--from" => Opt::From,
+            _ if name.starts_with('-') => return Err(fail(format!("unknown option {name}"))),
+            _ => return Err(fail(format!("unexpected argument {arg}"))),
+        };
+        if !accepts.contains(&opt) {
+            return Err(fail(format!("unknown option {name}")));
         }
-        _ => Err("expected: --config <FILE> --from <SQLITE FILE>".into()),
+        if seen.contains(&opt) {
+            return Err(fail(format!(
+                "the option {} is given two times",
+                opt.name()
+            )));
+        }
+        seen.push(opt);
+        if opt == Opt::All {
+            if inline.is_some() {
+                return Err(fail("the option --all takes no value".into()));
+            }
+            options.all = true;
+            continue;
+        }
+        let value = match inline {
+            Some(value) => value.to_string(),
+            None => rest
+                .next()
+                .ok_or_else(|| fail(format!("the option {} needs a value", opt.name())))?
+                .clone(),
+        };
+        match opt {
+            Opt::Config if value.is_empty() => {
+                return Err(fail("the value of --config is empty".into()))
+            }
+            Opt::Config => options.config = Some(PathBuf::from(value)),
+            Opt::User => options.user = Some(value),
+            Opt::From => options.from = Some(PathBuf::from(value)),
+            Opt::All => {}
+        }
     }
+    Ok(options)
+}
+
+/// The arguments of a command that reads only the configuration: `--config <FILE>`.
+fn parse_config_arg(args: &[String]) -> Result<PathBuf, String> {
+    const USAGE: &str = "--config <FILE>";
+    parse_options(args, &[Opt::Config], USAGE)?
+        .config
+        .ok_or_else(|| format!("expected: {USAGE}"))
+}
+
+/// The arguments of `revoke-keys` and `reset-two-factor`: `--config <FILE>` and `--user <LOGIN>`
+/// or `--all`. The result is the login, or `None` for all the accounts.
+fn parse_revoke_args(args: &[String]) -> Result<(PathBuf, Option<String>), String> {
+    const USAGE: &str = "--config <FILE> --user <LOGIN>, or --config <FILE> --all";
+    let options = parse_options(args, &[Opt::Config, Opt::User, Opt::All], USAGE)?;
+    match (options.config, options.user, options.all) {
+        (Some(config), Some(login), false) => Ok((config, Some(login))),
+        (Some(config), None, true) => Ok((config, None)),
+        _ => Err(format!("expected: {USAGE}")),
+    }
+}
+
+/// The arguments of the import command: `--config <FILE> --from <SQLITE FILE>`.
+fn parse_import_args(args: &[String]) -> Result<(PathBuf, PathBuf), String> {
+    const USAGE: &str = "--config <FILE> --from <SQLITE FILE>";
+    let options = parse_options(args, &[Opt::Config, Opt::From], USAGE)?;
+    match (options.config, options.from) {
+        (Some(config), Some(from)) => Ok((config, from)),
+        _ => Err(format!("expected: {USAGE}")),
+    }
+}
+
+/// Loads the file as `run` does, and checks each secret that it names. `check-config` and
+/// `print-config` use it. The result has the signer of the identity tokens, when the file has the
+/// block `identity`.
+fn load_and_check(path: &Path) -> Result<(Config, Option<identity::Signer>), String> {
+    let (config, mut secrets) = Config::load(path)?;
+    let mut signing_secret = take_session_secret(&mut secrets)?;
+    let mut superadmin = load_superadmin(&secrets, &signing_secret)?;
+    superadmin.password_hash.zeroize();
+    signing_secret.zeroize();
+    // The key must be a valid Ed25519 key. The check reads it as `run` does.
+    let signer = identity_signer(&config, &mut secrets)?;
+    // The secrets of the inbox must decode: the key and the tokens.
+    inbox::check_secrets(&config, &mut secrets)?;
+    Ok((config, signer))
 }
 
 /// Opens the database that the configuration names. With PostgreSQL, this waits up to a minute for the database to answer.
@@ -512,7 +617,7 @@ fn healthcheck(path: &Path) -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal config-reference\n  portal revoke-keys --config FILE (--user LOGIN | --all)\n  portal reset-two-factor --config FILE (--user LOGIN | --all)\n  portal identity-public-key --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal end-sessions --config FILE\n  portal hash-password < password.txt\n  portal inbox keygen --out FILE\n  portal inbox token --out FILE\n  portal inbox content-key --out FILE\n  portal inbox content-purge --config FILE --key ID\n  portal inbox rekey --config FILE [--from ID]\n  portal inbox import-sqlite --config FILE --from SQLITE_FILE\n  portal inbox healthcheck --config FILE\n  portal render-demo [ICONS_DIR|-] [launcher|access|access-panel-only|activity|activity-panel-only|user|new-user|services|services-panel-only|services-empty] > page.html\n  portal version",
+        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal print-config --config FILE\n  portal config-reference\n  portal revoke-keys --config FILE (--user LOGIN | --all)\n  portal reset-two-factor --config FILE (--user LOGIN | --all)\n  portal identity-public-key --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal end-sessions --config FILE\n  portal hash-password < password.txt\n  portal inbox keygen --out FILE\n  portal inbox token --out FILE\n  portal inbox content-key --out FILE\n  portal inbox content-purge --config FILE --key ID\n  portal inbox rekey --config FILE [--from ID]\n  portal inbox import-sqlite --config FILE --from SQLITE_FILE\n  portal inbox healthcheck --config FILE\n  portal render-demo [ICONS_DIR|-] [launcher|access|access-panel-only|activity|activity-panel-only|user|new-user|services|services-panel-only|services-empty] > page.html\n  portal version\n\nOPTIONS (commands with --config, outside portal inbox):\n  The order of the options is free. Each option comes one time at most.\n  -c FILE is the short form of --config FILE.\n  An option with a value also accepts the form --NAME=VALUE, for example --config=FILE.\n\nExit status: 0 for success, 1 for any error.",
         release_version()
     );
 }
@@ -563,5 +668,142 @@ mod tests {
             password_env = "T_DB"
         }"#;
         assert_eq!(require_shared_sessions(&config(postgres)), Ok(()));
+    }
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn cli_args_config_accepts_each_form() {
+        for line in [
+            &["--config", "a.hcl"][..],
+            &["--config=a.hcl"][..],
+            &["-c", "a.hcl"][..],
+        ] {
+            assert_eq!(
+                parse_config_arg(&args(line)),
+                Ok(PathBuf::from("a.hcl")),
+                "{line:?}"
+            );
+        }
+        // The value is used as it is: it can start with `-` or hold `=`.
+        assert_eq!(
+            parse_config_arg(&args(&["--config", "-x"])),
+            Ok(PathBuf::from("-x"))
+        );
+        assert_eq!(
+            parse_config_arg(&args(&["--config=a=b.hcl"])),
+            Ok(PathBuf::from("a=b.hcl"))
+        );
+    }
+
+    #[test]
+    fn cli_args_config_refuses_a_bad_line() {
+        let usage = "expected: --config <FILE>";
+        assert_eq!(parse_config_arg(&args(&[])), Err(usage.to_string()));
+        let cases: &[(&[&str], &str)] = &[
+            (&["--config"], "the option --config needs a value"),
+            (&["-c"], "the option --config needs a value"),
+            (&["--config="], "the value of --config is empty"),
+            (&["--config", ""], "the value of --config is empty"),
+            (
+                &["--config", "a", "-c", "b"],
+                "the option --config is given two times",
+            ),
+            (&["--config", "a", "--all"], "unknown option --all"),
+            (&["--config", "a", "--x=1"], "unknown option --x"),
+            (&["-c=a"], "unknown option -c=a"),
+            (&["a.hcl"], "unexpected argument a.hcl"),
+            (&["--config", "a", "b"], "unexpected argument b"),
+        ];
+        for (line, problem) in cases {
+            assert_eq!(
+                parse_config_arg(&args(line)),
+                Err(format!("{problem}; {usage}")),
+                "{line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_args_revoke_takes_the_options_in_any_order() {
+        let user = Ok((PathBuf::from("a.hcl"), Some("bob".to_string())));
+        for line in [
+            &["--config", "a.hcl", "--user", "bob"][..],
+            &["--user", "bob", "--config", "a.hcl"][..],
+            &["--user=bob", "-c", "a.hcl"][..],
+            &["--config=a.hcl", "--user=bob"][..],
+        ] {
+            assert_eq!(parse_revoke_args(&args(line)), user, "{line:?}");
+        }
+        let all = Ok((PathBuf::from("a.hcl"), None));
+        for line in [
+            &["--config", "a.hcl", "--all"][..],
+            &["--all", "--config", "a.hcl"][..],
+            &["--all", "-c", "a.hcl"][..],
+        ] {
+            assert_eq!(parse_revoke_args(&args(line)), all, "{line:?}");
+        }
+        // As in 5.6.0, the value of --user is the next argument, also when it starts with `-`.
+        assert_eq!(
+            parse_revoke_args(&args(&["--config", "a.hcl", "--user", "--all"])),
+            Ok((PathBuf::from("a.hcl"), Some("--all".to_string())))
+        );
+    }
+
+    #[test]
+    fn cli_args_revoke_refuses_a_bad_line() {
+        let usage = "expected: --config <FILE> --user <LOGIN>, or --config <FILE> --all";
+        for line in [
+            &[][..],
+            &["--config", "a.hcl"][..],
+            &["--user", "bob"][..],
+            &["--all"][..],
+            &["--config", "a.hcl", "--user", "bob", "--all"][..],
+        ] {
+            assert_eq!(
+                parse_revoke_args(&args(line)),
+                Err(usage.to_string()),
+                "{line:?}"
+            );
+        }
+        assert_eq!(
+            parse_revoke_args(&args(&["-c", "a", "--all", "--all"])),
+            Err(format!("the option --all is given two times; {usage}"))
+        );
+        assert_eq!(
+            parse_revoke_args(&args(&["-c", "a", "--all=yes"])),
+            Err(format!("the option --all takes no value; {usage}"))
+        );
+        assert_eq!(
+            parse_revoke_args(&args(&["-c", "a", "--from", "b"])),
+            Err(format!("unknown option --from; {usage}"))
+        );
+    }
+
+    #[test]
+    fn cli_args_import_takes_the_options_in_any_order() {
+        let both = Ok((PathBuf::from("a.hcl"), PathBuf::from("old.db")));
+        for line in [
+            &["--config", "a.hcl", "--from", "old.db"][..],
+            &["--from", "old.db", "--config", "a.hcl"][..],
+            &["--from=old.db", "-c", "a.hcl"][..],
+        ] {
+            assert_eq!(parse_import_args(&args(line)), both, "{line:?}");
+        }
+        let usage = "expected: --config <FILE> --from <SQLITE FILE>";
+        assert_eq!(
+            parse_import_args(&args(&["--config", "a.hcl"])),
+            Err(usage.to_string())
+        );
+        assert_eq!(
+            parse_import_args(&args(&["--from", "a", "--from", "b", "-c", "x"])),
+            Err(format!("the option --from is given two times; {usage}"))
+        );
+        assert_eq!(
+            parse_import_args(&args(&["-c", "a", "--user", "b"])),
+            Err(format!("unknown option --user; {usage}"))
+        );
     }
 }

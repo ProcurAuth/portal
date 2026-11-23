@@ -87,11 +87,11 @@ The identity of a portal on the phone is local. The user chooses the name and th
 
 ## Limits of the model
 
-- The portal knows nothing about TLS. Noise protects the phones. The bearer key of a sender travels in clear text on plain HTTP. Terminate TLS in the reverse proxy, or use a private network.
+- The portal knows nothing about TLS. Noise protects the phones. The bearer key of a sender travels in clear text on plain HTTP. Use TLS from the clients to the reverse proxy, or use a private network.
 - A code is a bearer secret until its first use. Whoever reads it can enroll a phone for the account. Show it only to its owner.
 - A key file of the server that leaks lets an attacker act as the server. Replace it and enroll every phone again.
 - A session that the superadmin opens as another account can read the phones and make a code for that account. The phone then belongs to that account. This is a known property of **Log in as**.
-- The Android app allows clear text for each address. It has no network security configuration.
+- The Android app accepts clear text for each address. It has no network security configuration.
 - Each instance has its own rate limits and its own counter of refused sign-ins.
 - When the directory of the portal is not ready or is old, the portal cannot tell who may open a service. A new alert of the portal about a service then reaches only the phones of the superadmin. A delivery of such an alert that exists for another phone waits until the portal can tell the rights again.
 - With PostgreSQL, a phone of a login that this instance does not know gets the close code 1013 and no session. Examples are an account of the file that left the file and an old login of the superadmin. The Inbox does not end the state of this login, because the file of another instance can still have it. The phone tries again until a person revokes it in the zone **Phones**. Revoke it when every instance has the new file.

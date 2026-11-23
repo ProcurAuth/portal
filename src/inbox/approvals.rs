@@ -17,9 +17,6 @@
 //!   that names the intent gives its item to that agent. A submission with no intent goes to the bucket of the key. A
 //!   chain (`previous_id`, `supersedes`) stays inside one agent.
 
-// The agent channel (`mcp_tools.rs`) calls `intent` and its types. Some other functions and fields are used by the tests only.
-#![allow(dead_code)]
-
 use inbox_core::effect::{check_view, effect_hash, Op, View};
 use inbox_core::proto::{ExplanationFormat, Hint, Interaction, ItemState, Kind, Language, Via};
 use serde_json::{json, Value};

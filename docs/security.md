@@ -9,19 +9,19 @@ The portal is a ForwardAuth gate, the launcher of a lab, an AuthZEN decision poi
 - **One identity.** An account has one login and one set of permissions for the launcher, the keys and the Inbox. The permissions for the keys and the Inbox are on one internal scope, the service `portal`.
 - **Passwords.** The database keeps only Argon2id hashes. Each sign-in costs one Argon2 check, also for an unknown login. The failure message is always the same.
 - **Sessions.** A session is an opaque random token. The server keeps only its SHA-256 digest. The session is bound to the client address and the browser.
-- **Gate.** A new user has no permission. The gate checks the forwarded path in every way that a proxy can interpret it. It lets a request pass only if every interpretation is allowed.
+- **Gate.** A new user has no permission. The gate checks the forwarded path in every way that a proxy can interpret it. It lets a request pass only if every interpretation can pass.
 - **Keys.** A key never gets more than its owner. The portal keeps only the digest of the key text. A verifier checks the form and the kind of a key before any lookup.
 - **Inbox.** A phone enrolls with a one-time code of an account. The session is Noise IK to a key that the phone pinned. A sender proves itself with an `api_` key. The permissions of the portal features decide who sends, reads and revokes.
 - **Configuration.** The file is the only source. A secret comes only from `_env` or `_file`. An unknown key stops the program at start.
 - **Logs.** The log never holds a password, a key text or a secret. The effective configuration shows `<hidden>` for each secret.
-- **Code.** The `portal` binary and the crate `inbox-core` have no `unsafe` Rust. The binary has `#![forbid(unsafe_code)]`. Only the JNI bridge of the Android app (`crates/inbox-android`) uses `unsafe`. The Linux release binary is static.
+- **Code.** The `portal` binary and the crate `inbox-core` forbid `unsafe` Rust: each one has `#![forbid(unsafe_code)]`. Only the JNI bridge of the Android app (`crates/inbox-android`) uses `unsafe`. The Linux release binary is static.
 
 ![The trust boundaries of the portal: which party is trusted, and which request the portal checks](assets/trust-boundaries.svg)
 
 ### Who is trusted
 
 - **The superadmin** is trusted with everything. The superadmin sees every page, manages every account and opens every service.
-- **The proxy** (Traefik) is trusted to terminate TLS, to route as the documents say and to set the forwarded headers. The portal reads them only from the networks in `server.trusted_proxies`.
+- **The proxy** (Traefik) is trusted to be the end point of TLS, to route as the documents say and to set the forwarded headers. The portal reads them only from the networks in `server.trusted_proxies`.
 - **The person who can create a container or an IngressRoute** chooses what the launcher lists and which actions the settings pages offer for a service. This is the trust boundary of the discovery. It is acceptable for one administrator.
 - **A service** is trusted to check the identity token and to ask the PDP. It is not trusted with the session cookie (see [the known limits](#known-limits-and-deployment-measures)).
 - **A user** is trusted with the grants of the account only. A key is trusted with less: never more than its owner.
@@ -51,7 +51,7 @@ These rules are the security contract of the code. A change that breaks one of t
 
 ### Process and configuration
 
-- The project code of the binary contains no `unsafe` Rust.
+- The project code of the binary contains no `unsafe` Rust. The binary and the crate `inbox-core` have `#![forbid(unsafe_code)]`.
 - Hyper parses HTTP/1.
 - The server limits the request headers, the connection count, the body size and the read times.
 - The start fails when the HCL configuration is unknown or invalid.
@@ -90,12 +90,12 @@ These rules are the security contract of the code. A change that breaks one of t
 - A path that no service owns is open to each signed-in user only when the catalogue is complete. Until each configured discovery source has answered once, only the superadmin passes the gate.
 - A workload with unusable labels keeps the path of its `href` closed. A workload that does not ask to be listed, or whose id another workload uses with another `href`, keeps it closed too. Only the superadmin passes a closed path.
 - The gate decodes an `href` in the same way as a request path. A segment that starts with the last segment of a prefix belongs to that service, as the Traefik `PathPrefix` rule routes it. Such a path gets no identity token.
-- The gate reads the forwarded path in every way that a proxy or a backend can read it. It allows the request only if every way allows it. It refuses a URI that it cannot read.
+- The gate reads the forwarded path in every way that a proxy or a backend can read it. It lets the request pass only if each of these paths passes. It refuses a URI that it cannot read.
 - The portal receives only the headers of a request (ForwardAuth). It never receives the body of a service.
 - The launcher lists only the services for which the user has `access`. The 403 page names no service.
 - Discovery problems name workloads. Only the superadmin sees them.
 - The settings pages give a grant below a service only for a level that the service declares and an action that lists its type. Each resource id is exact: the server does not trim it or change its case. An id with a control character or of more than 256 bytes is refused.
-- The text form of a grant writes each id with one canonical percent code. A `/` or a `:` in an id thus never divides a segment. The parser refuses another code for the same id.
+- The text form of a grant writes each id with one canonical percent code. So a `/` or a `:` in an id never divides a segment. The parser refuses another code for the same id.
 - In the mode `static`, the settings pages refuse a change of grants. In the mode `hybrid`, they cannot change a grant of the configuration.
 
 [Grants and the gate](grants-and-gate.md) describes the rules. The PDP has its own invariants in [Identity tokens and the PDP](identity-and-pdp.md).
@@ -151,15 +151,15 @@ The server configuration sets these limits (the defaults are in the [configurati
 
 The Hyper HTTP/1 parser receives the header limits and the timeouts. The application collects the body in parts and checks the size before each extension. A total read timeout wraps the collection. `POST /auth/login` is the only route that reads a body before it knows the client. The API of the Inbox checks the key of the sender before it reads the body. One connection can hold a slot for `header_read_timeout` plus `body_read_timeout`.
 
-The server therefore reads at most `server.max_login_body_reads` sign-in bodies at the same time. A sign-in keeps its place until it gets the Argon2 permit. It waits for this permit only until `body_read_timeout` ends. The server refuses the other sign-ins at once with `503` and `Retry-After: 1`. This value must be less than `server.max_connections`, so ForwardAuth always has connections left.
+So the server reads at most `server.max_login_body_reads` sign-in bodies at the same time. A sign-in keeps its place until it gets the Argon2 permit. It waits for this permit only until `body_read_timeout` ends. The server refuses the other sign-ins at once with `503` and `Retry-After: 1`. This value must be less than `server.max_connections`, so ForwardAuth always has connections left.
 
 The client address comes from `X-Forwarded-For` only when the TCP peer is in `server.trusted_proxies`. Keep the networks of this list small. In K3s, the NetworkPolicy `allow-portal-http` admits only the Traefik and Prometheus pods to the port 4181.
 
 ## Plain HTTP
 
-The portal knows nothing about TLS. Traefik terminates TLS, and the portal listeners speak plain HTTP. Traefik can also serve plain HTTP, for example on a LAN without certificates and in a test stack. The server reads the scheme of each request from the unique `X-Forwarded-Proto` value that Traefik sets (`trustForwardHeader: false`). Any value other than a single `https` counts as HTTP.
+The portal knows nothing about TLS. TLS stops at Traefik, and the portal listeners speak plain HTTP. Traefik can also serve plain HTTP, for example on a LAN without certificates and in a test stack. The server reads the scheme of each request from the unique `X-Forwarded-Proto` value that Traefik sets (`trustForwardHeader: false`). Any value other than a single `https` counts as HTTP.
 
-Browsers refuse `Secure` and `__Host-` cookies over HTTP. Therefore, over HTTP, the cookies have no prefix (`portal`, `lc`) and no `Secure` attribute. Over HTTP, an attacker on the network can read the password and the session cookie. The binding limits the value of a stolen cookie, and so does the idle timeout. Only HTTPS removes the exposure. Use HTTPS on every network that you do not trust.
+Browsers refuse `Secure` and `__Host-` cookies over HTTP. So, over HTTP, the cookies have no prefix (`portal`, `lc`) and no `Secure` attribute. Over HTTP, an attacker on the network can read the password and the session cookie. The binding limits the value of a stolen cookie, and so does the idle timeout. Only HTTPS removes the exposure. Use HTTPS on every network that you do not trust.
 
 ## Discovery and the launcher
 
@@ -200,9 +200,9 @@ HMAC-SHA-1 is safe for TOTP: the attacks on SHA-1 are collision attacks, and an 
 - **Proof in the token.** The token also holds a keyed digest of the credential that the password step checked and of the second factor at that time. The second step continues only while both are the same. The token is bound to the client binding and to the anti-CSRF token of the page, and it lives 5 minutes.
 - **Refusal of a token.** A changed token, an old token or a token from another client gives the page "The page was open too long". A person cannot tell these causes apart.
 - **Anti-enumeration.** The first step does not change. A wrong password gives the same answer for an unknown login, for an account with a second factor and for an account without. Only a person who knows the password reaches the second step. This person learns that the account has one. This is accepted.
-- **Brute force.** The counters of an account are in its database row: failures, start of the window and end of the lock. Each attempt counts in one write transaction before the comparison of the code. Attempts at the same time, on one or on several instances, therefore compare at most five codes before the lock. A good code clears the count.
+- **Brute force.** The counters of an account are in its database row: failures, start of the window and end of the lock. Each attempt counts in one write transaction before the comparison of the code. So attempts at the same time, on one or on several instances, compare at most five codes before the lock. A good code clears the count.
 
-Five failures in 10 minutes lock the second step for 5 minutes. A TOTP code has 10^6 values and three are valid at a time. The lock thus keeps the chance of a guess below 1 in 10^5 for each 5 minutes. An attacker who has the password can lock the second step for the person. An anonymous attacker cannot.
+Five failures in 10 minutes lock the second step for 5 minutes. A TOTP code has 10^6 values and three are valid at a time. So the lock keeps the chance of a guess below 1 in 10^5 for each 5 minutes. An attacker who has the password can lock the second step for the person. An anonymous attacker cannot.
 - **Replay.** The row keeps the last accepted time step. A statement accepts a step only if it is more than the stored step, so two instances never accept the same code. The code that confirms an enrolment is spent.
 - **Recovery codes.** Ten codes of 50 bits, shown one time and stored as keyed hashes. The delete of the hash is the use, and it succeeds for one caller only.
 - **Wrong key.** At start, the server compares a check value of the key with the value in the database. A key that does not match stops the server. A secret that a key does not open gives an error of the server, never a wrong code. The server never replaces a secret under another key.
@@ -210,7 +210,7 @@ Five failures in 10 minutes lock the second step for 5 minutes. A TOTP code has 
 
 ## Password controls
 
-Two limiters protect against password failures: a per-IP limiter and a separate global limiter. A successful sign-in does not reset the global limiter, on purpose. Both stores are local to the process. The global limiter has one budget for the superadmin login and one for all other logins. Anonymous failures thus cannot refuse the sign-in of the superadmin.
+Two limiters protect against password failures: a per-IP limiter and a separate global limiter. A successful sign-in does not reset the global limiter, on purpose. Both stores are local to the process. The global limiter has one budget for the superadmin login and one for all other logins. So anonymous failures cannot refuse the sign-in of the superadmin.
 
 This has a cost. While one budget is locked out, the answer tells whether a typed login is the superadmin login. The login is not a secret, because each identity token carries it in `sub`.
 
@@ -241,7 +241,7 @@ These limits come from the deployment, not from the code. The portal cannot remo
 
 ### The session cookie goes to every service on the same origin
 
-The session cookie has `Path=/`. The browser sends it with each request to the origin of the portal. In K3s, the services are routed by path on the same origin (`/grafana/`, `/dagu/` and others), and Traefik forwards the `Cookie` header to the service. A service, or a person who controls a service, therefore receives the session cookie, the client address and the User-Agent. With these three values, the service can act as the user, also as the superadmin.
+The session cookie has `Path=/`. The browser sends it with each request to the origin of the portal. In K3s, the services are routed by path on the same origin (`/grafana/`, `/dagu/` and others), and Traefik forwards the `Cookie` header to the service. So a service, or a person who controls a service, receives the session cookie, the client address and the User-Agent. With these three values, the service can act as the user, also as the superadmin.
 
 Measures:
 

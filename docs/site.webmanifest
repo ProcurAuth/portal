@@ -1,0 +1,14 @@
+{
+  "name": "portal",
+  "short_name": "portal",
+  "description": "The gate, the keys and the inbox of ProcurAuth: sign-in, access control, keys for agents and alerts to phones.",
+  "start_url": "index.html",
+  "scope": "./",
+  "display": "browser",
+  "background_color": "#fafafd",
+  "theme_color": "#4338ca",
+  "icons": [
+    { "src": "assets/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "assets/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

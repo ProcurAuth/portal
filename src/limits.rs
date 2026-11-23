@@ -20,10 +20,6 @@
 //! This module has no input or output. The checks and the arithmetic are here, so that tests can
 //! cover them all.
 
-// The grants, the document and the PDP use this module step by step. Until they all do, some
-// items have no caller outside the tests.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 use serde::Deserialize;

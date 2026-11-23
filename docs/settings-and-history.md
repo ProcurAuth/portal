@@ -182,7 +182,7 @@ The address of the page "New key" is `/auth/keys/new`.
 - A right on a service whose `access` switch is not ticked gives the page again with status 422. The page keeps the name and the grants, and the banner names the service.
 - An MCP key shows the editor of the services on the whole width.
 - An API key shows the Inbox matrix and the row **Direct alerts** on the left. The row **Direct alerts** shows only when the document of the portal has the action `alert.send_user`.
-- On the right, an aside lists the calls of the API that the ticked rights allow. The aside needs script.
+- On the right, an aside lists the calls of the API that a key with the ticked rights can make. The aside needs script.
 - **Create** shows the page "Key made" with the text of the key one time. The page has **Copy** and **Done**, and the answer has the header `Cache-Control: no-store`.
 
 The address of the page "Edit key" is `/auth/keys/edit?id=<id>`. The page is like "New key". The kind is a fact and does not change. A right that the owner lost shows the note "no effect: the owner does not hold it any more". A trash icon revokes the key, with a confirmation in place.
@@ -220,7 +220,7 @@ A service can have hundreds of actions and hundreds of resources. A box for each
 - At the left is the tree of the resources of a service, with a search field and the number of ticked grants of each node. A list of the services shows when the editor has more than one.
 - At the right are the actions of the chosen node, in groups by the first part of the name. Each action has one line.
 - A list of more than 60 actions starts with its groups closed, but a group that holds a ticked action stays open. A filter and the button **Ticked** narrow the list. The box of a group ticks the actions that the list shows.
-- An action that a grant above the node covers shows ticked, with the words "via the whole service" or "via" and the node.
+- An action that a grant above the node covers shows ticked, with the words `via the whole service`, or `via` and the node.
 - An action shows on the whole service only when its document lists the type `service`.
 - The tree answers to the keys Up, Down, Home, End, Left and Right.
 
@@ -272,7 +272,7 @@ The service lists its own resources. The editor shows the nodes of the member `r
 - The portal asks the service at `/.well-known/procurauth/resources` (protocol 5.6), with an identity token for the person who fills the form. The portal makes this token only when the person can open the service. The service lists only what this person can see.
 - The portal asks for 50 items at a time. It keeps each answer for 60 seconds, for at most 5,000 entries and 32 MiB.
 - The tree shows **Show more** under a page that has a next cursor. A search asks the service for the children of the chosen node.
-- A service that has no such route gives no option. The page of the superadmin and the page of a user who makes keys use the route. The CSP allows `connect-src 'self'` for it.
+- A service that has no such route gives no option. The page of the superadmin and the page of a user who makes keys use the route. The CSP has `connect-src 'self'` for it.
 - The portal accepts a document of 1,024 actions, 4,096 resources and 256 KiB by default. The keys `access.max_actions`, `access.max_resources` and `access.max_document_bytes` set these bounds. The minimum of each key is the number of protocol 5.3c.
 
 ### Server permissions
@@ -293,7 +293,7 @@ The pages share the look of the launcher. The panels are graphite, with a thin b
 
 - The theme selector is one icon button that shows the mode. Its list holds the two other modes (System, Dark, Light), and the browser remembers the choice.
 - The file `web/portal.css` holds the tokens, the header, the buttons, the launcher and the sign-in card. The file `web/settings.css` holds the rules that only the settings pages use.
-- The portal serves them at `/auth/style.css` and `/auth/settings.css`. The content security policy allows requests of the script from the same origin only.
+- The portal serves them at `/auth/style.css` and `/auth/settings.css`. The content security policy lets a page load styles and scripts from the same origin only. A script can send requests to the same origin only.
 - The pages use these component names: `zone` is a panel with a bounded list. `grid` is a table of one-line rows. `ib` is a flat icon button, `pop` is a popover and `ask` is a confirmation in place. The other names are `chip`, `uiField`, `uiInput`, `uiBanner` and `uiState`.
 - A time is a `<time class="when">` element. The server writes the time in UTC. The script `settings.js` shows the time of the browser instead and keeps the UTC text in the tooltip.
 - A state (key, session, sign-in) is one icon with a hidden word for a screen reader.
@@ -314,7 +314,7 @@ The stylesheet `web/portal.css` names the brand colours one time, in its first t
 
 - The tokens that a rule uses are `--accent-fill`, `--accent-fill-hover`, `--accent-tint`, `--accent-text`, `--accent-line` and `--focus-ring`.
 - `--accent-fill` is for a surface that holds white text. `--accent-text` is for text. `--accent-line` is for a mark of 2 pixels or more, such as the underline of a tab. `--focus-ring` is for the focus outline.
-- The dark and light values of each token pass these ratios: 4.5:1 for text, 3:1 for a focus ring and for the border of a field.
+- The dark and light values of each token pass these contrast ratios. Text needs 4.5:1. A focus ring and the border of a field need 3:1.
 - A rule never holds a colour literal. Only the token blocks hold literals.
 
 The logo and the icon of the tab follow these rules:

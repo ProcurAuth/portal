@@ -151,7 +151,7 @@ pub struct Key {
     pub kind: Kind,
     pub presence: Presence,
     pub when: When,
-    /// One or two sentences in ASD-STE100.
+    /// At most six sentences in ASD-STE100, each of 25 words at most.
     pub doc: &'static str,
 }
 
@@ -231,7 +231,7 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ),
     (
         "keys",
-        "This block is optional. If it is present, the server accepts keys: a user makes keys in the tab Access. A key has one kind: `mcp` for an agent, verified at the key edge and by the PDP, and `api` for a service, verified by the API of the inbox.\n\nThe keys `mcp` and `api` enable or disable each kind. The kind `mcp` needs the blocks `identity` and `pdp`. The kind `api` needs the block `inbox`. At least one kind must be on.",
+        "This block is optional. If it is present, the server accepts keys: a user makes keys in the tab Access. A key has one of two kinds. The kind `mcp` is for an agent: the key edge and the PDP verify it. The kind `api` is for a service: the API of the inbox verifies it.\n\nThe keys `mcp` and `api` enable or disable each kind. The kind `mcp` needs the blocks `identity` and `pdp`. The kind `api` needs the block `inbox`. At least one kind must be on.",
     ),
     ("storage", "The history, and the SQLite file."),
     (
@@ -294,7 +294,7 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ),
     (
         "inbox.agents",
-        "This block is optional and is inside the block `inbox`. Its presence starts the agents of a key: the portal gives each agent of one key a token, and it groups the items by agent. Without this block, each key is one agent. A new agent is allowed at once, and its owner gets a notice. The block needs the blocks `inbox.items` and `inbox.at_rest`. The mode of each key (`key`, `discover` or `enrolled`) is an attribute of the key, not of the file.",
+        "This block is optional and is inside the block `inbox`. Its presence starts the agents of a key: the portal gives each agent of one key a token, and it groups the items by agent. Without this block, each key is one agent. By default, the owner can accept the items of a new agent at once, and gets a notice. The block needs the blocks `inbox.items` and `inbox.at_rest`. The mode of each key (`key`, `discover` or `enrolled`) is an attribute of the key, not of the file.",
     ),
     (
         "inbox.questions",
@@ -377,7 +377,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Duration { min: secs(1), max: secs(MINUTE) },
         presence: Presence::Default("10s"),
         when: When::Always,
-        doc: "The time that a client has to send the request headers. On the PDP listener it is also the longest time that a connection stays open with no request: the metadata publishes it as `procurauth_idle_max_seconds`, and a service closes an idle connection before this time.",
+        doc: "The time that a client has to send the request headers. On the PDP listener, it is also the longest time that a connection stays open with no request. The metadata publishes it as `procurauth_idle_max_seconds`, and a service closes an idle connection before this time.",
     },
     Key {
         block: "server",
@@ -405,7 +405,7 @@ pub static KEYS: &[Key] = &[
         },
         presence: Presence::Required,
         when: When::Always,
-        doc: "The networks of the proxies (Traefik) that set `X-Forwarded-For`. The server reads this header only from a TCP peer in these networks. It then takes the first address from the right that is not in these networks. From any other peer, the client address is the address of the peer. `[]` trusts no proxy. The client address keys the session binding, the login limiter and, for the phones, the limiter of the enrollment attempts (the routes of the phones use this list too).",
+        doc: "The networks of the proxies (Traefik) that set `X-Forwarded-For`. The server reads this header only from a TCP peer in these networks. It then takes the first address from the right that is not in these networks. From any other peer, the client address is the address of the peer. `[]` trusts no proxy. The session binding, the login limiter and the limiter of the enrollment attempts of the phones use this client address.",
     },
     Key {
         block: "authentication",
@@ -429,7 +429,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Enum(&["off", "optional", "required"]),
         presence: Presence::Default("optional"),
         when: When::Always,
-        doc: "The second factor of the sign-in: a TOTP code from an authenticator app (RFC 6238). `off`: the portal never asks for a code. `optional`: each account chooses to enable it. `required`: each account, the superadmin included, must enrol after the password step. The superadmin has no separate switch. Under `optional`, the superadmin authenticates with the password only, so scripts that authenticate need no change. A value other than `off` needs `authentication.totp_key_env` or `authentication.totp_key_file`.",
+        doc: "The second factor of the sign-in: a TOTP code from an authenticator app (RFC 6238). `off`: the portal never asks for a code. `optional`: each account chooses to enable it, and an account without it authenticates with the password only, so scripts that authenticate need no change. `required`: each account must enrol after the password step. The superadmin has no separate switch: each value applies to it as to the other accounts. A value other than `off` needs `authentication.totp_key_env` or `authentication.totp_key_file`.",
     },
     Key {
         block: "authentication",
@@ -437,7 +437,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Secret { max_bytes: 128 },
         presence: Presence::Required,
         when: When::MfaOn,
-        doc: "The key that encrypts the TOTP secrets in the database (AES-256-GCM). It has 64 hexadecimal characters, which are 32 random bytes. Make it with `openssl rand -hex 32`. All instances use the same key. At start, the server compares the key with a check value in the database. A key that does not match stops the server, and no secret changes. The server never replaces a secret under another key. To use a new key, run `portal reset-two-factor --all` first.",
+        doc: "The key that encrypts the TOTP secrets in the database (AES-256-GCM). All instances use the same key of 64 hexadecimal characters (32 random bytes), made with `openssl rand -hex 32`. At start, a key that does not match the check value in the database stops the server, and no secret changes. The server never replaces a secret under another key. To use a new key, run `portal reset-two-factor --all` first.",
     },
     Key {
         block: "users",
@@ -461,7 +461,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Int { min: 1, max: 30_000 },
         presence: Presence::Default("512"),
         when: When::Always,
-        doc: "The largest number of grants of one user. A key holds at most 512 grants, at any value of this key. A user with 3 grants for each service and the 8 actions of the service `portal` needs 3 x the number of services + 8 grants.",
+        doc: "The largest number of grants of one user. A key holds at most 512 grants, at any value of this key. For example, a user has 3 grants for each service and the 8 actions of the service `portal`. This user needs 3 x the number of services + 8 grants.",
     },
     Key {
         block: "access",
@@ -493,7 +493,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Duration { min: secs(MINUTE), max: secs(7 * DAY) },
         presence: Presence::Default("1h"),
         when: When::Always,
-        doc: "The longest time that the server keeps the last good document of a service after its last good read. After this time, the server acts as if the service had no good document (protocol 5.3a, 11.1): the PDP answers `false` with no reason for each question of the service, except `access` on the whole service. The edge never refuses a person or a key because of the age of the document: `access` stays `true` (protocol 8.3), and the service then gets `false` for each other question. The value must be more than `access.actions_refresh`.",
+        doc: "The longest time that the server keeps the last good document of a service after its last good read. After this time, the server acts as if the service had no good document (protocol 5.3a, 11.1). The PDP then answers `false` with no reason for each question of the service, except `access` on the whole service. The edge never refuses a person or a key because of the age of the document (protocol 8.3). `access` stays `true`, and the service then gets `false` for each other question. The value must be more than `access.actions_refresh`.",
     },
     Key {
         block: "access",
@@ -563,7 +563,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Secret { max_bytes: 4096 },
         presence: Presence::Required,
         when: When::IdentityBlock,
-        doc: "The Ed25519 private key that signs the identity tokens (algorithm `Ed25519`): a PKCS#8 key in PEM, or the base64 text of the PEM on one line. `portal identity-public-key` prints the public key for the services, as a JWK Set.",
+        doc: "The Ed25519 private key that signs the identity tokens (algorithm `Ed25519`). The value is a PKCS#8 key in PEM, or the base64 text of the PEM on one line. `portal identity-public-key` prints the public key for the services, as a JWK Set.",
     },
     Key {
         block: "pdp",
@@ -593,7 +593,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Size { min: 1024, max: 1024 * 1024 },
         presence: Presence::Default("64KiB"),
         when: When::PdpBlock,
-        doc: "The largest request body that the PDP reads. The metadata publishes it as `procurauth_evaluations_max_bytes`. With the approval API, the body of a submission holds the command and some more members, so this value is at least `inbox.approvals.max_command_bytes` and 2 KiB more.",
+        doc: "The largest request body that the PDP reads. The metadata publishes it as `procurauth_evaluations_max_bytes`. With the approval API, the body of a submission holds the command and some more members. This value is then at least `inbox.approvals.max_command_bytes` and 2 KiB more.",
     },
     Key {
         block: "pdp",
@@ -1098,7 +1098,7 @@ pub static KEYS: &[Key] = &[
         },
         presence: Presence::Required,
         when: When::Always,
-        doc: "The public base URL of the portal, as the phones reach it from outside: `host:port`, a domain, or an http(s) URL `http(s)://host[:port][/prefix]`, for example `http://172.17.0.1:8088`. The phones add `/v1/enroll` and `/v1/session` to it. The portal serves these routes on `server.listen_address`, with the pages. A proxy that publishes the portal under a prefix must remove the prefix before it sends the request: the portal has no base path. It is the `s` of the enrollment code. The inbox does not open a connection to it.",
+        doc: "The public base URL of the portal, as the phones reach it from outside. The value is `host:port`, a domain, or an http(s) URL `http(s)://host[:port][/prefix]`, for example `http://203.0.113.10:8088`. It is the `s` of the enrollment code, and the phones add `/v1/enroll` and `/v1/session` to it. The portal serves these routes on `server.listen_address`, with the pages. The portal has no base path, so a proxy that publishes it under a prefix must remove the prefix before it sends the request. The inbox does not open a connection to it.",
     },
     Key {
         block: "inbox.devices",
@@ -1600,7 +1600,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Size { min: 1024, max: 32 * 1024 },
         presence: Presence::Default("16KiB"),
         when: When::Always,
-        doc: "The largest command (`op` and `view`, as compact JSON) that the approval API accepts. A larger command gets `413 command_too_large`, and the service refuses the action. The PDP publishes the value as `procurauth_approval_max_command_bytes`. The body of a submission holds the command and some more members (`evaluation_id`, `effect`, the wait), so this value plus 2048 bytes must not be above `pdp.max_body_bytes`.",
+        doc: "The largest command (`op` and `view`, as compact JSON) that the approval API accepts. A larger command gets `413 command_too_large`, and the service refuses the action. The PDP publishes the value as `procurauth_approval_max_command_bytes`. The body of a submission also holds other members (`evaluation_id`, `effect`, the wait). This value plus 2048 bytes must not be above `pdp.max_body_bytes`.",
     },
     Key {
         block: "inbox.approvals",
@@ -1688,7 +1688,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Bool,
         presence: Presence::Default("false"),
         when: When::Always,
-        doc: "`true`: a `new` agent cannot get an approval or an answer accepted until its owner allows it. A refusal and a talk stay open. `false`: a new agent is allowed at once, and its owner still gets a notice.",
+        doc: "`true`: the owner cannot accept an approval or an answer of a `new` agent before the action `allow` on the agent. A refusal and a talk stay open. `false`: the owner can accept the items of a new agent at once, and still gets a notice.",
     },
     Key {
         block: "inbox.agents",
@@ -1712,7 +1712,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Int { min: 2, max: 8 },
         presence: Presence::Default("8"),
         when: When::Always,
-        doc: "The most options of a question with an input of the type `choice`, and of each choice question of a form. The protocol of the phones allows 8 at most. A question with more options gets `422 invalid_argument`: the portal never cuts the list.",
+        doc: "The most options of a question with an input of the type `choice`, and of each choice question of a form. The protocol of the phones accepts 8 at most. A question with more options gets `422 invalid_argument`: the portal never cuts the list.",
     },
     Key {
         block: "inbox.mcp",
@@ -1877,7 +1877,7 @@ pub static LABELED_KEYS: &[Key] = &[
         kind: Kind::Secret { max_bytes: 128 },
         presence: Presence::Optional,
         when: When::LabeledBlock,
-        doc: "The SHA-256 digest of the text of the key: 64 hexadecimal characters, in upper or lower case. A digest that the database or another block also holds stops the server. The digest must be the digest of a text of the form `mcp_`, 43 characters and 6 characters of checksum: the server cannot check this at start.",
+        doc: "The SHA-256 digest of the text of the key: 64 hexadecimal characters, in upper or lower case. A digest that the database or another block also holds stops the server. It must be the digest of a text of the form `mcp_`, 43 characters and 6 characters of checksum. The server cannot check this at start.",
     },
     Key {
         block: "group",
@@ -2014,7 +2014,7 @@ pub static LABELED_KEYS: &[Key] = &[
         },
         presence: Presence::Optional,
         when: When::LabeledBlock,
-        doc: "The path of an image file that the server reads at start. The rules of `icon` apply to the bytes. This key is not the `_file` form of `icon`, on purpose: the `_file` form removes the last line end of a text, and the bytes of an image stay exact. A file that cannot be read, or that is empty or too large, stops the start. Give at most one of `icon` and `icon_path`.",
+        doc: "The path of an image file that the server reads at start. The rules of `icon` apply to the bytes. This key is not the `_file` form of `icon`, on purpose. The `_file` form removes the last line end of a text, but the bytes of an image stay exact. A file that the server cannot read, or that is empty or too large, stops the start. Give at most one of `icon` and `icon_path`.",
     },
     Key {
         block: "inbox.at_rest.key",
@@ -2629,12 +2629,26 @@ fn type_cell(key: &Key) -> String {
         } => format!(
             "list of at most {max_items} grants, each a quoted text or an object with `grant`, `limits` and `confirm`: {expected}"
         ),
-        Kind::Secret { .. } => format!(
-            "secret: give `{0}_env` (a variable name) or `{0}_file` (an absolute path), not both",
-            key.name
-        ),
+        Kind::Secret { max_bytes } => format!("secret, at most {max_bytes} bytes"),
     }
 }
+
+/// The forms that the file can give for a key, as the resolver accepts them: `V` is `<name> = value`,
+/// `E` is `<name>_env` and `F` is `<name>_file`. A secret accepts only `E` and `F`; any other key accepts only `V`.
+fn forms_cell(key: &Key) -> &'static str {
+    if key.is_secret() {
+        "E, F"
+    } else {
+        "V"
+    }
+}
+
+/// The text before the first block of the reference: the legend of the column Forms.
+const REFERENCE_LEGEND: &str = "The column Forms gives the forms that a key accepts. `V`: the file gives the value, as `<name> = value`. `E`: the file gives `<name>_env`, the name of an environment variable. `F`: the file gives `<name>_file`, the absolute path of a file. A secret accepts only `E` and `F`, and never the two forms for one key. A required secret needs one of the two forms.\n\n";
+
+/// The header of a table of keys.
+const TABLE_HEADER: &str =
+    "| Key | Type | Default | Forms | Description |\n|---|---|---|---|---|\n";
 
 fn default_cell(key: &Key) -> String {
     match key.presence {
@@ -2654,10 +2668,10 @@ fn escape_cell(text: &str) -> String {
 /// The configuration reference in Markdown, generated from the table. The page docs/configuration.md holds a copy
 /// that a test compares with this text.
 pub fn reference() -> String {
-    let mut out = String::new();
+    let mut out = String::from(REFERENCE_LEGEND);
     for (block, note) in BLOCKS {
         out.push_str(&format!("### Block `{block}`\n\n{note}\n\n"));
-        out.push_str("| Key | Type | Default | Description |\n|---|---|---|---|\n");
+        out.push_str(TABLE_HEADER);
         for key in KEYS.iter().filter(|k| k.block == *block) {
             let mut description = key.doc.to_string();
             let sentence = key.when.sentence();
@@ -2666,10 +2680,11 @@ pub fn reference() -> String {
                 description.push_str(sentence);
             }
             out.push_str(&format!(
-                "| `{}` | {} | {} | {} |\n",
+                "| `{}` | {} | {} | {} | {} |\n",
                 key.name,
                 escape_cell(&type_cell(key)),
                 default_cell(key),
+                forms_cell(key),
                 escape_cell(&description)
             ));
         }
@@ -2679,13 +2694,14 @@ pub fn reference() -> String {
         out.push_str(&format!(
             "### Block `{block} \"{label}\"`\n\nThis block has a label and can occur more than one time. {note}\n\n"
         ));
-        out.push_str("| Key | Type | Default | Description |\n|---|---|---|---|\n");
+        out.push_str(TABLE_HEADER);
         for key in LABELED_KEYS.iter().filter(|k| k.block == *block) {
             out.push_str(&format!(
-                "| `{}` | {} | {} | {} |\n",
+                "| `{}` | {} | {} | {} | {} |\n",
                 key.name,
                 escape_cell(&type_cell(key)),
                 default_cell(key),
+                forms_cell(key),
                 escape_cell(key.doc)
             ));
         }
@@ -2762,6 +2778,24 @@ mod tests {
                 "{}",
                 key.path()
             );
+        }
+    }
+
+    /// The test `the_resolver_refuses_the_forms_that_the_reference_does_not_give` of
+    /// src/config/tests.rs checks these forms against the resolver.
+    #[test]
+    fn the_reference_gives_the_forms_of_each_key() {
+        let reference = reference();
+        assert!(reference.starts_with(REFERENCE_LEGEND));
+        for key in KEYS.iter().chain(LABELED_KEYS) {
+            let forms = if key.is_secret() { "E, F" } else { "V" };
+            let row = format!(
+                "| `{}` | {} | {} | {forms} |",
+                key.name,
+                escape_cell(&type_cell(key)),
+                default_cell(key)
+            );
+            assert!(reference.contains(&row), "{}: {row}", key.path());
         }
     }
 }

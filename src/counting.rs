@@ -9,8 +9,6 @@
 //! A failed read or write of a counter fails only the use that needs it: the PDP answers HTTP 503
 //! and never a decision (protocol 6.9).
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -105,6 +103,7 @@ impl Counting {
         }
     }
 
+    #[cfg(test)]
     pub fn memo_entries(&self) -> usize {
         self.memo.lock().unwrap_or_else(|p| p.into_inner()).len()
     }

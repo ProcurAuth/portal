@@ -91,8 +91,10 @@ impl PeerAuth {
     }
 }
 
+/// Decodes a hex text into bytes. A text with an odd length or with a character that is not a hex
+/// digit gives `None`. `u8::from_str_radix` alone accepts a `+` sign, so this check comes first.
 fn unhex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) || !text.is_ascii() {
+    if !text.len().is_multiple_of(2) || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     (0..text.len())
@@ -445,6 +447,30 @@ mod tests {
         assert!(!a.verify(1_000, PATH_SPOOL, b"", "zz", 1_000));
         assert!(!a.verify(1_000, PATH_SPOOL, b"", "", 1_000));
         assert!(!a.verify(1_000, PATH_SPOOL, b"", "é", 1_000));
+    }
+
+    #[test]
+    fn a_sign_in_the_hex_text_is_refused() {
+        // `u8::from_str_radix("+f", 16)` is 15: the check must refuse the sign first.
+        assert_eq!(unhex("0f"), Some(vec![0x0f]));
+        assert_eq!(unhex("+f"), None);
+        assert_eq!(unhex("ab+f"), None);
+        assert_eq!(unhex("-f"), None);
+        assert_eq!(unhex(" f"), None);
+        // A valid signature with a byte below 0x10: its pair "0x" and the pair "+x" give the same
+        // byte, so the text with the sign is a second spelling of a valid signature.
+        let a = auth();
+        let (ts, sig, at) = (1_000..)
+            .find_map(|ts| {
+                let sig = a.sign(ts, PATH_SPOOL, b"");
+                let at = unhex(&sig).unwrap().iter().position(|&b| b < 0x10)?;
+                Some((ts, sig, at))
+            })
+            .unwrap();
+        assert!(a.verify(ts, PATH_SPOOL, b"", &sig, ts));
+        let mut forged = sig;
+        forged.replace_range(at * 2..at * 2 + 1, "+");
+        assert!(!a.verify(ts, PATH_SPOOL, b"", &forged, ts));
     }
 
     #[test]

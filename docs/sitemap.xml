@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://procurauth.github.io/portal/</loc></url>
+  <url><loc>https://procurauth.github.io/portal/overview.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/getting-started.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/architecture.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/authentication.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/grants-and-gate.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/identity-and-pdp.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/keys-and-limits.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/launcher.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/settings-and-history.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/several-instances.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/traefik.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/inbox.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/inbox-agents.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/inbox-android.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/inbox-protocol.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/inbox-configuration.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/inbox-security.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/inbox-requirements.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/configuration.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/security.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/operations.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/build-and-release.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/development.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/reference.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/conformance.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/limitations.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/design-inbox.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/design-login-hardening.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/changelog.html</loc></url>
+  <url><loc>https://procurauth.github.io/portal/documentation.html</loc></url>
+</urlset>

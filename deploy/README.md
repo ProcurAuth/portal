@@ -47,7 +47,9 @@ docker compose -f docker-compose.yml -f deploy/compose/docker-compose.ha.yml up 
 
 The file adds a second instance and a Traefik proxy. Both instances share the database and the secrets.
 
-Traefik is the only service that publishes a port. It has the middleware `inbox-retry` on `/v1/`, `/api/v1/`, `/mcp` and `/api/version`. The portal sees the address of the proxy as the client address. Use this variant to test two instances. It is not a model for production.
+Traefik is the only service that publishes a port. It has the middleware `inbox-retry` on `/v1/`, `/api/v1/`, `/mcp` and `/api/version`. Traefik does not route `/metrics`. To read the metrics, connect Prometheus to the Compose network and read each instance on port 4181.
+
+The portal sees the address of the proxy as the client address. Use this variant to test two instances. It is not a model for production.
 
 ## K3s
 
@@ -65,7 +67,8 @@ The manifests in `k3s/` describe the target. This repository does not apply them
 - The namespace `edge` exists. The namespace `data` has a CloudNativePG cluster with the Service `postgresql-rw`.
 - A database `portal` and a role `portal` exist on that cluster. The role has a password.
 - The Traefik of the cluster has the middlewares `forward-auth` and `secure-headers` in the namespace `edge`.
-- Nodes that run the portal have the label `home.server=true`. Change `nodeSelector` and `tolerations` for other nodes.
+- At least three nodes accept the portal. The anti-affinity puts each instance on a different node. An update starts the new pod before it stops an old one.
+- The Deployment has no `nodeSelector`. To keep the portal on some nodes only, add a `nodeSelector` with a label of these nodes. The comment in `portal.yaml` shows an example. Add a toleration when these nodes have a taint.
 - The pod network is `10.42.0.0/16`. Change `trusted_proxies` in `config.hcl` for another network.
 - The image `portal:5.0.5` is in the registry of the cluster. Change `images` in `kustomization.yaml` to the name that your registry uses.
 

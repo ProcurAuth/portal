@@ -12,6 +12,8 @@
 //! - Every later session is a Noise IK handshake between the device key and the
 //!   pinned server key. The server can revoke each device alone.
 
+#![forbid(unsafe_code)]
+
 pub mod b64;
 pub mod effect;
 pub mod enroll;

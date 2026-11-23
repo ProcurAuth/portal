@@ -1,9 +1,6 @@
 //! What the two databases share for the agents: the columns of `agents`, the values of a row, the reading of a row
 //! and the text of the statements. The two drivers differ only in the form of a parameter (`?1` or `$1`).
 
-// The steps of the agents call this module from the two drivers.
-#![allow(dead_code)]
-
 use super::agents::{AgentEventRow, AgentKind, AgentOrigin, AgentRow, AgentState};
 use super::db::DbError;
 use super::items_ops::Sealed;

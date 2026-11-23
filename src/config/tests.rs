@@ -5139,3 +5139,48 @@ fn the_grants_on_an_external_service_of_the_file_follow_the_rules_of_a_link() {
         "{message}"
     );
 }
+
+/// The text of one entry inside its block. A block `a.b` is the block `b` inside the block `a`.
+fn in_block(block: &str, entry: &str) -> String {
+    block.rsplit('.').fold(entry.to_string(), |inner, name| {
+        format!("{name} {{ {inner} }}")
+    })
+}
+
+/// The column Forms of the reference gives `V` for a plain key and `E, F` for a secret. The
+/// resolver must refuse the other forms: `<name>_env` and `<name>_file` of a plain key, and the
+/// value of a secret in clear text.
+#[test]
+fn the_resolver_refuses_the_forms_that_the_reference_does_not_give() {
+    for key in keys::KEYS {
+        let config = |entry: &str| match key.block {
+            "server" => with_server(entry, ""),
+            "authentication" => MINIMAL.replace(
+                r#"totp_key_env            = "PORTAL_TOTP_KEY""#,
+                &format!(r#"totp_key_env = "PORTAL_TOTP_KEY" {entry}"#),
+            ),
+            block => with(&in_block(block, entry)),
+        };
+        if key.is_secret() {
+            let message = err(&config(&format!(r#"{} = "clear""#, key.name)));
+            assert!(
+                message.contains("must not be written in the file"),
+                "{}: {message}",
+                key.path()
+            );
+            assert!(!message.contains("clear\""), "{}: {message}", key.path());
+        } else {
+            for suffix in ["_env", "_file"] {
+                let message = err(&config(&format!(
+                    r#"{}{suffix} = "PORTAL_LOGIN""#,
+                    key.name
+                )));
+                assert!(
+                    message.contains(&format!("{} does not accept the form {suffix}", key.path())),
+                    "{}{suffix}: {message}",
+                    key.path()
+                );
+            }
+        }
+    }
+}

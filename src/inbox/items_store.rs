@@ -6,10 +6,6 @@
 //! seal. The clock, the box and the limits come from the caller, so a test builds the engine without a server.
 //! An item never uses the spool: when PostgreSQL has no primary, a write gets [`ItemError::Degraded`].
 
-// The PDP calls `consume` and `status_for_pdp`. The approval API, the agent channel, the phones and the web
-// call the rest of this API in the next lots.
-#![allow(dead_code)]
-
 use inbox_core::proto::{Action, AnswerStatus, Kind, Prefs};
 use zeroize::Zeroizing;
 
@@ -170,6 +166,7 @@ pub enum Answered {
     Invalid(&'static str),
     Accepted {
         loaded: Box<Loaded>,
+        #[allow(dead_code)] // no caller reads the sequence of the answer
         seq: u64,
     },
 }
@@ -234,6 +231,7 @@ pub struct Items<'a> {
     pub metrics: Option<&'a InboxMetrics>,
     /// The agents that wait for an item wake up when it changes.
     pub changed: Option<&'a tokio::sync::Notify>,
+    #[allow(dead_code)] // the pages read the same flag from the configuration
     pub admin_body_read: bool,
 }
 

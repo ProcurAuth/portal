@@ -15,8 +15,6 @@
 //!
 //! This module has no input or output, except the read of the random generator of the system.
 
-#![allow(dead_code)]
-
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 

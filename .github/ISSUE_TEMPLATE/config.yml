@@ -2,7 +2,7 @@ blank_issues_enabled: false
 contact_links:
   - name: Report a vulnerability
     url: https://github.com/ProcurAuth/portal/security/advisories/new
-    about: Report a security problem in private. Do not open a public issue.
+    about: Do not open a public issue for a vulnerability. Use the private report.
   - name: Read the documentation
     url: https://procurauth.github.io/portal/
     about: The guides, the configuration reference and the operations manual.

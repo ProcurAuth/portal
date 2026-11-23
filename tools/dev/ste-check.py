@@ -18,6 +18,14 @@ prefixes (for example "3.7.2") are not sentences. A table cell gets the check
 of the -ing forms and the phrasal verbs only. A part of a file can be checked
 with FILE:START-END (line numbers). The exit code is 1 when the script finds
 a problem, and 0 otherwise.
+
+In a Markdown file, the script skips the HTML blocks and the HTML comments. An
+HTML block starts at a line that opens a block tag (for example <p align> or
+<div>), or at a line that has only tags. It stops at the next blank line. The
+text of a link and a bold UI label (for example **Log in as**) count as one
+word: they are names. A bold label has a capital first letter, 6 words or less
+and no end mark. The script does not check the -ing forms and the phrasal
+verbs in these names.
 """
 import re
 import sys
@@ -123,16 +131,41 @@ SPLIT = re.compile(r"(?<=[.!?:;])\s+(?=[A-Z0-9(])")
 TABLE_ROW = re.compile(r"^\s*\|")
 LINK_DEFINITION = re.compile(r"^\[[^\]]+\]:\s+\S+$")
 TABLE_RULE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
+# The tag names that start an HTML block of CommonMark (type 6). A line of only tags (a badge or an image) is type 7.
+HTML_BLOCK_TAG = re.compile(
+    r"^</?(?:address|article|aside|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt"
+    r"|fieldset|figcaption|figure|footer|form|h[1-6]|header|hr|html|iframe|legend|li|main|menu|nav|ol|p"
+    r"|picture|section|source|summary|table|tbody|td|tfoot|th|thead|tr|ul)(?=[\s/>]|$)", re.I)
+TAG = re.compile(r"</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>")
+BOLD_LABEL = re.compile(r"\*\*([A-Z][^*]*?)\*\*")
+LABEL_WORDS = 6
+
+
+def mask_label(match):
+    """Replace a bold UI label by one neutral word. Keep the other bold text."""
+    label = match.group(1)
+    if label.rstrip()[-1:] in ".!?:;" or len(WORD.findall(label)) > LABEL_WORDS:
+        return label
+    return "NAME"
 
 
 def clean(text):
-    """Remove Markdown marks and replace inline code by one neutral word."""
+    """Remove Markdown marks. Replace inline code, link texts and bold UI labels by one neutral word."""
     text = re.sub(r"`[^`]*`", "CODE", text)
-    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
-    text = re.sub(r"https?://\S+", "URL", text)
+    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"\[[^\]]*\](?:\([^)]*\)|\[[^\]]*\])", "NAME", text)
+    text = re.sub(r"https?://[^\s<>]*[^\s<>.,;:!?)]", "URL", text)
     text = re.sub(r"<[^>]*>", "TAG", text)
+    text = BOLD_LABEL.sub(mask_label, text)
     text = text.replace("**", "").replace("__", "")
     return text.strip()
+
+
+def opens_html_block(line):
+    """Tell if a line at the start of a block opens an HTML block of Markdown."""
+    if HTML_BLOCK_TAG.match(line):
+        return True
+    return line.startswith("<") and bool(TAG.match(line)) and not TAG.sub("", line).strip()
 
 
 def words_of(sentence):
@@ -186,11 +219,14 @@ def check_file(spec, check_tables):
         first, last = int(a), int(b)
     with open(path, encoding="utf-8") as handle:
         raw = handle.read()
-    if path.endswith(".html"):
+    markdown = not path.endswith(".html")
+    if not markdown:
         raw = html_to_text(raw)
     lines = raw.split("\n")
     problems = []
     in_code = False
+    in_html = False      # inside an HTML block, until the next blank line
+    in_comment = False   # inside an HTML comment, until the line with "-->"
     paragraph = []  # list of (line number, text)
 
     def flush():
@@ -223,8 +259,21 @@ def check_file(spec, check_tables):
         if in_code:
             continue
         stripped = line.strip()
+        if in_comment:
+            in_comment = "-->" not in stripped
+            continue
+        if in_html:
+            in_html = bool(stripped)
+            continue
         if not stripped:
             flush()
+            continue
+        if markdown and stripped.startswith("<!--"):
+            flush()
+            in_comment = "-->" not in stripped[4:]
+            continue
+        if markdown and not paragraph and opens_html_block(stripped):
+            in_html = True
             continue
         if stripped.startswith("#"):
             flush()

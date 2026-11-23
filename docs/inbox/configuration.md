@@ -167,7 +167,7 @@ Several programs, or several conversations of one model, can share one key. The 
 
 - `max_per_key` is the most agents of one key that are `new`, `known` or `blocked`. The range is `1` to `1000`. The default is `16`.
 - `new_per_hour` is the most agents that the calls of one key can make in one hour. The range is `1` to `1000`. The default is `6`.
-- `lock_new` is `false` by default. With `false`, a new agent is allowed at once, and its owner gets a notice. With `true`, the owner cannot accept an item of a new agent until the owner allows the agent. A refusal and a talk stay open, and the server decides this, not the screen.
+- `lock_new` is `false` by default. With `false`, the owner can accept the items of a new agent at once, and gets a notice. With `true`, the owner cannot accept an item of a new agent until the agent has the state `known`. A refusal and a talk stay open, and the server decides this, not the screen.
 - `idle_after` is the time after which an agent with no open item and no call leaves the active views. The range is `1h` to `365d`. The default is `14d`. The agent still works, and a call makes it active again.
 - `purge_after` is the time after which the sweeper erases an agent that has no item, no live intent and no call. The range is `7d` to `3650d`. The default is `365d`. The token of an erased agent is unknown.
 
@@ -181,7 +181,7 @@ The portal seals the hints of an agent (what it says about itself, its client an
 
 The block `inbox.questions` lets an agent ask a question to the owner of its key. The block can be empty. Without the block, the tool `ask` and the route `POST /api/v1/questions` do not exist. The owner is the only recipient. The portal seals each question at rest, and a service never sees it.
 
-- `max_options` is the most options of a `choice` question, and of each choice question of a form. The range is `2` to `8`. The default is `8`. The protocol of the phones allows 8 at most. A question with more options gets `422 invalid_argument`. The portal never cuts a list.
+- `max_options` is the most options of a `choice` question, and of each choice question of a form. The range is `2` to `8`. The default is `8`. The protocol of the phones accepts 8 at most. A question with more options gets `422 invalid_argument`. The portal never cuts a list.
 
 A key asks only when it holds the permission `question.ask` on the service `portal`. The permission has the budget `questions`. A question, a message of the agent in its thread (`say`) and a replacement (`supersede`) count one unit each. A repeat of a call with the same `idempotency_key`, a renewal of a lease and a read count nothing. The permission `question.cancel` lets a key withdraw its own question. The permission `question.read` is for an account: it shows the metadata of the questions of all the accounts, and never a content.
 

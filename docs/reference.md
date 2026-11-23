@@ -1,8 +1,8 @@
 # Reference
 
-This page lists the HTTP endpoints of the three listeners of portal. It lists the error codes, the cookies, the headers and the exit codes.
+This page lists the HTTP endpoints of the three listeners of portal. It lists the error codes, the cookies and the headers. It also gives the rules of the command line and the exit codes.
 
-The tables come from the code of version 5.6.0: the route tables in `src/http.rs`, `src/http/pdp.rs`, `src/http/approval_api.rs`, `src/inbox/http.rs` and `src/inbox/peer.rs`. A path that this page does not list is an unknown path.
+The tables come from the code of version 5.6.0: the route tables in `src/http.rs`, `src/http/pdp.rs`, `src/http/approval_api.rs`, `src/inbox/http.rs` and `src/inbox/peer.rs`. A path that this page does not list is an unknown path. The section [Command line](#command-line) also gives changes after version 5.6.0: see the section `[Unreleased]` of [CHANGELOG.md](../CHANGELOG.md).
 
 ## How to read this page
 
@@ -457,6 +457,51 @@ The pages, the redirects and the JSON of the portal listener have these headers.
 
 An icon (`/auth/icons/`, `/auth/ext-icon/`) has the policy `default-src 'none'; style-src 'unsafe-inline'; sandbox`. The metrics answer has `Cache-Control: no-store, max-age=0` and `X-Content-Type-Options: nosniff`.
 
+## Command line
+
+The list of the commands and their use is in [Operations](operations.md#native-commands). This section gives the rules of the options and of the output. The source is `src/main.rs`.
+
+The command `print-config`, the short option `-c` and the form `--NAME=VALUE` come after version 5.6.0. Version 5.6.0 accepts only `--NAME VALUE`, in the order of the usage.
+
+### Options
+
+The commands that take `--config`, outside `portal inbox`, read their options with one parser. These commands are `run`, `check-config`, `print-config`, `identity-public-key`, `healthcheck`, `end-sessions`, `revoke-keys`, `reset-two-factor` and `import-sqlite`. These rules apply:
+
+- The order of the options is free.
+- An option comes one time at most. A repeated option is an error.
+- `-c FILE` is the short form of `--config FILE`.
+- An option with a value also accepts the form `--NAME=VALUE`, for example `--config=FILE`.
+- In the form `--NAME VALUE`, the value is the next argument as it is, also when it starts with `-`.
+- These are errors: an unknown option, an option without its value, an empty value of `--config`, and a free argument.
+
+The other commands outside `portal inbox` do not use this parser. `hash-password`, `version` and `help` do not read the arguments that follow the command. `render-demo` takes free arguments. `config-reference` refuses each argument.
+
+These four lines are equal:
+
+```sh
+portal revoke-keys --config /etc/portal/config.hcl --user alice
+portal revoke-keys --config=/etc/portal/config.hcl --user=alice
+portal revoke-keys --user alice -c /etc/portal/config.hcl
+portal revoke-keys -c /etc/portal/config.hcl --user alice
+```
+
+The commands under `portal inbox` accept only the form `--NAME VALUE`. The order of their options is also free, and each option comes one time at most.
+
+### Effective configuration
+
+The commands `check-config` and `print-config` make the same checks. They read the file, the variables and the files that it names. They check these secrets: the session secret, the login and the password of the superadmin, the identity key and the secrets of the inbox. They do not start the server.
+
+The two commands print one line for each key that applies, in the form `key = value  # source`. A secret shows `<hidden>`. See [Configuration](configuration.md#effective-configuration).
+
+| Command | Lines after the lines of the keys |
+|---|---|
+| `portal check-config --config FILE` | The line `identity.key_id` when the file has the block `identity`. Then the line `configuration ok`. |
+| `portal print-config --config FILE` | No line. Use this command in a script that reads the values. |
+
+### Help
+
+The commands `portal help`, `portal --help` and `portal -h` print the usage. The program without a command also prints the usage. The text ends with the exit status.
+
 ## Exit codes
 
-The program exits with `0` when the command succeeds. It exits with `1` for any error and writes `portal: <message>` to the standard error. A configuration error stops the program before it serves. The list of the commands is in [Operations](operations.md).
+The program exits with `0` when the command succeeds. It exits with `1` for any error and writes `portal: <message>` to the standard error. An error of the command line also gives `1`. A configuration error stops the program before it serves. `portal healthcheck` exits with `0` only when each answer has the status `200`. It asks `/healthz`, and also `/readyz` when the file has the block `inbox`.
