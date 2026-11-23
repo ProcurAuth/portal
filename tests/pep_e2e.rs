@@ -499,6 +499,42 @@ fn check_decision(decision: &Value, line: &Value) {
     }
 }
 
+/// The questions in these lines of the tap, with their answers: one for a request to `/access/v1/evaluation`, and one
+/// for each item of a request to `/access/v1/evaluations`. An item takes the subject, the action, the resource and the
+/// context of the request when it has none of its own (AuthZEN 1.0).
+fn route_questions(lines: &[Value]) -> Vec<(Value, Value)> {
+    let mut out = Vec::new();
+    for line in lines {
+        match line["path"].as_str().unwrap_or("") {
+            "/access/v1/evaluation" => {
+                out.push((line["request"].clone(), line["response"].clone()))
+            }
+            "/access/v1/evaluations" => {
+                let request = &line["request"];
+                let items = request["evaluations"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                let answers = line["response"]["evaluations"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                for (item, answer) in items.iter().zip(answers) {
+                    let mut question = item.clone();
+                    for member in ["subject", "action", "resource", "context"] {
+                        if question.get(member).is_none() {
+                            question[member] = request[member].clone();
+                        }
+                    }
+                    out.push((question, answer));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 // ------------------------------------------------------------------------------------------------ the scenarios
 
 /// The scenarios run in one test: they share the owner, the key and the phone, and a key has a rate cap.
@@ -556,6 +592,49 @@ async fn pep_end_to_end() {
         "{names:?}"
     );
     pass("setup");
+
+    // ---------------------------------------------------------------------------------------- S0
+    step("S0 (protocol 10.1c): a route that runs no action asks `access` on the service, a health probe asks nothing");
+    let host = format!("127.0.0.1:{}", stack.service);
+    let before = stack.tap().len();
+    let (st, _, text) = http_full(stack.service, &host, "GET", "/health", &[], "");
+    assert_eq!(st, 200, "the health probe needs no token: {text}");
+    let (st, _, text) = http_full(
+        stack.service,
+        &host,
+        "GET",
+        "/static/about.txt",
+        &[("X-Identity-Token", agent.identity_token())],
+        "",
+    );
+    assert_eq!(st, 200, "the static file: {text}");
+    let deadline = Instant::now() + WAIT;
+    let asked = loop {
+        let asked = route_questions(&stack.tap()[before..]);
+        if !asked.is_empty() || Instant::now() > deadline {
+            break asked;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(
+        asked.len(),
+        1,
+        "one question for the static file only: {asked:?}"
+    );
+    let (question, verdict) = &asked[0];
+    assert_eq!(question["action"]["name"], "access", "{question}");
+    assert_eq!(question["resource"]["type"], "service", "{question}");
+    assert_eq!(question["resource"]["id"], "datastore", "{question}");
+    assert!(
+        question["context"].get("usage").is_none() && question["context"].get("approval").is_none(),
+        "no usage and no effect: {question}"
+    );
+    assert_eq!(verdict["decision"], true, "{verdict}");
+    assert!(
+        verdict["context"].get("reason").is_none(),
+        "no reason of 17.1: {verdict}"
+    );
+    pass("S0 U127 the static file asks `access` on the service with no usage and no effect, the PDP answers true with no reason, and /health asks nothing");
 
     // ---------------------------------------------------------------------------------------- S1
     step("S1 (CONF 3.4): approve on the phone, execute one time, the second call asks again");

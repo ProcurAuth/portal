@@ -7,7 +7,8 @@
 #      (the service saw the verdict, the request id and the code only), and the agent canary of SPEC 3.10.4: two agents of one
 #      key, a second agent for the same effect, and no token, label, client or id of an agent in any request, answer or log of
 #      the service.
-#   2. the series U of the ProcurAuth runner against the same reference service binary, for the cases U30 and U100-U110.
+#   2. the series U of the ProcurAuth runner against the same reference service binary. The script shows the cases U30 and
+#      U100 to U117 (the approvals), U118 to U127 (ProcurAuth 1.1) and each case that did not pass.
 #      The runner is the PDP of its own cases. It cannot call the portal: see docs/inbox/CONTRIBUTING.md.
 # Usage: tools/dev/pep-e2e.sh
 # Docker only. The host needs Docker (with Compose), openssl and POSIX sh. The script opens ports on 127.0.0.1 only. It never
@@ -239,7 +240,7 @@ cat > "$work/secrets/service.json" <<EOF
   "pdp": {
     "url": "http://tap:4182",
     "credential_file": "/run/secrets/pdp_token",
-    "allow_insecure_pdp_link": true,
+    "allow_plain_http": true,
     "request_timeout_ms": 5000,
     "usage_wait_margin_ms": 1000
   }
@@ -334,8 +335,10 @@ if [ "${PEP_E2E_SKIP_RUNNER:-0}" != 1 ]; then
     timeout 300 access-conformance --role pep --profile conformance-profile.json --url http://127.0.0.1:8080 --series U \
       > /tmp/u.out 2>/tmp/u.err || code=$?
     kill $pid 2>/dev/null
-    echo "--- the cases of the approvals (U30, U100 to U110)"
-    grep -E "^(U30|U10[0-9]|U110) " /tmp/u.out | cut -c1-110
+    echo "--- the cases of the approvals (U30, U100 to U117)"
+    grep -E "^(U30|U10[0-9]|U11[0-7]) " /tmp/u.out | cut -c1-110
+    echo "--- the cases of ProcurAuth 1.1 (U118 to U127)"
+    grep -E "^(U11[89]|U12[0-7]) " /tmp/u.out | cut -c1-110
     echo "--- the other cases that did not pass"
     grep -E "^U[0-9]+ +(fail|warn|skip) " /tmp/u.out | cut -c1-110
     tail -n 1 /tmp/u.out

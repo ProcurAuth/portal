@@ -72,6 +72,7 @@ The test `tests/pep_e2e.rs` is `#[ignore]`. The script sets the variables that i
 
 | Scenario | What it proves |
 |---|---|
+| S0 | The static file `/static/about.txt` asks one question: `access` on the service, with no usage and no effect. The PDP answers `true` with no reason. The health probe `/health` needs no token (ProcurAuth 10.1c). |
 | S1 | The first call gives `awaiting_approval`, an id and a code. A second call gives the same request. The phone approves, and the tool runs one time. A call after the use asks again. |
 | S2 | A decline with a comment reaches the agent at the portal. The service reads `denied` and `approval_denied`, and never the comment. A changed command has another effect and no deny time. |
 | S3 | `get_action_status` renews the lease. When the reads stop, the request is `abandoned`. A late answer of the phone is refused. A read inside the revive window revives the request. |
@@ -98,6 +99,7 @@ The script therefore runs the series U with the runner as PDP. It proves the ser
 | U106 | S3: the renewal comes from `get_action_status` only. |
 | U107 | S6: the question holds the effect only. |
 | U110 | S1 to S3: the service reads `pending`, `approved`, `denied` or `void`. |
+| U127 | S0: a route that runs no action asks `access` on the service. A health probe needs no token. |
 
 ### Run it
 
@@ -134,15 +136,15 @@ Each scenario prints its checks. The script prints one line for each scenario at
 | Scenario | What it proves |
 |---|---|
 | 1 | The portal reads the action document of Dash. The editor shows the published actions, and no other. |
-| 2 | The portal publishes the metadata members. Dash logs `access.pdp_metadata`. A batch of more than 64 questions works. |
-| 3 | A person opens a session, sees the tile and opens a page through the gate. Dash accepts the identity token. |
+| 2 | The portal publishes the metadata members, also `procurauth_directory_max_age_seconds`. Dash logs `access.pdp_metadata`. A batch of more than 64 questions works. |
+| 3 | A person opens a session, sees the tile and opens a page through the gate. Dash accepts the identity token. For the page `/`, Dash asks `access` on its service, and the PDP answers `true` with no reason (ProcurAuth 10.1c). |
 | 4 | An agent key calls `tools/list` and `run_query` with no `confirm`. |
 | 5 | The approval of a call: approve and run once, a second call asks again, deny, void, and a call that waits (`wait_s`). |
 | 6 | An operation with two permissions (`export_query`): only `confirm` on `query.export` asks. |
 | 7 | The `confirm` of a person never blocks that person. The same grant on the key of that person asks. |
 | 8 | The forms and the file refuse `confirm` on `mcp.session`. The tools use their own actions. |
 | 9 | A ceiling above 1e9 is accepted and applied. On a host with `readonly = 1`, Dash refuses it. |
-| 10 | A page route that needs an approval answers `403` with `approval_cannot_wait`. |
+| 10 | A page route that needs an approval answers `403` with `approval_cannot_wait`. The page `/` asks only `access`, so it answers `200` for the same key. |
 | 11 | The budget `queries` of Dash is counted by the portal. |
 | 12 | No exchange between Dash and the PDP gets a 5xx or a 400. |
 

@@ -397,6 +397,35 @@ def tap_since(t0, path="/access/v1/evaluation"):
     return [l for l in tap_lines() if l["t"] >= t0 and l["path"] == path]
 
 
+def questions_since(t0):
+    """(action, resource, context, decision, response context) of each question since t0: a single question, and each
+    item of a batch. An item takes the members of the batch that it does not have (AuthZEN 1.0)."""
+    out = []
+    for l in tap_lines():
+        if l["t"] < t0:
+            continue
+        r, resp = l["request"] or {}, l["response"] or {}
+        if l["path"] == "/access/v1/evaluation":
+            pairs = [(r, resp)]
+        elif l["path"] == "/access/v1/evaluations":
+            pairs = [(dict({k: r.get(k) for k in ("subject", "action", "resource", "context") if k not in item}, **item), a)
+                     for item, a in zip(r.get("evaluations") or [], resp.get("evaluations") or [])]
+        else:
+            continue
+        for q, a in pairs:
+            out.append(((q.get("action") or {}).get("name"), q.get("resource") or {}, q.get("context") or {}, a.get("decision"), a.get("context") or {}))
+    return out
+
+
+def route_access(qs):
+    """The questions `access` of a route that runs no action (protocol 10.1c), and whether each one is on the service of Dash,
+    has no usage and no effect, and got true with no reason."""
+    acc = [q for q in qs if q[0] == "access"]
+    good = all((q[1].get("type"), q[1].get("id")) == ("service", SERVICE) and "usage" not in q[2] and "approval" not in q[2]
+               and q[3] is True and "reason" not in q[4] for q in acc)
+    return acc, good
+
+
 def question(line):
     """(action, context, decision, response context) of one single question in the tap."""
     r = line["request"] or {}
@@ -450,8 +479,9 @@ def s1(sc):
 def s2(sc):
     st, h, b = http_call(PDP, "GET", "/.well-known/authzen-configuration")
     meta = as_json(b) or {}
+    # The stack uses a SQLite file: the PDP has no copy of its directory, so the age bound is 1 (ProcurAuth 3.9, 10.7b).
     expected = {"procurauth_idle_max_seconds": 10, "procurauth_evaluations_max_bytes": 65536, "procurauth_evaluations_max_items": 128,
-                "procurauth_usage_max_seconds": 5}
+                "procurauth_usage_max_seconds": 5, "procurauth_directory_max_age_seconds": 1}
     for k, v in expected.items():
         sc.check(meta.get(k) == v, "the portal publishes %s = %s" % (k, v), meta.get(k))
     approval = sorted(k for k in meta if k.startswith("procurauth_approval_"))
@@ -490,8 +520,13 @@ def s3(sc):
     alice = Person("alice", CTX["alice_pw"])
     st, home = alice.page("/")
     sc.check(st == 200 and "ClickHouse Dash" in home and 'href="/dash/"' in home, "alice sees the tile ClickHouse Dash on the launcher", home[:300])
+    t0 = time.time()
     st, page = alice.page("/dash/")
     sc.check(st == 200 and "<html" in page.lower(), "alice opens /dash/ through the gate (HTTP %s)" % st, page[:300])
+    # ProcurAuth 10.1c: the page / runs no action of the document, so Dash asks access on its service. A PDP answers such a
+    # question from a service, not only from the edge.
+    acc, good = route_access(questions_since(t0))
+    sc.check(acc and good, "Dash asks access on the service for the page / (10.1c), with no usage and no effect, and the PDP answers true with no reason", acc[:3] or [q[0] for q in questions_since(t0)])
     st, h, b = alice.get("/dash/api/version")
     doc = as_json(b) or {}
     sc.check(st == 200 and bool(doc), "Dash accepts the identity token on /api/version (HTTP %s)" % st, b[:300])
@@ -762,6 +797,11 @@ def s10(sc):
         st, h, b = agent.raw(method, path, body)
         doc = as_json(b)
         sc.check(st == 403 and doc == {"error": "approval_cannot_wait"}, "%s %s answers 403 {\"error\":\"approval_cannot_wait\"}" % (method, path.split("?")[0]), (st, b[:200]))
+    # A route that runs no action asks only access, and confirm has no effect on access (10.1c, 17.8): it never waits.
+    t0 = time.time()
+    st, h, b = agent.raw("GET", "/dash/")
+    acc, good = route_access(questions_since(t0))
+    sc.check(st == 200 and acc and good, "the page / answers 200 for the same key: access never waits (10.1c, HTTP %s)" % st, (st, acc[:3], b[:200]))
     after = open_items(alice)[1]
     sc.check(after == before, "no request is submitted for a page", (before, after))
 
