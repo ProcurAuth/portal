@@ -3743,36 +3743,47 @@ fn key_node(backend: &Backend) -> (Node, u16) {
     (node, pdp_port)
 }
 
-/// Spec 3.9: the metadata publishes `keys.directory_max_age` as a whole number of seconds.
+/// Spec 3.9 and 10.7b: with PostgreSQL, the metadata publishes `keys.directory_max_age` as a whole number of seconds, and
+/// 30 without the block `keys`. With SQLite, the PDP has no copy of its directory, so it publishes 1.
 #[test]
-fn the_metadata_publishes_the_directory_max_age_of_the_keys_block() {
-    let pdp_port = free_port();
-    let _node = start_with(
-        Arc::new(Store::open_in_memory()),
-        None,
-        &format!(
-            r#"identity {{ issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" }}
-            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true }}
-            keys {{ directory_max_age = "45s" }}
-            pdp_client "db" {{ token_env = "TEST_PDP_DB" }}"#
-        ),
-    );
-    wait_until(Duration::from_secs(10), || {
-        TcpStream::connect(("127.0.0.1", pdp_port)).is_ok()
+fn the_metadata_publishes_the_age_bound_of_the_directory() {
+    each_backend(|backend| {
+        for (keys, shared) in [(r#"keys { directory_max_age = "45s" }"#, 45), ("", 30)] {
+            let pdp_port = free_port();
+            let _node = start_with(
+                Arc::new(backend.fresh()),
+                None,
+                &format!(
+                    r#"identity {{ issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" }}
+                    pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true }}
+                    {keys}
+                    pdp_client "db" {{ token_env = "TEST_PDP_DB" }}"#
+                ),
+            );
+            wait_until(Duration::from_secs(10), || {
+                TcpStream::connect(("127.0.0.1", pdp_port)).is_ok()
+            });
+            let reply = send(
+                pdp_port,
+                "GET",
+                "/.well-known/authzen-configuration",
+                &[],
+                "",
+            );
+            assert_eq!(reply.status, 200, "{}", reply.body);
+            let metadata = reply.json();
+            let expected = match backend {
+                Backend::Sqlite => 1,
+                Backend::Postgres(_) => shared,
+            };
+            assert_eq!(
+                metadata["procurauth_directory_max_age_seconds"],
+                expected,
+                "[{}] {keys:?}: {metadata}",
+                backend.name()
+            );
+        }
     });
-    let reply = send(
-        pdp_port,
-        "GET",
-        "/.well-known/authzen-configuration",
-        &[],
-        "",
-    );
-    assert_eq!(reply.status, 200, "{}", reply.body);
-    let metadata = reply.json();
-    assert_eq!(
-        metadata["procurauth_directory_max_age_seconds"], 45,
-        "{metadata}"
-    );
 }
 
 /// Protocol 6.9, 10.7 and 10.7a: the metadata publishes the real limits of the PDP. The idle time is real: the listener
@@ -3815,9 +3826,9 @@ fn the_metadata_publishes_the_maxima_of_the_pdp_and_the_idle_time_is_real() {
         "{metadata}"
     );
     assert_eq!(metadata["procurauth_usage_max_seconds"], 5, "{metadata}");
-    // This file has no block `keys`: the member has the default of `keys.directory_max_age` (spec 3.9).
+    // A SQLite file has no copy of the directory: the bound is 1 (spec 3.9, see the test of the age bound).
     assert_eq!(
-        metadata["procurauth_directory_max_age_seconds"], 30,
+        metadata["procurauth_directory_max_age_seconds"], 1,
         "{metadata}"
     );
     // The limits are real. A body above the maximum, and a batch above the maximum, get 400 (spec 10.7a).

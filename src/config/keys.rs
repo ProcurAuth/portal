@@ -649,7 +649,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Duration { min: secs(15), max: secs(300) },
         presence: Presence::Default("30s"),
         when: When::KeysBlock,
-        doc: "The longest age of the directory of the users and the keys. When the last good read of the database is older, the PDP answers `false` for each key and the edge refuses each key. The directory is read again every 5 seconds, so the minimum is 3 rounds. The metadata of the PDP gives this value in whole seconds as `procurauth_directory_max_age_seconds` (30 without the block `keys`).",
+        doc: "The longest age of the directory of the users and the keys. When the last good read of the database is older, the PDP answers `false` for each key and the edge refuses each key. The directory is read again every 5 seconds, so the minimum is 3 rounds. With PostgreSQL, the metadata of the PDP gives this value in whole seconds as `procurauth_directory_max_age_seconds` (30 without the block `keys`). With SQLite, the PDP has no copy of the directory, and the metadata gives 1.",
     },
     Key {
         block: "keys",

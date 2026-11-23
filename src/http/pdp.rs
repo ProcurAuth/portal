@@ -385,8 +385,12 @@ async fn handle(
 /// statement have 500 ms each, portal 7.7). The sum is 5 s.
 pub(super) const USAGE_MAX_SECONDS: u64 = 5;
 
-/// The default of `keys.directory_max_age` in whole seconds. The metadata publishes it when the file has no block `keys`.
+/// The default of `keys.directory_max_age` in whole seconds. With PostgreSQL, the metadata publishes it when the file has
+/// no block `keys`.
 const DEFAULT_DIRECTORY_MAX_AGE_SECONDS: u64 = 30;
+
+/// The age bound of a PDP with no copy of its directory (spec 3.9): the portal with a SQLite file.
+const NO_COPY_DIRECTORY_MAX_AGE_SECONDS: u64 = 1;
 
 /// The value of `keys.directory_max_age` as a whole number of seconds, for the metadata (spec 3.9). A duration that
 /// is not whole is rounded up, and the result is never 0: a service that reads it never has a bound of zero.
@@ -412,13 +416,20 @@ fn metadata(state: &AppState) -> HttpResponse {
         .pdp
         .as_ref()
         .map_or((0, 0), |p| (p.max_body_bytes, p.max_evaluations));
-    let directory_max_age = state
-        .config
-        .keys
-        .as_ref()
-        .map_or(DEFAULT_DIRECTORY_MAX_AGE_SECONDS, |keys| {
-            directory_max_age_seconds(keys.directory_max_age)
-        });
+    // Spec 3.9: with PostgreSQL, each instance decides from its copy of the directory, and `keys.directory_max_age`
+    // bounds its age. With SQLite, one process owns the file and changes its directory at each write. That PDP has no
+    // copy: a change applies at its next decision, so the value is 1.
+    let directory_max_age = if state.store.is_shared() {
+        state
+            .config
+            .keys
+            .as_ref()
+            .map_or(DEFAULT_DIRECTORY_MAX_AGE_SECONDS, |keys| {
+                directory_max_age_seconds(keys.directory_max_age)
+            })
+    } else {
+        NO_COPY_DIRECTORY_MAX_AGE_SECONDS
+    };
     let mut document = json!({
         "policy_decision_point": base,
         "access_evaluation_endpoint": format!("{base}{EVALUATION_PATH}"),
