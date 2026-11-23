@@ -862,7 +862,9 @@ fn a01_without_the_block_approvals_the_api_gives_403() {
         let key = r.key_a();
         let c = command(1);
         let body = json!({"evaluation_id": "x", "effect": c.effect, "op": c.op, "view": c.view, "lease_s": 900});
-        assert_eq!(r.post(&body).status, 403, "[{name}]");
+        let reply = r.post(&body);
+        assert_eq!(reply.status, 403, "[{name}]");
+        assert_eq!(reply.json(), json!({"error": "forbidden"}), "[{name}]");
         let reply = r.get("abc", &format!("?subject={}", key.replace(':', "%3A")));
         assert_eq!(reply.status, 403, "[{name}]");
         assert_eq!(
@@ -879,6 +881,49 @@ fn a01_without_the_block_approvals_the_api_gives_403() {
             "",
         );
         assert_eq!(reply.status, 401, "[{name}]");
+    });
+}
+
+/// Protocol 17.4, case D97: a request with no credential, with an unknown credential or with another scheme gets 401
+/// `unauthorized` and `WWW-Authenticate`, also when the approvals are on. Only a known credential gets 403 `forbidden`, and
+/// only when the PDP gives no approval (see `a01_without_the_block_approvals_the_api_gives_403`).
+#[test]
+fn a01_an_unknown_credential_gets_401_on_each_route() {
+    each_rig(true, "", |r, name| {
+        let c = command(1);
+        let body = json!({"evaluation_id": "x", "effect": c.effect, "op": c.op, "view": c.view, "lease_s": 900})
+            .to_string();
+        let routes = [
+            ("POST", "/approval/v1/requests", body.as_str()),
+            ("GET", "/approval/v1/requests/abc?subject=key%3Ax", ""),
+            (
+                "POST",
+                "/approval/v1/requests/abc/keepalive",
+                r#"{"subject":"key:x"}"#,
+            ),
+        ];
+        for authorization in [
+            None,
+            Some("Bearer unknown-credential-conformance-0001"),
+            Some("Basic Y29uZm9ybWFuY2U6MDAwMQ=="),
+            Some("Bearer "),
+        ] {
+            for (method, path, body) in routes {
+                let mut headers = vec![("Content-Type", "application/json")];
+                headers.extend(authorization.map(|a| ("Authorization", a)));
+                let reply = send(r.port, method, path, &headers, body);
+                let what = format!("[{name}] {method} {path} with {authorization:?}");
+                assert_eq!(reply.status, 401, "{what}: {}", reply.body);
+                assert_eq!(reply.json(), json!({"error": "unauthorized"}), "{what}");
+                assert!(
+                    reply
+                        .header("www-authenticate")
+                        .is_some_and(|v| v.starts_with("Bearer")),
+                    "{what}: {:?}",
+                    reply.headers
+                );
+            }
+        }
     });
 }
 

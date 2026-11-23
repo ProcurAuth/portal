@@ -1133,3 +1133,84 @@ fn a_question_of_another_permission_never_asks_for_an_approval() {
         );
     });
 }
+
+// ---------------------------------------------------------------- a route that runs no action (protocol 10.1c)
+
+/// Protocol 10.1c: a service asks `access` on itself for a route that runs no action, for example a static file. The
+/// question has no usage and no approval. The PDP answers it from the grants of `access`, as for the edge. The action
+/// `access` is not in the document, and `confirm` has no effect on it (17.8). So the answer never has a reason of 17.1,
+/// and such a route never waits.
+#[test]
+fn a_service_asks_access_for_a_route_that_runs_no_action() {
+    each_fixture(true, |f, name| {
+        let ask = |subject: &str, context: Value| -> Value {
+            let reply = f.post(
+                &json!({
+                    "subject": {"type": "user", "id": subject},
+                    "action": {"name": "access"},
+                    "resource": {"type": "service", "id": "db"},
+                    "context": context
+                })
+                .to_string(),
+            );
+            assert_eq!(reply.status, 200, "[{name}] {subject}: {}", reply.body);
+            reply.json()
+        };
+        let plain_true = |answer: &Value, what: &str| {
+            assert_eq!(answer["decision"], true, "[{name}] {what}: {answer}");
+            assert!(
+                reason(answer).is_none() && answer["context"]["evaluation_id"].is_null(),
+                "[{name}] {what}: {answer}"
+            );
+        };
+        // A person with the grant `access`.
+        plain_true(&ask("alice", json!({})), "a person with access");
+        // A person whose grant of `access` has `confirm`, and a key of that person whose grant of `access` has it too.
+        let mut grants = vec![
+            Grant::new("access", "db").unwrap().with_confirm(true),
+            Grant::parse("keys.own.use on service:portal/key_kind:mcp").unwrap(),
+        ];
+        grants.sort();
+        f.node
+            .state
+            .store
+            .insert_user(&crate::store::UserRow {
+                login: "gina".into(),
+                password_hash: "h".into(),
+                grants,
+                created_at: 1,
+            })
+            .unwrap();
+        add_key(
+            &f.node,
+            "4f4f4f4f4f4f4f4f",
+            Some("gina"),
+            21,
+            vec![Grant::new("access", "db").unwrap().with_confirm(true)],
+        );
+        plain_true(&ask("gina", json!({})), "a person whose access has confirm");
+        // An effect on the question changes nothing: `access` never asks for an approval.
+        for context in [json!({}), json!({"approval": {"effect": effect(3)}})] {
+            plain_true(
+                &ask("key:4f4f4f4f4f4f4f4f", context.clone()),
+                &format!("a key whose access has confirm, context {context}"),
+            );
+        }
+        // A key without `access`: a plain `false`.
+        add_key(
+            &f.node,
+            "5e5e5e5e5e5e5e5e",
+            Some("alice"),
+            22,
+            vec![Grant::from_path_text("data.write", "db", ANALYTICS).unwrap()],
+        );
+        let answer = ask("key:5e5e5e5e5e5e5e5e", json!({}));
+        assert_eq!(answer["decision"], false, "[{name}] {answer}");
+        assert!(reason(&answer).is_none(), "[{name}] {answer}");
+        assert_eq!(
+            f.metric("approval_required"),
+            0,
+            "[{name}] the gate never ran for access"
+        );
+    });
+}
