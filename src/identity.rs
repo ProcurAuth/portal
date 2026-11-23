@@ -270,6 +270,40 @@ mod tests {
     }
 
     #[test]
+    fn the_times_of_a_token_are_whole_json_integers_and_the_header_has_a_kid() {
+        let signer = signer();
+        for token in [
+            signer.token(7, "alice", "db", 1_000),
+            signer
+                .key_token("k1", "key:k1", "alice", "db", 1_700_000_000)
+                .0,
+        ] {
+            let parts: Vec<&str> = token.split('.').collect();
+            let header =
+                String::from_utf8(Base64UrlUnpadded::decode_vec(parts[0]).unwrap()).unwrap();
+            let claims =
+                String::from_utf8(Base64UrlUnpadded::decode_vec(parts[1]).unwrap()).unwrap();
+            assert!(
+                header.contains(&format!("\"kid\":\"{}\"", signer.kid())),
+                "{header}"
+            );
+            assert!(!signer.kid().is_empty());
+            // The text of the time is digits only: no sign, no fraction, no exponent.
+            for name in ["iat", "exp"] {
+                let at = claims.find(&format!("\"{name}\":")).unwrap() + name.len() + 3;
+                let digits: String = claims[at..]
+                    .chars()
+                    .take_while(|c| !matches!(c, ',' | '}'))
+                    .collect();
+                assert!(
+                    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()),
+                    "{name} is {digits:?} in {claims}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_token_has_the_claims_of_the_contract_and_a_valid_signature() {
         let signer = signer();
         let token = signer.token(7, "alice", "db", 1_000);

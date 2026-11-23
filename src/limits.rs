@@ -547,6 +547,28 @@ mod tests {
         .remove(0)
     }
 
+    /// The convention of the units: a ceiling has a plural noun and a budget has a singular noun. The unit is a text
+    /// for a person: nothing compares it, so a service can publish either form.
+    #[test]
+    fn plural_ceiling_units_and_singular_budget_units_are_accepted_and_read_well() {
+        let declarations = check_declarations(raw(
+            r#"[{"name":"requests","label":"Requests","description":"d","unit":"request","kind":"budget"},
+                {"name":"max_rows","label":"Rows","description":"d","unit":"rows","kind":"ceiling","min":1,"max":100},
+                {"name":"max_duration","label":"Duration","description":"d","unit":"seconds","kind":"ceiling","min":1,"max":60}]"#,
+        ))
+        .unwrap();
+        let names: Vec<String> = vec!["max_rows".into(), "max_duration".into()];
+        let too_big = Limits::from_json(r#"{"max_rows":101}"#).unwrap();
+        let error = too_big
+            .check(&declarations, "query.run.read", &names)
+            .unwrap_err();
+        assert!(error.contains("from 1 to 100 rows"), "{error}");
+        let good = Limits::from_json(r#"{"max_rows":100,"max_duration":60}"#).unwrap();
+        assert!(good.check(&declarations, "query.run.read", &names).is_ok());
+        let budget = Limits::from_json(r#"{"requests":[{"amount":5,"window":"minute"}]}"#).unwrap();
+        assert!(budget.check(&declarations, ACCESS, &[]).is_ok());
+    }
+
     fn per(amount: u64, window: Window) -> Item {
         Item { amount, window }
     }

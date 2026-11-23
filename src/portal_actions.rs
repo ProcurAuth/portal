@@ -250,7 +250,7 @@ pub fn document(features: &Features) -> Arc<Document> {
         limits.push(
             serde_json::json!({ "name": MAX_KEY_LIFETIME, "label": "Longest key lifetime",
             "description": "The longest lifetime of a key of this kind, in seconds.",
-            "unit": "second", "kind": "ceiling", "min": 0, "max": 31_536_000 }),
+            "unit": "seconds", "kind": "ceiling", "min": 0, "max": 31_536_000 }),
         );
     }
     if features.has_inbox() {
@@ -672,6 +672,10 @@ mod tests {
         let limit = |name: &str| document.limits.iter().find(|l| l.name == name).unwrap();
         assert_eq!(limit(ALERTS).kind, crate::limits::Kind::Budget);
         assert_eq!(limit(MAX_KEY_LIFETIME).range, Some((0, 31_536_000)));
+        // The convention of the units: a ceiling has a plural noun, a budget has a singular noun.
+        assert_eq!(limit(MAX_KEY_LIFETIME).unit, "seconds");
+        assert_eq!(limit(ALERTS).unit, "alert");
+        assert_eq!(limit(QUESTIONS).unit, "question");
         let labels: Vec<(String, String)> = document
             .resources
             .iter()
