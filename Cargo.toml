@@ -5,7 +5,7 @@ members = [".", "crates/inbox-core", "crates/inbox-android"]
 default-members = [".", "crates/inbox-core"]
 
 [workspace.package]
-version = "5.6.0"
+version = "5.6.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -30,7 +30,7 @@ pulldown-cmark = { version = "=0.13.4", default-features = false }
 [package]
 name = "portal"
 # tools/version.sh reads this field and stops when it is not equal to the version of [workspace.package].
-version = "5.6.0"
+version = "5.6.1"
 # The server stays on the 2021 edition. The crates under crates/ take the edition of [workspace.package].
 edition = "2021"
 rust-version.workspace = true

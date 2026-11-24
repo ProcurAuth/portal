@@ -523,6 +523,15 @@ Some changes of the base schema (version 8) have no migration. A database that a
 
 The sections go from the newest version to the oldest. Read the sections between your version and the target.
 
+### 5.6.1
+
+This version changes no table, no frame of the phone and no key of the file. Read these points when you upgrade from 5.6.0.
+
+- The probes have the new route `/livez`. They answer `HEAD`, and their answer has `Cache-Control: no-store`.
+- Each answer with the security headers has `Cross-Origin-Opener-Policy` and `Permissions-Policy`.
+- The command `print-config` is new. A command with `--config` accepts `-c FILE` and `--config=FILE`, with the options in any order.
+- `portal inbox import-sqlite` stops with an error, not with a panic, when a row has a value of a wrong type.
+
 ### 5.6.0
 
 This version changes the licence and adds one member to the metadata of the PDP. It changes no table, no frame of the phone and no key of the file. Read these points when you upgrade from 5.5.1.

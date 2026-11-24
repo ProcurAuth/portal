@@ -113,13 +113,13 @@ This section gives two paths: the release binary and the Compose stack.
 
 This path takes five minutes on Linux (amd64 or arm64). Docker is not necessary. You need `curl`, `sha256sum`, `tar` and `openssl`.
 
-These commands download portal and check the archive. For arm64, use the archive `portal_5.6.0_linux_arm64.tar.gz`. The archive holds one static file, `portal`.
+These commands download portal and check the archive. For arm64, use the archive `portal_5.6.1_linux_arm64.tar.gz`. The archive holds one static file, `portal`.
 
 ```sh
-curl -fsSLO https://github.com/ProcurAuth/portal/releases/download/v5.6.0/portal_5.6.0_linux_amd64.tar.gz
-curl -fsSLO https://github.com/ProcurAuth/portal/releases/download/v5.6.0/SHA256SUMS
+curl -fsSLO https://github.com/ProcurAuth/portal/releases/download/v5.6.1/portal_5.6.1_linux_amd64.tar.gz
+curl -fsSLO https://github.com/ProcurAuth/portal/releases/download/v5.6.1/SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS
-tar -xzf portal_5.6.0_linux_amd64.tar.gz
+tar -xzf portal_5.6.1_linux_amd64.tar.gz
 ./portal version
 ```
 

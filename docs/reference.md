@@ -2,7 +2,7 @@
 
 This page lists the HTTP endpoints of the three listeners of portal. It lists the error codes, the cookies and the headers. It also gives the rules of the command line and the exit codes.
 
-The tables come from the code of version 5.6.0: the route tables in `src/http.rs`, `src/http/pdp.rs`, `src/http/approval_api.rs`, `src/inbox/http.rs` and `src/inbox/peer.rs`. A path that this page does not list is an unknown path. The section [Command line](#command-line) also gives changes after version 5.6.0: see the section `[Unreleased]` of [CHANGELOG.md](../CHANGELOG.md).
+The tables come from the code of version 5.6.1: the route tables in `src/http.rs`, `src/http/pdp.rs`, `src/http/approval_api.rs`, `src/inbox/http.rs` and `src/inbox/peer.rs`. A path that this page does not list is an unknown path. The section [Command line](#command-line) also gives changes after version 5.6.0: see the section `[Unreleased]` of [CHANGELOG.md](../CHANGELOG.md).
 
 ## How to read this page
 

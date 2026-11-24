@@ -4,6 +4,8 @@ This file lists the notable changes of each release of portal. The layout follow
 
 ## [Unreleased]
 
+## [5.6.1] - 2026-11-24
+
 This version changes no key of the configuration file, no table and no frame of the phone.
 
 ### Added
@@ -199,7 +201,8 @@ The first version of the merged product. One program now holds the launcher, the
 - A key of an earlier version becomes an MCP key.
 - A phone of the earlier standalone alert server (protocol 3) cannot connect. It gets the close code 4426. Each phone enrolls again with a code.
 
-[Unreleased]: https://github.com/ProcurAuth/portal/compare/v5.6.0...HEAD
+[Unreleased]: https://github.com/ProcurAuth/portal/compare/v5.6.1...HEAD
+[5.6.1]: https://github.com/ProcurAuth/portal/compare/v5.6.0...v5.6.1
 [5.6.0]: https://github.com/ProcurAuth/portal/compare/v5.5.1...v5.6.0
 [5.5.1]: https://github.com/ProcurAuth/portal/compare/v5.5.0...v5.5.1
 [5.5.0]: https://github.com/ProcurAuth/portal/compare/v5.4.0...v5.5.0

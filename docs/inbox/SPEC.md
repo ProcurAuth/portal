@@ -4,7 +4,7 @@ This document states what the Inbox must do and why. The Inbox is a feature of t
 
 The words MUST, MUST NOT, SHOULD and MAY are the key words of RFC 2119 and RFC 8174.
 
-A requirement has one of two states. A requirement without a mark is in force since version 5.0.0. A requirement with a mark of a release, for example **[5.1.0]** or **[5.5.0]**, is in force since that release. A requirement that the code does not implement has the line "Status: not implemented in 5.6.0". Section 8 lists the scope.
+A requirement has one of two states. A requirement without a mark is in force since version 5.0.0. A requirement with a mark of a release, for example **[5.1.0]** or **[5.5.0]**, is in force since that release. A requirement that the code does not implement has the line "Status: not implemented in 5.6.1". Section 8 lists the scope.
 
 Each requirement has an id and a testable verb. Section 6.12 gives the tests for the requirements of the releases 5.1.0 to 5.5.0. The ids of the requirements stay the same between versions, and the code and the tests cite them.
 
@@ -955,9 +955,9 @@ An agent can send alerts today with an `api_` key of its own, through the route 
 
 8.1.1 An agent MUST send alerts through the REST route of 3.3, with an `api_` key of its own. No new code is needed: the route of 3.3 already accepts the key.
 
-8.1.2 The MCP side MAY accept an alert from an `mcp_` key. A tool `send_alert` would map to the action `alert.send`. Status: not implemented in 5.6.0.
+8.1.2 The MCP side MAY accept an alert from an `mcp_` key. A tool `send_alert` would map to the action `alert.send`. Status: not implemented in 5.6.1.
 
-8.1.3 The zone **Sent** SHOULD show a webhook icon for an `api_` key and a robot icon for an `mcp_` key. Status: not implemented in 5.6.0.
+8.1.3 The zone **Sent** SHOULD show a webhook icon for an `api_` key and a robot icon for an `mcp_` key. Status: not implemented in 5.6.1.
 
 ### 8.2 Items: approvals and questions (implemented)
 
@@ -985,10 +985,10 @@ An agent can send alerts today with an `api_` key of its own, through the route 
 
 The requirements of this section describe possible features. No release has them.
 
-8.4.1 The server MAY drive the execution with MCP Tasks and the URL mode of elicitation. Status: not implemented in 5.6.0.
+8.4.1 The server MAY drive the execution with MCP Tasks and the URL mode of elicitation. Status: not implemented in 5.6.1.
 
-8.4.2 The Inbox MAY offer parallel alternatives and a floor `approval: "required"`. Status: not implemented in 5.6.0.
+8.4.2 The Inbox MAY offer parallel alternatives and a floor `approval: "required"`. Status: not implemented in 5.6.1.
 
-8.4.3 The items MAY get attachments and images. The content keys MAY come from a KMS or an HSM. Status: not implemented in 5.6.0.
+8.4.3 The items MAY get attachments and images. The content keys MAY come from a KMS or an HSM. Status: not implemented in 5.6.1.
 
-8.4.4 Delegation, escalation, muted agents, a quorum and a vote are not part of the product. A webhook to the agent and an adapter for an agent SDK are not part of it either. Status: not implemented in 5.6.0.
+8.4.4 Delegation, escalation, muted agents, a quorum and a vote are not part of the product. A webhook to the agent and an adapter for an agent SDK are not part of it either. Status: not implemented in 5.6.1.
