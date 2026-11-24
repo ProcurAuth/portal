@@ -4,6 +4,10 @@ This file lists the notable changes of each release of portal. The layout follow
 
 ## [Unreleased]
 
+### Added
+
+- The last job of the release workflow and the script `tools/release/local-release.sh` start the conformance bench of ProcurAuth for the new release. They never block a release.
+
 ## [5.6.1] - 2026-11-24
 
 This version changes no key of the configuration file, no table and no frame of the phone.

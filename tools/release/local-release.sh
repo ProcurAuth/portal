@@ -89,6 +89,9 @@ if [ "$publish" = 1 ]; then
   [ "$apk" = 1 ] && set -- "$@" "$out/portal-inbox-$version.apk"
   # shellcheck disable=SC2086
   gh release create "$tag" --verify-tag --title "portal $tag" --notes-file "$notes" $pre "$@"
+  # The conformance bench of ProcurAuth tests the release. It never blocks the release: a failure here only gives a warning.
+  gh workflow run bench.yml --repo ProcurAuth/procurauth --ref main -f project=portal -f tag="$tag" \
+    || echo "warning: the conformance bench did not start: gh workflow run bench.yml --repo ProcurAuth/procurauth -f project=portal -f tag=$tag" >&2
 else
   echo "Built in $out, notes in $notes (dry run: nothing published, add --publish to create the release)."
 fi
