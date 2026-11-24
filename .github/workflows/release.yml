@@ -9,7 +9,7 @@ name: Release
 #   portal-inbox-<version>.apk            the Android app, signed with the release key
 #   SHA256SUMS                            the SHA-256 of each archive and of the APK (the format of sha256sum)
 # The notes of the release are the section of the version in CHANGELOG.md (scripts/changelog-section.sh).
-# The workflow CI (ci.yml) runs first: a release never ships a commit that fails the checks.
+# The workflows CI (ci.yml) and Nightly (nightly.yml) run first: a release never ships a commit that fails the checks.
 # No job builds an image for a registry, logs in to a registry or publishes an image.
 on:
   push:
@@ -77,8 +77,9 @@ jobs:
           path: ${{ runner.temp }}/notes.md
           if-no-files-found: error
 
-  # The same jobs as a push to main: format, clippy, tests, image, configuration files and the Android app.
-  # ci.yml declares the trigger workflow_call for this use. The release passes no secret to it.
+  # The fast checks of a push to main (ci.yml), then the heavy checks (nightly.yml): clippy, the tests, the image, the
+  # configuration files and the Android app. Both workflows declare the trigger workflow_call for this use.
+  # The release passes no secret to them. A release is rare, so it can wait for the heavy checks.
   checks:
     name: CI
     needs: prepare
@@ -86,8 +87,15 @@ jobs:
       contents: read
     uses: ./.github/workflows/ci.yml
 
+  heavy:
+    name: Nightly checks
+    needs: prepare
+    permissions:
+      contents: read
+    uses: ./.github/workflows/nightly.yml
+
   binaries:
-    needs: [prepare, checks]
+    needs: [prepare, checks, heavy]
     strategy:
       fail-fast: true
       matrix:
@@ -113,7 +121,7 @@ jobs:
           if-no-files-found: error
 
   apk:
-    needs: [prepare, checks]
+    needs: [prepare, checks, heavy]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

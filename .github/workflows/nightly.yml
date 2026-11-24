@@ -1,0 +1,101 @@
+name: Nightly
+
+# The heavy checks. Each of them takes more than one minute, so none of them runs on a push or on a pull request.
+# They run every night on main, by hand (workflow_dispatch, with the branch of your choice) and as the gate of a release
+# (release.yml calls this workflow). The fast checks are in ci.yml.
+#   lint     the reads of the environment, the format and clippy    (tools/dev/lint.sh)
+#   tests    the tests of the workspace and the end-to-end tests of the Inbox on PostgreSQL   (tools/dev/test.sh)
+#   image    the local image, its binary, the configuration files of deploy/ and the Compose stack   (tools/dev/check-image.sh)
+#   android  the Android app with a throwaway key   (tools/android/build-apk.sh)
+# tools/dev/heavy.sh runs the same checks on a developer machine. Run it before a change of the Rust code, of Cargo.lock
+# or of the Android app. No job logs in to a registry or publishes an image: the image stays on the runner.
+on:
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+  # The release workflow calls this workflow as a gate.
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  lint:
+    name: Format and clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Format and clippy
+        run: tools/dev/lint.sh
+
+  tests:
+    name: Tests of the workspace
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      # The tests of the series D (the PDP) and E (the edge) of the protocol read the cases of the procurauth repository.
+      # The step pins one commit, so a change of the protocol never breaks a run by itself.
+      # The commit below is the tag v1.1 of procurauth, on main. Never pin a commit that is not on main.
+      # The ProcurAuth repository is public: the job checks it out without a secret.
+      - name: Check out the conformance cases of the protocol
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ProcurAuth/procurauth
+          # ProcurAuth v1.1.
+          ref: c820b4ac0e37c4769394876105fd549a6c8b38cc
+          path: procurauth
+          persist-credentials: false
+      # tools/dev/test.sh starts a throwaway PostgreSQL in Docker and runs `cargo test --locked` with the arguments.
+      # PROCURAUTH_CONFORMANCE_REQUIRED=1: the run fails when it cannot read the cases (it never skips the series D and E).
+      - name: Tests of the workspace (SQLite, and the tests that need PostgreSQL)
+        env:
+          PROCURAUTH_CONFORMANCE: ${{ github.workspace }}/procurauth/conformance
+          PROCURAUTH_CONFORMANCE_REQUIRED: "1"
+        run: tools/dev/test.sh --workspace --no-fail-fast
+      - name: End-to-end tests of the inbox on PostgreSQL
+        env:
+          INBOX_E2E_BACKEND: postgres
+        run: tools/dev/test.sh --test inbox_e2e
+
+  image:
+    name: Image, configuration files and Compose smoke test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Build the image (local only)
+        run: tools/build.sh image
+      - name: Check the binary, the configuration files and the Compose stack
+        run: tools/dev/check-image.sh
+
+  android:
+    name: Android app (compile check)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Throwaway signing key (the APK is not uploaded)
+        run: |
+          keytool -genkeypair -noprompt -keystore "$RUNNER_TEMP/ci.jks" -storepass ci-store-pass \
+            -keypass ci-store-pass -alias ci -keyalg RSA -keysize 2048 -validity 1 -dname "CN=Inbox CI"
+      - name: Build the APK
+        env:
+          INBOX_KEYSTORE: ${{ runner.temp }}/ci.jks
+          INBOX_KEYSTORE_PASSWORD: ci-store-pass
+          INBOX_KEY_ALIAS: ci
+          INBOX_KEY_PASSWORD: ci-store-pass
+        run: tools/android/build-apk.sh

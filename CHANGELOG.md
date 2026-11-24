@@ -17,9 +17,13 @@ This version changes no key of the configuration file, no table and no frame of 
 - The log event `request` has two more fields after the four earlier fields: `duration_ms` and `route`.
 - Each answer with the security headers has `Cross-Origin-Opener-Policy: same-origin` and a `Permissions-Policy` that refuses the camera, the microphone, the geolocation, the payment and USB features.
 - The configuration reference has a column `Forms`. It tells which keys accept `_env` and `_file`.
+- The workflow `nightly.yml` runs the heavy checks: clippy, the tests, the image, the configuration files, the Compose stack and the Android app. It runs every night, by hand and before a release.
+- The script `tools/dev/heavy.sh` runs the heavy checks of the CI on a developer machine. The script `tools/dev/check-image.sh` checks the image, its binary, the configuration files and the Compose stack.
 
 ### Changed
 
+- The workflow `ci.yml` is the fast path of a push and of a pull request. It runs the policy of the images, the reads of the environment, the format and the syntax of the shell scripts. Clippy, the tests, the image and the Android app now run in `nightly.yml`.
+- The workflow `release.yml` runs `ci.yml` and `nightly.yml` before it builds a release.
 - The comparison of secrets uses `aws_lc_rs::constant_time`.
 - The check of the signature of a peer refuses a hex text with a sign or with a character that is not a hex digit.
 

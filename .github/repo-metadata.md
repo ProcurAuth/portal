@@ -17,7 +17,7 @@ This file lists the settings that a maintainer applies on GitHub with `gh`. The 
 - Pages: serve the branch `main`, from the folder `/docs`.
 - Enable the private reports of vulnerabilities (Settings, Code security). `SECURITY.md` and `CODE_OF_CONDUCT.md` link to them.
 - Enable the alerts of Dependabot. `.github/dependabot.yml` updates the actions, the Cargo and Gradle dependencies and the Docker base images.
-- Protect `main`: require these checks before a merge: `Policy (no image is published)`, `Format, clippy and tests`, `Image, configuration files and Compose smoke test`, `Android app (compile check)` and `docs`.
+- Protect `main`: require these checks before a merge: `Policy (no image is published)`, `Rules, format and shell syntax` and `docs`. Do not require the jobs of `nightly.yml`, because they do not run on a pull request.
 - Do not publish a container image. A release holds binaries, the Android APK and a checksum file only.
 - The local script `tools/release/local-release.sh` makes the release. Read [Build and release](../docs/build-and-release.md).
 

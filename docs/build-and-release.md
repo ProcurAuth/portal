@@ -28,7 +28,7 @@ With a read-only root, mount a tmpfs of 16 MiB on `/tmp`, and mount a volume on 
 
 For the other architecture, use `docker buildx build --platform linux/arm64`. The build runs natively on that architecture, with a native builder or with QEMU. There is no cross compilation.
 
-The image is for tests and for your own deployment. The repository publishes no image. No tool and no workflow of the repository authenticates to a registry or pushes to one. The workflow `ci.yml` has a check that fails when a workflow mentions a container registry.
+The image is for tests and for your own deployment. The repository publishes no image. No tool and no workflow of the repository authenticates to a registry or pushes to one. The job Policy of the workflow `ci.yml` fails when a workflow mentions a container registry.
 
 The command `docker compose up` at the root of the repository starts the portal with the Inbox and PostgreSQL. The page [deploy/README.md](../deploy/README.md) describes the Compose stack and the K3s manifests.
 
@@ -49,8 +49,10 @@ The script runs `cargo generate-lockfile` in a `rust` container. Review the diff
 | Check | Command |
 |---|---|
 | Format and clippy | `tools/dev/lint.sh` |
+| All heavy checks | `tools/dev/heavy.sh` |
 | Tests of the workspace | `tools/dev/test.sh --workspace --no-fail-fast` |
 | Configuration files of `deploy/` | `tools/dev/check-configs.sh` |
+| Binary, configuration files and Compose stack of the image | `tools/dev/check-image.sh` |
 | Compose stack | `tools/dev/smoke.sh` |
 | Documents | `python3 tools/dev/ste-check.py FILE` and `python3 tools/docs/check_links.py` |
 
@@ -71,7 +73,7 @@ The build runs in the image `inbox-android` (`tools/android/Dockerfile`): JDK 17
 The release is made by `tools/release/local-release.sh` on a developer machine. The script builds the release files in Docker and, when you ask, creates the GitHub release.
 
 1. Set the same version in `Cargo.toml` (both places). Update [CHANGELOG.md](../CHANGELOG.md).
-2. Commit. Run `tools/dev/lint.sh` and `tools/dev/test.sh --workspace --no-fail-fast`. The release script does not run the tests.
+2. Commit. Run `tools/dev/heavy.sh` (lint, tests and image). It runs `tools/dev/lint.sh` and `tools/dev/test.sh --workspace --no-fail-fast`. The release script does not run the tests.
 3. Make the tag `vX.Y.Z` on the commit. The tag must be equal to the version of `Cargo.toml`, and it must point at `HEAD`.
 4. Run `tools/release/local-release.sh`. Without `--publish`, nothing leaves the machine. The files stay in `dist/release-<version>/`.
 5. Check the files and `SHA256SUMS`. Push the tag. Run the script again with `--publish`. It creates the release from the tag with `gh release create --verify-tag`.
@@ -82,10 +84,12 @@ The release holds the static binaries for amd64 and arm64 as `portal_<version>_l
 
 ### Workflows
 
-The directory `.github/workflows/` has two workflows. The logic of the local script and the logic of the release workflow are the same.
+The directory `.github/workflows/` has four workflows. The logic of the local script and the logic of the release workflow are the same.
 
-- `ci.yml` runs on each push to `main` and on each pull request. It checks that no workflow publishes an image. It runs format, clippy and the tests. The tests use the conformance cases of the series D and E from a pinned commit of the [procurauth](https://github.com/ProcurAuth/procurauth) repository. It builds the image locally and checks the configuration files and the Compose stack. It compiles the Android app with a throwaway key.
-- `release.yml` starts on a tag `v*`. It checks that the tag equals the version of `Cargo.toml`. It builds the binaries on an amd64 runner and on an arm64 runner. It builds the signed APK with secrets of the repository. It creates the release with the same files as the local script.
+- `ci.yml` runs on each push to `main` and on each pull request. It is the fast path: each job takes a few seconds to a few tens of seconds. It checks that no workflow publishes an image. It checks the reads of the environment, the format and the syntax of the shell scripts. It does no build.
+- `docs.yml` checks the documents and the site on each push to `main` and on each pull request.
+- `nightly.yml` runs the heavy checks: clippy, the tests, the image, the configuration files, the Compose stack and the Android app with a throwaway key. It runs every night on `main`, and by hand on any branch. The tests use the conformance cases of the series D and E from a pinned commit of the [procurauth](https://github.com/ProcurAuth/procurauth) repository. The image stays on the runner and is never pushed. `tools/dev/heavy.sh` runs the same checks on your machine.
+- `release.yml` starts on a tag `v*`. It checks that the tag equals the version of `Cargo.toml`. It runs `ci.yml` and `nightly.yml` as gates. It builds the binaries on an amd64 runner and on an arm64 runner. It builds the signed APK with secrets of the repository. It creates the release with the same files as the local script.
 
 The local script is the release path that the project relies on. The workflows run the same steps when GitHub Actions is available.
 

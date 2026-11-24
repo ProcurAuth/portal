@@ -33,7 +33,7 @@ portal="$(cd "$here/../.." && pwd)"
 procurauth="${PROCURAUTH_DIR:-${PROCURAUTH:-$(cd "$portal/.." && pwd)/procurauth}}"
 # ProcurAuth 1.1 (tag v1.1). The test keys come from this commit. Without --no-build, the script
 # builds the runner from this commit, and the runner holds the cases of this commit.
-# The continuous integration pins the same commit for the series D and E (.github/workflows/ci.yml).
+# The continuous integration pins the same commit for the series D and E (.github/workflows/nightly.yml).
 procurauth_commit="c820b4ac0e37c4769394876105fd549a6c8b38cc"
 notes_image="portal-demo-notes"
 

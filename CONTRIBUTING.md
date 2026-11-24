@@ -21,7 +21,10 @@ Docker is the only tool for the code. Each script builds and runs in a container
 tools/dev/lint.sh                 # format check and clippy with warnings as errors
 tools/dev/test.sh --workspace     # the tests, with a throwaway PostgreSQL
 tools/dev/smoke.sh                # a Compose smoke test of the real image
+tools/dev/heavy.sh                # lint, tests, image and Compose checks in one run
 ```
+
+These checks are heavy. The CI does not run them on a push or on a pull request. See "The checks of the CI" below.
 
 The checks of the documents need Python 3 only. They run on the host and write no file.
 
@@ -53,7 +56,18 @@ To format the code, run `cargo fmt --all` in the same image as `tools/dev/lint.s
 
 ## Pull requests
 
-Open a pull request against `main`. Complete the template. The CI must pass. When you send a change, you agree that it is licensed under `MIT OR Apache-2.0`, as the rest of the project.
+Open a pull request against `main`. Complete the template. The fast checks of the CI must pass. When you send a change, you agree that it is licensed under `MIT OR Apache-2.0`, as the rest of the project.
+
+## The checks of the CI
+
+A job of the CI takes a few seconds to a few tens of seconds. A check that takes longer does not run on a push or on a pull request.
+
+- The workflow `ci.yml` runs on each push to `main` and on each pull request. It checks the policy of the images, the reads of the environment, the format and the syntax of the shell scripts.
+- The workflow `docs.yml` checks the documents and the site.
+- The workflow `nightly.yml` runs clippy, the tests, the image, the Compose stack and the Android app. It runs every night on `main`, and a release waits for it. You can start it by hand on your branch: open the page Actions, choose Nightly, then choose Run workflow.
+- The script `tools/dev/heavy.sh` runs the same heavy checks on your machine.
+
+Before a merge, a change of the Rust code, of `Cargo.lock` or of the Android app needs a green run. Use `tools/dev/heavy.sh` or the workflow Nightly. The maintainer asks for this run in the review. [Development](docs/development.md) describes each check.
 
 ## Release
 

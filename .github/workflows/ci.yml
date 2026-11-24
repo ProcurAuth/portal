@@ -1,5 +1,9 @@
 name: CI
 
+# This workflow is the fast path of a push and of a pull request. A job takes a few seconds to a few tens of seconds.
+# It has no Docker image build and no full Rust compile. The heavy checks (clippy, the tests, the image, the Android app)
+# are in nightly.yml. They also run before a release, and by hand (workflow_dispatch on a branch).
+# The same checks run on a developer machine: tools/dev/heavy.sh (docs/development.md).
 on:
   push:
     branches: [main]
@@ -33,79 +37,37 @@ jobs:
             exit 1
           fi
 
-  rust:
-    name: Format, clippy and tests
+  fast:
+    name: Rules, format and shell syntax
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 10
+    env:
+      # The version of the Rust image of tools/dev/lint.sh. Change the two together.
+      RUST_VERSION: "1.98"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      # The tests of the series D (the PDP) and E (the edge) of the protocol read the cases of the procurauth repository.
-      # The step pins one commit, so a change of the protocol never breaks a run by itself.
-      # The commit below is the tag v1.1 of procurauth, on main. Never pin a commit that is not on main.
-      # The ProcurAuth repository is public: the job checks it out without a secret.
-      - name: Check out the conformance cases of the protocol
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # Only rustfmt runs here. It reads the source and needs no dependency, so the job makes no build.
+      - name: Cache the Rust toolchain
+        id: toolchain
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
-          repository: ProcurAuth/procurauth
-          # ProcurAuth v1.1.
-          ref: c820b4ac0e37c4769394876105fd549a6c8b38cc
-          path: procurauth
-          persist-credentials: false
-      - name: Format and clippy
-        run: tools/dev/lint.sh
-      # tools/dev/test.sh starts a throwaway PostgreSQL in Docker and runs `cargo test --locked` with the arguments.
-      # PROCURAUTH_CONFORMANCE_REQUIRED=1: the run fails when it cannot read the cases (it never skips the series D and E).
-      - name: Tests of the workspace (SQLite, and the tests that need PostgreSQL)
-        env:
-          PROCURAUTH_CONFORMANCE: ${{ github.workspace }}/procurauth/conformance
-          PROCURAUTH_CONFORMANCE_REQUIRED: "1"
-        run: tools/dev/test.sh --workspace --no-fail-fast
-      - name: End-to-end tests of the inbox on PostgreSQL
-        env:
-          INBOX_E2E_BACKEND: postgres
-        run: tools/dev/test.sh --test inbox_e2e
-
-  image:
-    name: Image, configuration files and Compose smoke test
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - name: Build the image (local only)
-        run: tools/build.sh image
-      - name: Check that the binary is static
+          path: |
+            ~/.rustup/toolchains/${{ env.RUST_VERSION }}-*
+            ~/.rustup/update-hashes/${{ env.RUST_VERSION }}-*
+          key: rustup-${{ runner.os }}-${{ env.RUST_VERSION }}-rustfmt-v1
+      - name: Install the Rust toolchain
+        if: steps.toolchain.outputs.cache-hit != 'true'
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --no-self-update
+      - name: Reads of the environment
+        run: sh tools/dev/check-env-reads.sh
+      - name: Format
+        run: cargo "+$RUST_VERSION" fmt --all -- --check
+      - name: Syntax of the shell scripts
         run: |
-          mkdir -p out
-          docker create --name portal-binary portal:local >/dev/null
-          docker cp portal-binary:/portal out/portal
-          docker rm portal-binary >/dev/null
-          python3 tools/release/check-static.py out/portal
-          docker run --rm portal:local version
-      - name: Check the configuration files of deploy/
-        run: tools/dev/check-configs.sh
-      - name: Smoke test of the Compose stack
-        run: tools/dev/smoke.sh
-
-  android:
-    name: Android app (compile check)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - name: Throwaway signing key (the APK is not uploaded)
-        run: |
-          keytool -genkeypair -noprompt -keystore "$RUNNER_TEMP/ci.jks" -storepass ci-store-pass \
-            -keypass ci-store-pass -alias ci -keyalg RSA -keysize 2048 -validity 1 -dname "CN=Inbox CI"
-      - name: Build the APK
-        env:
-          INBOX_KEYSTORE: ${{ runner.temp }}/ci.jks
-          INBOX_KEYSTORE_PASSWORD: ci-store-pass
-          INBOX_KEY_ALIAS: ci
-          INBOX_KEY_PASSWORD: ci-store-pass
-        run: tools/android/build-apk.sh
+          status=0
+          for file in $(git ls-files '*.sh'); do
+            bash -n "$file" || status=1
+          done
+          exit "$status"

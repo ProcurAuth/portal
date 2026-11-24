@@ -4,6 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/ProcurAuth/portal/actions/workflows/ci.yml"><img src="https://github.com/ProcurAuth/portal/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/ProcurAuth/portal/actions/workflows/nightly.yml"><img src="https://github.com/ProcurAuth/portal/actions/workflows/nightly.yml/badge.svg" alt="Nightly"></a>
   <a href="https://github.com/ProcurAuth/portal/releases/latest"><img src="https://img.shields.io/github/v/release/ProcurAuth/portal?color=4338ca&label=release" alt="Latest release"></a>
   <a href="#licence"><img src="https://img.shields.io/badge/licence-MIT%20OR%20Apache--2.0-lightgrey" alt="Licence: MIT OR Apache-2.0"></a>
   <a href="https://procurauth.github.io/procurauth/implementations.html"><img src="https://img.shields.io/badge/ProcurAuth-1.1-4338ca" alt="ProcurAuth 1.1"></a>

@@ -27,12 +27,14 @@ The test `effect_vectors_match` of `crates/inbox-core` reads `vectors/effect.jso
 
 ## The continuous integration
 
-The job "Format, clippy and tests" of `.github/workflows/ci.yml` does these steps:
+The job "Tests of the workspace" of `.github/workflows/nightly.yml` does these steps. The workflow runs every night, by hand and before a release. It does not run on a push or on a pull request.
 
 1. It clones the ProcurAuth repository at the pinned commit, in the directory `procurauth`.
 2. It sets `PROCURAUTH_CONFORMANCE` to the directory `procurauth/conformance`.
 3. It sets `PROCURAUTH_CONFORMANCE_REQUIRED` to `1`.
 4. It runs `tools/dev/test.sh --workspace --no-fail-fast`.
+
+On your machine, clone the ProcurAuth repository next to this repository, or set `PROCURAUTH_CONFORMANCE`. Then run `tools/dev/heavy.sh tests`. The script sets `PROCURAUTH_CONFORMANCE_REQUIRED` to `1`.
 
 With `PROCURAUTH_CONFORMANCE_REQUIRED=1`, `tools/dev/test.sh` stops with an error when the directory has no `cases/D` or no `cases/E`. The two tests then also fail when `PROCURAUTH_CONFORMANCE` is not set. Thus a run never passes without the cases. When the two variables are not set, the two tests do nothing.
 
@@ -80,7 +82,7 @@ The continuous integration pins one commit of the ProcurAuth repository: `c820b4
 To change the commit:
 
 1. Choose a commit on the branch `main` of the ProcurAuth repository.
-2. Write its full SHA in the member `ref` of the step that gets the conformance cases, in `.github/workflows/ci.yml`.
+2. Write its full SHA in the member `ref` of the step that gets the conformance cases, in `.github/workflows/nightly.yml`.
 3. Write the same SHA in `procurauth_commit` of `demo/conformance/run-conformance-u.sh`.
 4. Write the same SHA in step 2 of [Run the series U](../demo/conformance/README.md#run-the-series-u), in `demo/conformance/README.md`.
 5. Set your ProcurAuth checkout to this commit.

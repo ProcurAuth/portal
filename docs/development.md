@@ -21,6 +21,8 @@ This page is for a person who changes the code or the documents of this reposito
 
 All commands run in Docker. The host needs only Docker, and `python3` for the scripts of the documents.
 
+The CI has a fast path and a heavy path. A job of the fast path takes a few seconds to a few tens of seconds. It runs on each push and on each pull request. The heavy checks take minutes. They run in the workflow `nightly.yml`, and you can run them on your machine. [The checks of the CI](#the-checks-of-the-ci) tells which check is in which path.
+
 | Check | Command |
 |---|---|
 | Reads of the environment, format and clippy | `tools/dev/lint.sh` |
@@ -31,11 +33,33 @@ All commands run in Docker. The host needs only Docker, and `python3` for the sc
 | Links of the documents | `python3 tools/docs/check_links.py` |
 | Site pages are up to date | `python3 tools/docs/build_site.py --check` |
 | Configuration files of `deploy/` | `tools/dev/check-configs.sh` |
-| Image and Compose stack | `tools/build.sh image`, then `tools/dev/smoke.sh` |
+| Image, binary, configuration files and Compose stack | `tools/build.sh image`, then `tools/dev/check-image.sh` |
+| Compose stack only | `tools/build.sh image`, then `tools/dev/smoke.sh` |
+| All heavy checks of the CI (lint, tests, image; add `android`) | `tools/dev/heavy.sh [lint] [tests] [image] [android]` |
 | Portal against the real reference PEP of ProcurAuth | `tools/dev/pep-e2e.sh` |
 | Portal against ClickHouse Dash | `INTEROP_DASH_BIN=<binary> tools/dev/interop-dash.sh` |
 
 To format the code, run `cargo fmt --all` in the same Rust image that `tools/dev/lint.sh` uses.
+
+### The checks of the CI
+
+The CI has two paths. A job of the fast path takes a few seconds to a few tens of seconds, and very rarely more than one minute. A check that cannot meet this rule stays out of the fast path. It runs in `nightly.yml`, and it has a local script.
+
+| Check | Where it runs in the CI | Local command |
+|---|---|---|
+| No workflow publishes an image | `ci.yml`, job Policy, on each push and pull request | `grep` of the job, see `.github/workflows/ci.yml` |
+| Reads of the environment | `ci.yml`, job Rules, format and shell syntax | `tools/dev/check-env-reads.sh` |
+| Format | `ci.yml`, job Rules, format and shell syntax | `tools/dev/lint.sh` |
+| Syntax of the shell scripts | `ci.yml`, job Rules, format and shell syntax | `bash -n FILE` |
+| Documents and site | `docs.yml`, on each push and pull request | `python3 -I scripts/check-docs.py` |
+| Clippy | `nightly.yml`, job Format and clippy | `tools/dev/lint.sh` |
+| Tests of the workspace, and the Inbox on PostgreSQL | `nightly.yml`, job Tests of the workspace | `tools/dev/test.sh` |
+| Image, binary, configuration files and Compose stack | `nightly.yml`, job Image, configuration files and Compose smoke test | `tools/build.sh image`, then `tools/dev/check-image.sh` |
+| Android app | `nightly.yml`, job Android app (compile check) | `tools/android/build-apk.sh` |
+
+The workflow `nightly.yml` runs every night on `main`. You can start it on any branch with Run workflow. The workflow `release.yml` calls `ci.yml` and `nightly.yml`, so a tag never builds a release from a commit that fails a heavy check. The script `tools/dev/heavy.sh` runs the heavy checks on your machine. It needs Docker only.
+
+The fast job keeps the Rust toolchain in the cache of GitHub Actions. It runs `rustfmt` and no build. A pull request therefore gets no clippy result and no test result. Before a review, run `tools/dev/heavy.sh` for a change of the Rust code, of `Cargo.lock` or of the Android app. A dependency bump of the dependency bot has the same rule: start the workflow Nightly on its branch before you merge it.
 
 ### The test script
 
