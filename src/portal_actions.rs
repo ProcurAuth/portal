@@ -20,6 +20,10 @@
 //!   account. A group with `critical = true` never counts a use, so it never has a limit. An
 //!   alert to an account is never critical: it always counts.
 //!
+//! - **Links** (always on): `links.own.edit` lets an account add, change and delete its own links, the tiles that only
+//!   it sees on the launcher. The action applies to the service. An account that loses it keeps its links, and it can
+//!   still delete them.
+//!
 //! The actions of `keys.own` need `keys.own.read` to show their page, and the actions of
 //! `keys.all` need `users.read`. The PDP treats an action as absent when the user
 //! does not have the action that it needs. A key never holds a `keys.*` action. An
@@ -48,6 +52,7 @@ pub const KEYS_OWN_USE: &str = "keys.own.use";
 pub const KEYS_ALL_READ: &str = "keys.all.read";
 pub const KEYS_ALL_REVOKE: &str = "keys.all.revoke";
 pub const USERS_READ: &str = "users.read";
+pub const LINKS_OWN_EDIT: &str = "links.own.edit";
 pub const INBOX_RECEIVE: &str = "inbox.receive";
 pub const ALERT_SEND: &str = "alert.send";
 pub const ALERT_SEND_USER: &str = "alert.send_user";
@@ -80,6 +85,9 @@ const KEY_GROUP: [&str; 8] = [
     KEYS_ALL_REVOKE,
     USERS_READ,
 ];
+
+/// The action of the personal links, in the order of the document.
+const LINKS_GROUP: [&str; 1] = [LINKS_OWN_EDIT];
 
 /// The actions of the inbox, in the order of the document.
 const INBOX_GROUP_ACTIONS: [&str; 12] = [
@@ -126,6 +134,9 @@ pub struct Features {
     pub inbox_groups: Option<Vec<(String, String)>>,
     /// The kinds of key that the file turns on. Empty: the file has no block `keys`.
     pub kinds: Vec<KeyKind>,
+    /// The personal links are on. The portal always turns them on: `Features::default()` has them off so that a test
+    /// of the other features sees the other actions only.
+    pub links: bool,
 }
 
 impl Features {
@@ -139,6 +150,7 @@ impl Features {
                     .collect()
             }),
             kinds: keys.map(KeysConfig::kinds).unwrap_or_default(),
+            links: true,
         }
     }
 
@@ -151,10 +163,15 @@ impl Features {
         self.inbox_groups.is_some()
     }
 
+    pub fn has_links(&self) -> bool {
+        self.links
+    }
+
     /// Whether the document of these features holds this action.
     #[cfg(test)]
     pub fn has_action(&self, action: &str) -> bool {
         (self.has_keys() && KEY_GROUP.contains(&action))
+            || (self.has_links() && LINKS_GROUP.contains(&action))
             || (self.has_inbox() && INBOX_GROUP_ACTIONS.contains(&action))
     }
 }
@@ -186,6 +203,11 @@ fn action_json(name: &str) -> serde_json::Value {
         KEYS_ALL_READ => (&["service"], "See the keys of all the users.", &[]),
         KEYS_ALL_REVOKE => (&["service"], "Revoke a key of any user.", &[]),
         USERS_READ => (&["service"], "See the users and their grants.", &[]),
+        LINKS_OWN_EDIT => (
+            &["service"],
+            "Add, change and delete the links of oneself: the tiles that only this account sees on the launcher.",
+            &[],
+        ),
         INBOX_RECEIVE => (
             &[INBOX_GROUP],
             "Subscribe the phones of the account to the group, to get its messages.",
@@ -251,6 +273,9 @@ pub fn document(features: &Features) -> Arc<Document> {
             "description": "The longest lifetime of a key of this kind, in seconds.",
             "unit": "seconds", "kind": "ceiling", "min": 0, "max": 31_536_000 }),
         );
+    }
+    if features.has_links() {
+        actions.extend(LINKS_GROUP.iter().map(|a| action_json(a)));
     }
     if features.has_inbox() {
         types.push(
@@ -331,6 +356,7 @@ pub fn key_document(features: &Features, kind: KeyKind) -> Option<Arc<Document>>
 pub fn action_names(features: &Features) -> Vec<&'static str> {
     KEY_GROUP
         .iter()
+        .chain(LINKS_GROUP.iter())
         .chain(INBOX_GROUP_ACTIONS.iter())
         .copied()
         .filter(|a| features.has_action(a))
@@ -340,7 +366,7 @@ pub fn action_names(features: &Features) -> Vec<&'static str> {
 /// Whether the name is the name of an action of the service `portal`, with every feature on.
 #[cfg(test)]
 pub fn is_action(name: &str) -> bool {
-    KEY_GROUP.contains(&name) || INBOX_GROUP_ACTIONS.contains(&name)
+    KEY_GROUP.contains(&name) || LINKS_GROUP.contains(&name) || INBOX_GROUP_ACTIONS.contains(&name)
 }
 
 /// The actions that an action needs.
@@ -614,7 +640,12 @@ mod tests {
         let document = document(&all_features());
         let names: Vec<&str> = document.actions.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, action_names(&all_features()));
-        assert_eq!(names.len(), 20);
+        assert_eq!(
+            names.len(),
+            21,
+            "twenty actions of the keys and the inbox, and links.own.edit"
+        );
+        assert!(names.contains(&LINKS_OWN_EDIT));
         assert!(names.contains(&APPROVAL_READ) && names.contains(&APPROVAL_CANCEL));
         // The questions: three actions on the service, and the budget `questions` on the first.
         for name in [QUESTION_ASK, QUESTION_READ, QUESTION_CANCEL] {
@@ -699,6 +730,7 @@ mod tests {
         assert!(none.actions.is_empty() && none.types.is_empty() && none.limits.is_empty());
         assert!(none.resources.is_empty());
         let only_keys = Features {
+            links: false,
             inbox_groups: None,
             kinds: vec![KeyKind::Api],
         };
@@ -714,6 +746,7 @@ mod tests {
             .collect();
         assert_eq!(paths, ["key_kind:api"], "only the kinds that are on");
         let only_inbox = Features {
+            links: false,
             inbox_groups: Some(vec![("infra".into(), "Infra".into())]),
             kinds: Vec::new(),
         };
@@ -838,6 +871,7 @@ mod tests {
     #[test]
     fn a_grant_of_a_feature_that_is_off_stops_the_check() {
         let keys_only = Features {
+            links: false,
             inbox_groups: None,
             kinds: vec![KeyKind::Mcp],
         };
@@ -1182,6 +1216,39 @@ mod tests {
         assert_eq!(
             document.limit_inputs(KEYS_OWN_USE)[0].name,
             MAX_KEY_LIFETIME
+        );
+    }
+    #[test]
+    fn the_action_of_the_personal_links_is_always_on_and_a_key_never_holds_it() {
+        let features = Features::new(None, None);
+        assert!(features.has_links() && features.has_action(LINKS_OWN_EDIT));
+        assert!(
+            !Features::default().has_action(LINKS_OWN_EDIT),
+            "the default has the links off, so a test of the other features sees only these"
+        );
+        assert!(action_names(&features).contains(&LINKS_OWN_EDIT));
+        assert!(is_action(LINKS_OWN_EDIT));
+        let doc = document(&features);
+        assert!(doc.actions.iter().any(|a| a.name == LINKS_OWN_EDIT));
+        assert!(
+            doc.types.is_empty(),
+            "the action is on the service: no resource type"
+        );
+        assert!(needs(LINKS_OWN_EDIT).is_empty());
+        for kind in [KeyKind::Mcp, KeyKind::Api] {
+            assert!(!key_actions(kind).contains(&LINKS_OWN_EDIT), "{kind:?}");
+        }
+        let held = grants(&["links.own.edit on service:portal"]);
+        assert!(effective(&held, LINKS_OWN_EDIT));
+        assert!(check_user_grants(&features, &held).is_ok());
+        assert!(
+            check_user_grants(&Features::default(), &held).is_err(),
+            "without the feature the action does not exist"
+        );
+        assert!(
+            check_key_grants(KeyKind::Api, &held).is_err()
+                && check_key_grants(KeyKind::Mcp, &held).is_err(),
+            "a key refuses the action"
         );
     }
 }

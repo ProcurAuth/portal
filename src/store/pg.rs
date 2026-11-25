@@ -315,6 +315,22 @@ UPDATE keys SET interaction = 'one_shot' WHERE kind = 'api';
 ALTER TABLE keys ADD COLUMN agents TEXT NOT NULL DEFAULT 'discover'
   CHECK (agents IN ('key', 'discover', 'enrolled'));
 UPDATE keys SET agents = 'key' WHERE kind = 'api';
+-- The personal links are part of this version too. user_links holds one row for each link that an account made for
+-- itself: the login of the owner, the id, the name, the absolute link, the description and the icon, with the rules of
+-- external_services. The table has no foreign key, because an account of the file has no row in users: the code removes
+-- the links of an account that it deletes. A database that the version 8 made before the personal links lacks the
+-- table: the check at the end of the migration refuses it.
+CREATE TABLE user_links (
+  login TEXT NOT NULL,
+  id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  href TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  description TEXT NOT NULL DEFAULT '' CHECK (char_length(description) <= 200),
+  icon_type TEXT CHECK (icon_type IN ('image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml')),
+  icon BYTEA CHECK (icon IS NULL OR (icon_type IS NOT NULL AND octet_length(icon) BETWEEN 1 AND 32768)),
+  PRIMARY KEY (login, id)
+);
 ",
 ];
 
@@ -749,6 +765,15 @@ impl Pg {
                     SCHEMA.len()
                 )));
             }
+            let with_links: bool = tx
+                .query_one("SELECT to_regclass('user_links') IS NOT NULL", &[])?
+                .get(0);
+            if !with_links {
+                return Ok(Err(format!(
+                    "the database was made by schema version {} before the personal links, and this portal has no migration for it: make a new database, or add the table user_links by hand (see docs/operations.md, Upgrades, version 5.7.0)",
+                    SCHEMA.len()
+                )));
+            }
             tx.commit()?;
             Ok(Ok(()))
         })?
@@ -890,6 +915,8 @@ impl Pg {
             keys::bump(&mut tx)?;
             let removed = tx.execute("DELETE FROM users WHERE login = $1", &[&login])? > 0;
             totp::remove_rows(&mut tx, login)?;
+            // The personal links of the account go with it.
+            tx.execute("DELETE FROM user_links WHERE login = $1", &[&login])?;
             if removed {
                 tx.commit()?;
             }
@@ -947,6 +974,115 @@ impl Pg {
                 tx.commit()?;
             }
             Ok(removed)
+        })
+    }
+
+    // Personal links --------------------------------------------------------------------------
+
+    pub fn list_user_links(&self, login: &str) -> Result<Vec<ExternalEntry>, String> {
+        let rows = self.run(|c| {
+            Ok(c.query(
+                "SELECT id, name, href, created_at, description, icon_type, icon
+                 FROM user_links WHERE login = $1 ORDER BY id COLLATE \"C\"",
+                &[&login],
+            )?
+            .into_iter()
+            .map(|row| ExternalRow {
+                id: row.get(0),
+                name: row.get(1),
+                href: row.get(2),
+                created_at: row.get(3),
+                description: row.get(4),
+                icon_type: row.get(5),
+                icon: row.get(6),
+            })
+            .collect::<Vec<_>>())
+        })?;
+        rows.into_iter()
+            .map(ExternalRow::into_personal_entry)
+            .collect()
+    }
+
+    pub fn count_user_links(&self, login: &str) -> Result<usize, String> {
+        self.run(|c| {
+            let held: i64 = c
+                .query_one(
+                    "SELECT COUNT(*) FROM user_links WHERE login = $1",
+                    &[&login],
+                )?
+                .get(0);
+            Ok(usize::try_from(held).unwrap_or(usize::MAX))
+        })
+    }
+
+    pub fn insert_user_link(
+        &self,
+        login: &str,
+        entry: &ExternalEntry,
+        max: usize,
+    ) -> Result<(), ExternalError> {
+        self.run(|c| {
+            let mut tx = c.transaction()?;
+            // The advisory lock of the account makes two instances add one after the other, so they cannot pass the
+            // limit together.
+            tx.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended('user_links:' || $1, 0))",
+                &[&login],
+            )?;
+            let held: i64 = tx
+                .query_one("SELECT COUNT(*) FROM user_links WHERE login = $1", &[&login])?
+                .get(0);
+            if usize::try_from(held).unwrap_or(usize::MAX) >= max {
+                return Ok(Err(ExternalError::Full));
+            }
+            let inserted = tx.execute(
+                "INSERT INTO user_links (login, id, name, href, created_at, description, icon_type, icon)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT (login, id) DO NOTHING",
+                &[
+                    &login,
+                    &entry.id,
+                    &entry.name,
+                    &entry.href,
+                    &entry.created_at,
+                    &entry.description,
+                    &entry.icon.as_ref().map(|icon| icon.mime()),
+                    &entry.icon.as_ref().map(|icon| icon.bytes().to_vec()),
+                ],
+            )?;
+            if inserted == 0 {
+                return Ok(Err(ExternalError::Exists));
+            }
+            tx.commit()?;
+            Ok(Ok(()))
+        })
+        .map_err(ExternalError::Db)?
+    }
+
+    pub fn update_user_link(&self, login: &str, entry: &ExternalEntry) -> Result<bool, String> {
+        self.run(|c| {
+            Ok(c.execute(
+                "UPDATE user_links SET name = $3, href = $4, description = $5, icon_type = $6, icon = $7
+                 WHERE login = $1 AND id = $2",
+                &[
+                    &login,
+                    &entry.id,
+                    &entry.name,
+                    &entry.href,
+                    &entry.description,
+                    &entry.icon.as_ref().map(|icon| icon.mime()),
+                    &entry.icon.as_ref().map(|icon| icon.bytes().to_vec()),
+                ],
+            )? > 0)
+        })
+    }
+
+    pub fn remove_user_link(&self, login: &str, id: &str) -> Result<bool, String> {
+        self.run(|c| {
+            Ok(c.execute(
+                "DELETE FROM user_links WHERE login = $1 AND id = $2",
+                &[&login, &id],
+            )? > 0)
         })
     }
 
@@ -1449,7 +1585,7 @@ impl Pg {
             tx.execute("SELECT pg_advisory_xact_lock($1)", &[&LOCK_APPLY])?;
             tx.batch_execute(
                 "LOCK TABLE users, user_grants, sessions_log, service_access, audit_events, login_attempts,
-                            totp_credentials, totp_recovery, totp_key_check, external_services
+                            totp_credentials, totp_recovery, totp_key_check, external_services, user_links
                    IN ACCESS EXCLUSIVE MODE",
             )?;
             for table in IMPORTED_TABLES {
@@ -1590,6 +1726,22 @@ impl Pg {
                     ],
                 )?;
             }
+            for (login, entry) in &dump.user_links {
+                tx.execute(
+                    "INSERT INTO user_links (login, id, name, href, created_at, description, icon_type, icon)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                    &[
+                        login,
+                        &entry.id,
+                        &entry.name,
+                        &entry.href,
+                        &entry.created_at,
+                        &entry.description,
+                        &entry.icon.as_ref().map(|icon| icon.mime()),
+                        &entry.icon.as_ref().map(|icon| icon.bytes().to_vec()),
+                    ],
+                )?;
+            }
             for row in &dump.totp {
                 tx.execute(
                     "INSERT INTO totp_credentials (login, secret, created_at, last_step)
@@ -1644,6 +1796,7 @@ impl Pg {
                 keys: dump.keys.len(),
                 key_history: dump.key_history.len(),
                 externals: dump.externals.len(),
+                user_links: dump.user_links.len(),
                 totp: dump.totp.len(),
             }))
         })?
@@ -1727,9 +1880,10 @@ impl Pg {
 }
 
 /// The tables that the import fills. All of them must be empty.
-const IMPORTED_TABLES: [&str; 9] = [
+const IMPORTED_TABLES: [&str; 10] = [
     "totp_credentials",
     "external_services",
+    "user_links",
     "keys",
     "key_history",
     "users",
@@ -1915,7 +2069,7 @@ mod tests {
                  DROP TABLE keys; DROP TABLE directory_version;
                  ALTER TABLE user_grants DROP COLUMN limits;
                  ALTER TABLE user_grants DROP COLUMN confirm;
-                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services; DROP TABLE user_links;
                  DELETE FROM schema_migrations WHERE version > 5;
                  INSERT INTO users (id, login, password_hash, created_at) VALUES (1, 'alice', 'h', 1);",
             )
@@ -2007,7 +2161,7 @@ mod tests {
         admin
             .batch_execute(
                 "ALTER TABLE sessions DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN mfa;
-                 DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;",
+                 DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services; DROP TABLE user_links;",
             )
             .unwrap();
         drop(fresh);
@@ -2033,7 +2187,7 @@ mod tests {
         let config = fresh.pool.config.clone();
         let mut admin = config.connect(NoTls).unwrap();
         admin
-            .batch_execute("DROP TABLE external_services;")
+            .batch_execute("DROP TABLE external_services; DROP TABLE user_links;")
             .unwrap();
         drop(fresh);
         let error = Pg::start(config, 2, Duration::from_secs(5))
@@ -2041,6 +2195,29 @@ mod tests {
             .expect("the database is refused");
         assert!(
             error.contains("before the external services") && error.contains("external_services"),
+            "{error}"
+        );
+    }
+
+    /// The personal links changed the base schema in place: a database of version 8 without the table is refused.
+    #[test]
+    fn a_database_made_before_the_personal_links_is_refused_with_a_message_that_says_why() {
+        use crate::store::testing::{postgres, Backend};
+        let Some(Backend::Postgres(url)) = postgres() else {
+            return;
+        };
+        let Store::Pg(fresh) = Backend::Postgres(url).fresh() else {
+            unreachable!()
+        };
+        let config = fresh.pool.config.clone();
+        let mut admin = config.connect(NoTls).unwrap();
+        admin.batch_execute("DROP TABLE user_links;").unwrap();
+        drop(fresh);
+        let error = Pg::start(config, 2, Duration::from_secs(5))
+            .err()
+            .expect("the database is refused");
+        assert!(
+            error.contains("before the personal links") && error.contains("user_links"),
             "{error}"
         );
     }
@@ -2193,7 +2370,7 @@ mod tests {
                  INSERT INTO key_grants (key_id, action, resource_type, resource_id)
                    VALUES ('mcp1', 'access', 'service', 'db');
                  ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction; ALTER TABLE keys DROP COLUMN agents;
-                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services; DROP TABLE user_links;
                  DELETE FROM schema_migrations WHERE version > 7;",
             )
             .unwrap();
@@ -2256,7 +2433,7 @@ mod tests {
                 "ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa;
                  ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa;
                  ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction; ALTER TABLE keys DROP COLUMN agents;
-                 DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
+                 DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services; DROP TABLE user_links;
                  DELETE FROM schema_migrations WHERE version > 7;
                  INSERT INTO sessions (digest, binding, sid, login, impersonated, created_at, expires_at, last_seen_at, credential)
                    VALUES (decode(repeat('01', 32), 'hex'), decode(repeat('02', 32), 'hex'), 1, 'alice', false, 10, {}, 10,
@@ -2304,7 +2481,7 @@ mod tests {
                    VALUES ('key1', 1, 'agent', decode(repeat('00', 32), 'hex'), 'ab12', 1);
                  ALTER TABLE keys DROP COLUMN kind;
                  ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction; ALTER TABLE keys DROP COLUMN agents;
-                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services; DROP TABLE user_links;
                  DELETE FROM schema_migrations WHERE version > 6;",
             )
             .unwrap();
@@ -2338,7 +2515,7 @@ mod tests {
                 "DROP TABLE user_grants;
                  ALTER TABLE sessions DROP COLUMN admin_generation;
                  DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
-                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services; DROP TABLE user_links;
                  DELETE FROM schema_migrations WHERE version > 1;
                  CREATE TABLE user_roles (
                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -2393,7 +2570,7 @@ mod tests {
                 "DROP TABLE user_grants;
                  ALTER TABLE sessions DROP COLUMN admin_generation;
                  DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
-                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services; DROP TABLE user_links;
                  DELETE FROM schema_migrations WHERE version > 2;
                  CREATE TABLE user_grants (
                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -2449,7 +2626,7 @@ mod tests {
             .batch_execute(
                 "ALTER TABLE sessions DROP COLUMN admin_generation;
                  DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
-                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services; DROP TABLE user_links;
                  DELETE FROM schema_migrations WHERE version > 3;
                  DROP TABLE user_grants;
                  CREATE TABLE user_grants (
@@ -2492,7 +2669,7 @@ mod tests {
         admin
             .batch_execute(&format!(
                 "DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
-                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services; DROP TABLE user_links;
                  DELETE FROM schema_migrations WHERE version > 4;
                  DROP TABLE user_grants;
                  CREATE TABLE user_grants (

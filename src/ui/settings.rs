@@ -102,6 +102,9 @@ pub enum Tab {
     Activity,
     /// The pages of the inbox. Each user with a right of the inbox features sees it.
     Inbox,
+    /// The personal links of the signed-in account. An account sees it when it holds the action `links.own.edit`, or
+    /// when it still has links.
+    Links,
     /// The second factor of the signed-in account. Each account sees it when `authentication.mfa` is not `off`.
     Security,
 }
@@ -113,6 +116,7 @@ impl Tab {
             Self::Services => SERVICES_PATH,
             Self::Activity => ACTIVITY_PATH,
             Self::Inbox => INBOX_PATH,
+            Self::Links => super::links::PATH,
             Self::Security => super::mfa::SECURITY_PATH,
         }
     }
@@ -123,6 +127,7 @@ impl Tab {
             Self::Services => "Services",
             Self::Activity => "Activity",
             Self::Inbox => "Inbox",
+            Self::Links => "Links",
             Self::Security => "Security",
         }
     }
@@ -145,6 +150,9 @@ pub struct Frame<'a> {
     /// The viewer sees the tab "Security": `authentication.mfa` is not `off`, and the session is not a session of
     /// "Log in as".
     pub security: bool,
+    /// The viewer sees the tab "Links": the account holds the action `links.own.edit`, or it still has personal links,
+    /// and the session is not a session of "Log in as".
+    pub links: bool,
     /// What the tab of the browser shows.
     pub tab: super::TabLook<'a>,
 }
@@ -162,6 +170,9 @@ impl Frame<'_> {
         }
         if self.inbox {
             tabs.push(Tab::Inbox);
+        }
+        if self.links {
+            tabs.push(Tab::Links);
         }
         if self.security {
             tabs.push(Tab::Security);
@@ -2040,6 +2051,7 @@ mod tests {
                 superadmin,
                 notify: None,
                 security: false,
+                links: false,
                 tab: crate::ui::TabLook::DEFAULT,
             }
             .tabs()
@@ -2075,6 +2087,20 @@ mod tests {
         assert!(header.contains(r#"href="/auth/settings/activity">Activity</a>"#));
         assert!(!header.contains("/auth/settings/inbox") && !header.contains("Keys</a>"));
         assert!(!header.contains("disabled") && !header.contains("aria-disabled"));
+        // The tab Links comes after the Inbox and before Security, for an account that is not the superadmin.
+        let account = Frame {
+            keys: true,
+            inbox: true,
+            links: true,
+            security: true,
+            superadmin: false,
+            ..frame()
+        };
+        assert_eq!(
+            account.tabs(),
+            [Tab::Access, Tab::Inbox, Tab::Links, Tab::Security]
+        );
+        assert_eq!(Tab::Links.path(), "/auth/settings/links");
         // One tab: the strip is absent.
         for only in [
             Frame {

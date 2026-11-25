@@ -72,6 +72,7 @@ pub(super) fn frame() -> Frame<'static> {
         superadmin: true,
         notify: None,
         security: false,
+        links: false,
         tab: crate::ui::TabLook::DEFAULT,
     }
 }
@@ -142,6 +143,7 @@ pub(super) fn features() -> ServiceActions {
     use crate::keys::KeyKind;
     use crate::portal_actions::{document, Features};
     let document = document(&Features {
+        links: false,
         inbox_groups: Some(vec![("infra".into(), "Infra".into())]),
         kinds: vec![KeyKind::Api, KeyKind::Mcp],
     });

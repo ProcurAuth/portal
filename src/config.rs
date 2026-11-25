@@ -217,6 +217,8 @@ pub struct UiConfig {
     pub favicon: Favicon,
     /// Each tile of the launcher opens its service in a new tab (`ui.services_new_tab`).
     pub services_new_tab: bool,
+    /// The most personal links that one account can hold (`ui.max_personal_links`).
+    pub max_personal_links: usize,
 }
 
 /// The values of `ui.favicon`.
@@ -694,6 +696,7 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
             icons_dir: PathBuf::from(r.text("ui", "icons_dir")?),
             favicon: Favicon::parse(&r.text("ui", "favicon")?)?,
             services_new_tab: r.bool("ui", "services_new_tab")?,
+            max_personal_links: r.count("ui", "max_personal_links")?,
         },
         logging: LoggingConfig {
             level: LogLevel::parse(&r.text("logging", "level")?)?,

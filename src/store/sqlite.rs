@@ -224,6 +224,12 @@ ALTER TABLE keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'mcp' CHECK (kind IN ('mc
 /// that the version 8 made before 5.4.0 lacks the three columns: [`Sqlite::init`] refuses it. The file
 /// `deploy/migrations/5.3.0-to-5.4.0.sql` adds them.
 ///
+/// The personal links are part of this version too. `user_links` holds one row for each link that an account made for
+/// itself: the login of the owner, the id, the name, the absolute link, the description and the icon, with the rules of
+/// `external_services`. The table has no foreign key, because an account of the file has no row in `users`: the code
+/// removes the links of an account that it deletes. A file that the version 8 made before the personal links lacks the
+/// table: [`Sqlite::init`] refuses it.
+///
 /// The approvals (5.1.0) are part of this version too. `user_grants.confirm` and `key_grants.confirm` hold the property
 /// `confirm` of a grant. `keys.interaction` holds `conversational` or `one_shot`: a key of kind `api` that exists before
 /// gets `one_shot`, the others get `conversational`. A file that the version 8 made before the approvals lacks the three
@@ -261,6 +267,17 @@ CREATE TABLE external_services (
   description TEXT NOT NULL DEFAULT '' CHECK (length(description) <= 200),
   icon_type TEXT CHECK (icon_type IN ('image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml')),
   icon BLOB CHECK (icon IS NULL OR (icon_type IS NOT NULL AND length(icon) BETWEEN 1 AND 32768))
+);
+CREATE TABLE user_links (
+  login TEXT NOT NULL,
+  id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  href TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  description TEXT NOT NULL DEFAULT '' CHECK (length(description) <= 200),
+  icon_type TEXT CHECK (icon_type IN ('image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml')),
+  icon BLOB CHECK (icon IS NULL OR (icon_type IS NOT NULL AND length(icon) BETWEEN 1 AND 32768)),
+  PRIMARY KEY (login, id)
 );
 ALTER TABLE user_grants ADD COLUMN confirm INTEGER NOT NULL DEFAULT 0 CHECK (confirm IN (0, 1));
 ALTER TABLE key_grants ADD COLUMN confirm INTEGER NOT NULL DEFAULT 0 CHECK (confirm IN (0, 1));
@@ -536,6 +553,11 @@ impl Sqlite {
                         "the database was made by schema version {SCHEMA_VERSION} before the description and the icon of the external services (5.4.0), and this portal has no migration for it: apply the migration file 5.3.0-to-5.4.0.sql, or add the columns external_services.description, external_services.icon_type and external_services.icon by hand (see docs/operations.md, Upgrades, version 5.4.0)"
                     ));
                 }
+                if !has_table(&conn, "user_links")? {
+                    return Err(format!(
+                        "the database was made by schema version {SCHEMA_VERSION} before the personal links, and this portal has no migration for it: make a new database, or add the table user_links by hand (see docs/operations.md, Upgrades, version 5.7.0)"
+                    ));
+                }
             }
             newer => {
                 return Err(format!(
@@ -676,6 +698,9 @@ impl Sqlite {
             .execute("DELETE FROM users WHERE login = ?1", [login])
             .map_err(db)?;
         totp::remove_rows(&tx, login).map_err(db)?;
+        // The personal links of the account go with it.
+        tx.execute("DELETE FROM user_links WHERE login = ?1", [login])
+            .map_err(db)?;
         if changed > 0 {
             keys::bump(&tx).map_err(db)?;
         }
@@ -762,6 +787,156 @@ impl Sqlite {
             .collect::<Result<Vec<_>, _>>()
             .map_err(db)?;
         rows.into_iter().map(ExternalRow::into_entry).collect()
+    }
+
+    // Personal links --------------------------------------------------------------------------
+
+    pub fn list_user_links(&self, login: &str) -> Result<Vec<ExternalEntry>, String> {
+        let conn = self.conn();
+        Self::user_links_with(&conn, login)
+    }
+
+    pub fn count_user_links(&self, login: &str) -> Result<usize, String> {
+        let conn = self.conn();
+        let held: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM user_links WHERE login = ?1",
+                [login],
+                |r| r.get(0),
+            )
+            .map_err(db)?;
+        Ok(usize::try_from(held).unwrap_or(usize::MAX))
+    }
+
+    pub fn insert_user_link(
+        &self,
+        login: &str,
+        entry: &ExternalEntry,
+        max: usize,
+    ) -> Result<(), ExternalError> {
+        let db = |e| ExternalError::Db(db(e));
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(db)?;
+        let held: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM user_links WHERE login = ?1",
+                [login],
+                |r| r.get(0),
+            )
+            .map_err(db)?;
+        if usize::try_from(held).unwrap_or(usize::MAX) >= max {
+            return Err(ExternalError::Full);
+        }
+        match tx.execute(
+            "INSERT INTO user_links (login, id, name, href, created_at, description, icon_type, icon)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                login,
+                entry.id,
+                entry.name,
+                entry.href,
+                entry.created_at,
+                entry.description,
+                entry.icon.as_ref().map(|icon| icon.mime()),
+                entry.icon.as_ref().map(|icon| icon.bytes().to_vec()),
+            ],
+        ) {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == ErrorCode::ConstraintViolation =>
+            {
+                return Err(ExternalError::Exists)
+            }
+            Err(e) => return Err(ExternalError::Db(self::db(e))),
+        }
+        tx.commit().map_err(db)
+    }
+
+    pub fn update_user_link(&self, login: &str, entry: &ExternalEntry) -> Result<bool, String> {
+        let conn = self.conn();
+        let changed = conn
+            .execute(
+                "UPDATE user_links SET name = ?3, href = ?4, description = ?5, icon_type = ?6, icon = ?7
+                 WHERE login = ?1 AND id = ?2",
+                params![
+                    login,
+                    entry.id,
+                    entry.name,
+                    entry.href,
+                    entry.description,
+                    entry.icon.as_ref().map(|icon| icon.mime()),
+                    entry.icon.as_ref().map(|icon| icon.bytes().to_vec()),
+                ],
+            )
+            .map_err(db)?;
+        Ok(changed > 0)
+    }
+
+    pub fn remove_user_link(&self, login: &str, id: &str) -> Result<bool, String> {
+        let conn = self.conn();
+        let removed = conn
+            .execute(
+                "DELETE FROM user_links WHERE login = ?1 AND id = ?2",
+                params![login, id],
+            )
+            .map_err(db)?;
+        Ok(removed > 0)
+    }
+
+    fn user_links_with(conn: &Connection, login: &str) -> Result<Vec<ExternalEntry>, String> {
+        let rows = conn
+            .prepare(
+                "SELECT id, name, href, created_at, description, icon_type, icon
+                 FROM user_links WHERE login = ?1 ORDER BY id",
+            )
+            .map_err(db)?
+            .query_map([login], |row| {
+                Ok(ExternalRow {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    href: row.get(2)?,
+                    created_at: row.get(3)?,
+                    description: row.get(4)?,
+                    icon_type: row.get(5)?,
+                    icon: row.get(6)?,
+                })
+            })
+            .map_err(db)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db)?;
+        rows.into_iter()
+            .map(ExternalRow::into_personal_entry)
+            .collect()
+    }
+
+    /// Every personal link of every account, for the dump that the import of PostgreSQL reads.
+    fn all_user_links_with(conn: &Connection) -> Result<Vec<(String, ExternalEntry)>, String> {
+        let rows = conn
+            .prepare(
+                "SELECT login, id, name, href, created_at, description, icon_type, icon
+                 FROM user_links ORDER BY login, id",
+            )
+            .map_err(db)?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    ExternalRow {
+                        id: row.get(1)?,
+                        name: row.get(2)?,
+                        href: row.get(3)?,
+                        created_at: row.get(4)?,
+                        description: row.get(5)?,
+                        icon_type: row.get(6)?,
+                        icon: row.get(7)?,
+                    },
+                ))
+            })
+            .map_err(db)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db)?;
+        rows.into_iter()
+            .map(|(login, row)| row.into_personal_entry().map(|entry| (login, entry)))
+            .collect()
     }
 
     // History: writes -------------------------------------------------------------------------
@@ -1316,6 +1491,11 @@ impl Sqlite {
             } else {
                 Vec::new()
             },
+            user_links: if has_table(conn, "user_links")? {
+                Self::all_user_links_with(conn)?
+            } else {
+                Vec::new()
+            },
             totp,
             totp_check,
         })
@@ -1470,7 +1650,7 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction; ALTER TABLE keys DROP COLUMN agents;
-             ALTER TABLE keys DROP COLUMN kind; ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
+             ALTER TABLE keys DROP COLUMN kind; ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services; DROP TABLE user_links;
              PRAGMA user_version = 6;",
         )
         .unwrap();
@@ -1505,7 +1685,7 @@ mod tests {
         // The file of version 8 as it was before the second factor: no table and no column.
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;",
+            "ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services; DROP TABLE user_links;",
         )
         .unwrap();
         drop(conn);
@@ -1517,6 +1697,28 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// The personal links changed the base schema in place: a file of version 8 without the table is refused.
+    #[test]
+    fn a_database_made_before_the_personal_links_is_refused_with_a_message_that_says_why() {
+        let dir = std::env::temp_dir().join(format!("portal-v8-links-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("portal.db");
+        drop(Sqlite::open(&path).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("DROP TABLE user_links;").unwrap();
+        drop(conn);
+        let error = Sqlite::open(&path).err().expect("the file is refused");
+        assert!(
+            error.contains("before the personal links") && error.contains("user_links"),
+            "{error}"
+        );
+        // A new file has the table, and the second start finds nothing to do.
+        std::fs::remove_file(&path).unwrap();
+        drop(Sqlite::open(&path).unwrap());
+        assert!(Sqlite::open(&path).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The external services changed the base schema in place: a file of version 8 without the table is refused.
     #[test]
     fn a_database_made_before_the_external_services_is_refused_with_a_message_that_says_why() {
@@ -1525,7 +1727,8 @@ mod tests {
         let path = dir.join("portal.db");
         drop(Sqlite::open(&path).unwrap());
         let conn = Connection::open(&path).unwrap();
-        conn.execute_batch("DROP TABLE external_services;").unwrap();
+        conn.execute_batch("DROP TABLE external_services; DROP TABLE user_links;")
+            .unwrap();
         drop(conn);
         let error = Sqlite::open(&path).err().expect("the file is refused");
         assert!(
@@ -1704,7 +1907,7 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction; ALTER TABLE keys DROP COLUMN agents;
-             ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
+             ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services; DROP TABLE user_links;
              PRAGMA user_version = 7;",
         )
         .unwrap();
@@ -1794,7 +1997,7 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction; ALTER TABLE keys DROP COLUMN agents;
-             ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
+             ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services; DROP TABLE user_links;
              INSERT INTO sessions_log (sid, login, superadmin, impersonated, user_agent, started_at, last_seen_at)
                VALUES (1, 'alice', 0, 0, 'ua', 10, 10);
              PRAGMA user_version = 7;",
@@ -1828,7 +2031,7 @@ mod tests {
              DROP TABLE keys; DROP TABLE directory_version;
              ALTER TABLE user_grants DROP COLUMN confirm;
              ALTER TABLE user_grants DROP COLUMN limits;
-             ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
+             ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services; DROP TABLE user_links;
              PRAGMA user_version = 5;",
         )
         .unwrap();

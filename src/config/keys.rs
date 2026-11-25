@@ -1074,6 +1074,14 @@ pub static KEYS: &[Key] = &[
         doc: "`true`: a tile of the launcher opens its service in a new browser tab. `false`: the tile opens the service in the same tab. The value applies to every service. A service cannot choose.",
     },
     Key {
+        block: "ui",
+        name: "max_personal_links",
+        kind: Kind::Int { min: 1, max: 256 },
+        presence: Presence::Default("32"),
+        when: When::Always,
+        doc: "The largest number of personal links that one account can hold. A personal link is a tile that an account adds for itself in the page Links, with the action `links.own.edit`. Only its owner sees it. An account that holds this number gets a refusal for a new link.",
+    },
+    Key {
         block: "logging",
         name: "level",
         kind: Kind::Enum(&["error", "warn", "info", "debug"]),

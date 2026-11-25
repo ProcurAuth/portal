@@ -1936,6 +1936,109 @@ input.keyText {
   display: block;
 }
 
+/* The page "Links": the personal links of one account. A row has the icon, the name, the link and the actions. */
+.myLinks {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  max-width: 52rem;
+}
+
+.myLinks__title {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.myLinks__empty {
+  margin: 0;
+  color: var(--muted);
+}
+
+.myLinks__list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.myLinks__row {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.myLinks__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.myLinks__icon {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  object-fit: contain;
+}
+
+.myLinks__icon--letter {
+  display: grid;
+  place-items: center;
+  background: var(--border);
+  font-weight: 600;
+}
+
+.myLinks__text {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+}
+
+.myLinks__name {
+  font-weight: 600;
+}
+
+.myLinks__href,
+.myLinks__desc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.myLinks__acts {
+  display: flex;
+  flex: none;
+  gap: 8px;
+}
+
+.myLinks__edit > summary,
+.myLinks__add > summary {
+  cursor: pointer;
+}
+
+.myLinks__edit > summary {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.myLinks__edit .extForm,
+.myLinks__add .extForm {
+  margin-top: 10px;
+}
+
+.myLinks__check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 0.875rem;
+}
+
 .extDesc {
   margin: 0 0 6px;
   color: var(--muted);

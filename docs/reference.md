@@ -2,7 +2,7 @@
 
 This page lists the HTTP endpoints of the three listeners of portal. It lists the error codes, the cookies and the headers. It also gives the rules of the command line and the exit codes.
 
-The tables come from the code of version 5.6.1: the route tables in `src/http.rs`, `src/http/pdp.rs`, `src/http/approval_api.rs`, `src/inbox/http.rs` and `src/inbox/peer.rs`. A path that this page does not list is an unknown path. The section [Command line](#command-line) also gives changes after version 5.6.0: see the section `[Unreleased]` of [CHANGELOG.md](../CHANGELOG.md).
+The tables come from the code of version 5.7.0: the route tables in `src/http.rs`, `src/http/pdp.rs`, `src/http/approval_api.rs`, `src/inbox/http.rs` and `src/inbox/peer.rs`. A path that this page does not list is an unknown path. The section [Command line](#command-line) also gives changes after version 5.6.1: see the section `[5.7.0]` of [CHANGELOG.md](../CHANGELOG.md).
 
 ## How to read this page
 
@@ -112,6 +112,7 @@ All these routes use `GET`. A request with no session gets a `302` to `/auth/log
 | `/auth/settings/activity` | The superadmin | `200` tab Activity | |
 | `/auth/settings/give?user=&service=` | The superadmin | `303` to the editor of grants | `404` |
 | `/auth/settings/security` | An account, when `authentication.mfa` is not `off` | `200` | `404` |
+| `/auth/settings/links` | An account that holds `links.own.edit`, or has a personal link | `200` | `404`, also in a session of `Log in as` |
 | `/auth/options?service=&type=&parent=&q=&after=` | An account that can fill the forms of grants | `200` JSON `{items, next, unavailable}` | `401`, `403`, `400` for an unknown, repeated or long parameter |
 
 `/auth/options` asks the service for the children of a node, with the identity token of the person. `unavailable` is `true` when the service gives no list. An impersonated session can read these pages. See [Settings pages and history](settings-and-history.md).
@@ -131,6 +132,9 @@ Each route is a `POST` with a form body. Each answer is a `303` back to the page
 | `/auth/users/reset-two-factor` | superadmin, form token | Remove the second factor of an account. | `404` when `authentication.mfa` is `off` |
 | `/auth/services/add` | superadmin, form token | Add an external service. | `404` when `access.grants_mode` is `static` |
 | `/auth/services/delete` | superadmin, form token | Delete an external service. | |
+| `/auth/links/add` | session, form token (purpose `links`), action `links.own.edit` | Add a personal link. | `403` without the action, and in a session of `Log in as` |
+| `/auth/links/edit` | session, form token (purpose `links`), action `links.own.edit` | Change a personal link. | `403` without the action, and in a session of `Log in as` |
+| `/auth/links/delete` | session, form token (purpose `links`) | Delete a personal link of the account. | `403` in a session of `Log in as` |
 | `/auth/security/enable` | session, form token (purpose `security`) | Confirm the second factor with the first code. | `200` with the recovery codes. A wrong code gives `200` with the page of the enrolment. |
 | `/auth/security/disable` | session, form token, password and code | Disable the second factor. | |
 | `/auth/security/recovery` | session, form token, password and code | Make new recovery codes. | `200` with the recovery codes |
@@ -199,6 +203,7 @@ A `GET` on the path of a form answers `405`. A `POST` on any other path, and a `
 | GET | `/auth/assets/theme.js`, `/auth/assets/settings.js`, `/auth/assets/notify.js` | none | The plain scripts. |
 | GET | `/auth/icons/{set}/{name}.svg` | none | An icon of a bundled set. `404` for an unknown icon. |
 | GET | `/auth/ext-icon/{id}` | session that may open the service | The image of an external service. The answer has an `ETag` and `Cache-Control: private, no-cache`. |
+| GET | `/auth/my-icon/{id}` | session of the owner | The image of a personal link. Any other request gets the answer of an unknown path. |
 
 ### API for senders and webhooks
 
@@ -455,7 +460,7 @@ The pages, the redirects and the JSON of the portal listener have these headers.
 | `X-Frame-Options` | `DENY` |
 | `Referrer-Policy` | `same-origin` |
 
-An icon (`/auth/icons/`, `/auth/ext-icon/`) has the policy `default-src 'none'; style-src 'unsafe-inline'; sandbox`. The metrics answer has `Cache-Control: no-store, max-age=0` and `X-Content-Type-Options: nosniff`.
+An icon (`/auth/icons/`, `/auth/ext-icon/`, `/auth/my-icon/`) has the policy `default-src 'none'; style-src 'unsafe-inline'; sandbox`. The metrics answer has `Cache-Control: no-store, max-age=0` and `X-Content-Type-Options: nosniff`.
 
 ## Command line
 

@@ -523,6 +523,32 @@ Some changes of the base schema (version 8) have no migration. A database that a
 
 The sections go from the newest version to the oldest. Read the sections between your version and the target.
 
+### 5.7.0
+
+This version adds the personal links. They add the table `user_links` to the base schema (version 8), with no migration. A database that an earlier build made lacks the table. The portal then stops at start and names the table. Make a new database, or add the table by hand.
+
+- The key `ui.max_personal_links` is new. It has the default 32, and its range is 1 to 256.
+- The action `links.own.edit` is new. The service `portal` always has it. No account holds it until the superadmin gives it.
+- With SQLite, stop the portal, copy the database file, then run the SQL below with `sqlite3 -bail portal.db`.
+- With PostgreSQL, stop the portal, take a `pg_dump`, then run the SQL below with `psql -v ON_ERROR_STOP=1`.
+- The command `portal import-sqlite` copies the table too. It prints the number of personal links that it copied.
+
+```sql
+CREATE TABLE user_links (
+  login TEXT NOT NULL,
+  id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  href TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  description TEXT NOT NULL DEFAULT '' CHECK (char_length(description) <= 200),
+  icon_type TEXT CHECK (icon_type IN ('image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml')),
+  icon BYTEA CHECK (icon IS NULL OR (icon_type IS NOT NULL AND octet_length(icon) BETWEEN 1 AND 32768)),
+  PRIMARY KEY (login, id)
+);
+```
+
+With SQLite, write `INTEGER` for `created_at`, `length` for `char_length`, `BLOB` for `BYTEA`, and `length` for `octet_length`.
+
 ### 5.6.1
 
 This version changes no table, no frame of the phone and no key of the file. Read these points when you upgrade from 5.6.0.

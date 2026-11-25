@@ -6940,6 +6940,7 @@ mod kinds_tests {
             ("/auth/settings/services", "services"),
             ("/auth/settings/activity", "activity"),
             ("/auth/settings/inbox", "inbox"),
+            ("/auth/settings/links", "links"),
         ] {
             if users.body.contains(&format!(r#"href="{path}""#)) {
                 tabs.push(name);
@@ -7041,10 +7042,14 @@ mod kinds_tests {
         each_backend(|backend| {
             let node = matrix_node(backend, false, None, false, false);
             let seen = look(&node);
-            assert_eq!(seen.tabs, ["access", "services", "activity"]);
+            assert_eq!(seen.tabs, ["access", "services", "activity", "links"]);
             assert!(!seen.new_user, "no entry that makes an account");
             assert_eq!(seen.create_route, 404);
-            assert!(seen.features.is_none(), "no part for the portal features");
+            assert_eq!(
+                names(&seen.features),
+                ["links.own.edit"],
+                "no part for the keys and the inbox: the portal features have the personal links only"
+            );
             assert_eq!(seen.keys_routes, [404, 404]);
             assert!(seen.inbox_routes_absent);
             assert_eq!(seen.inbox_page, 404);
@@ -7057,7 +7062,7 @@ mod kinds_tests {
         each_backend(|backend| {
             let node = matrix_node(backend, true, Some(""), false, true);
             let seen = look(&node);
-            assert_eq!(seen.tabs, ["access", "services", "activity"]);
+            assert_eq!(seen.tabs, ["access", "services", "activity", "links"]);
             assert!(seen.new_user);
             let features = names(&seen.features);
             assert!(features.contains(&"keys.own.read") && features.contains(&"keys.own.create"));
@@ -7095,7 +7100,10 @@ mod kinds_tests {
         each_backend(|backend| {
             let node = matrix_node(backend, false, None, true, true);
             let seen = look(&node);
-            assert_eq!(seen.tabs, ["access", "services", "activity", "inbox"]);
+            assert_eq!(
+                seen.tabs,
+                ["access", "services", "activity", "inbox", "links"]
+            );
             let features = names(&seen.features);
             assert!(features.contains(&"inbox.receive") && features.contains(&"alert.send"));
             assert!(
@@ -7115,7 +7123,10 @@ mod kinds_tests {
         each_backend(|backend| {
             let node = matrix_node(backend, true, Some("api = true"), true, true);
             let seen = look(&node);
-            assert_eq!(seen.tabs, ["access", "services", "activity", "inbox"]);
+            assert_eq!(
+                seen.tabs,
+                ["access", "services", "activity", "inbox", "links"]
+            );
             assert!(seen.new_user);
             assert_ne!(seen.create_route, 404);
             let features = names(&seen.features);
@@ -7140,7 +7151,10 @@ mod kinds_tests {
         each_backend(|backend| {
             let node = matrix_node(backend, true, Some("api = true"), true, false);
             let seen = look(&node);
-            assert_eq!(seen.tabs, ["access", "services", "activity", "inbox"]);
+            assert_eq!(
+                seen.tabs,
+                ["access", "services", "activity", "inbox", "links"]
+            );
             assert!(!seen.new_user, "no button, no form, no entry in the page");
             assert_eq!(seen.create_route, 404);
             // The accounts that exist stay editable, as the mode of the grants says.
@@ -7186,7 +7200,11 @@ mod kinds_tests {
             assert_eq!(activity.status, 200, "{}", activity.body);
             assert!(activity.body.contains("Sign-ins"));
             let nav = users.body.split("<main").next().unwrap();
-            assert_eq!(nav.matches("contentTabs__tab").count(), 3, "three tabs");
+            assert_eq!(
+                nav.matches("contentTabs__tab").count(),
+                4,
+                "three tabs of the superadmin, and the tab Links"
+            );
             assert!(!nav.contains("/auth/keys") && !nav.contains("/auth/settings/inbox"));
             // The route of the creation answers 404, and the old routes are gone.
             for path in [
@@ -7222,7 +7240,11 @@ mod kinds_tests {
                 assert!(users.body.contains(part), "{part}");
             }
             let nav = users.body.split("<main").next().unwrap();
-            assert_eq!(nav.matches("contentTabs__tab").count(), 4, "four tabs");
+            assert_eq!(
+                nav.matches("contentTabs__tab").count(),
+                5,
+                "four tabs, and the tab Links"
+            );
             let create = page(&node, &root, "/auth/settings/new-user");
             assert_eq!(create.status, 200, "{}", create.body);
             assert!(create.body.contains(r#"id="add-user""#));
@@ -12019,4 +12041,404 @@ fn pdp_latency_of_a_plain_evaluation() {
             times[times.len() - 1]
         );
     }
+}
+
+// Personal links ----------------------------------------------------------------------------------
+
+const ICON_URI: &str =
+    "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=";
+
+fn link_post(node: &Node, session: &str, path: &str, fields: &str) -> Reply {
+    post(node, session, path, links_page::LINKS_TOKEN, fields)
+}
+
+fn add_link(node: &Node, session: &str, name: &str, href: &str, icon: &str) -> Reply {
+    link_post(
+        node,
+        session,
+        ui::links::ADD_PATH,
+        &format!(
+            "name={}&href={}&description=&icon={}",
+            percent_encode_query_component(name),
+            percent_encode_query_component(href),
+            percent_encode_query_component(icon)
+        ),
+    )
+}
+
+/// A node with the accounts alice and bob. Alice holds the action `links.own.edit`. Bob holds nothing.
+fn node_with_alice_and_bob(backend: &Backend, extra: &str) -> (Node, String) {
+    let node = start_with(Arc::new(backend.fresh()), Some(Duration::ZERO), extra);
+    let root = sign_in(&node, "root", PASSWORD);
+    for login in ["alice", "bob"] {
+        let added = post(
+            &node,
+            &root,
+            USERS_ADD_PATH,
+            USERS_TOKEN,
+            &format!("login={login}&password=a-long-password-1"),
+        );
+        assert_eq!(added.status, 303);
+    }
+    let given = post(
+        &node,
+        &root,
+        USERS_UPDATE_PATH,
+        USERS_TOKEN,
+        "grants=1&login=alice&grant0=links.own.edit+on+service%3Aportal",
+    );
+    assert_eq!(
+        given.location(),
+        Some("/auth/settings/users/alice?s=user-updated")
+    );
+    (node, root)
+}
+
+#[test]
+fn an_account_with_the_action_adds_a_link_that_only_it_sees_and_reads() {
+    each_backend(|backend| {
+        let (node, root) = node_with_alice_and_bob(backend, "");
+        let alice = sign_in(&node, "alice", "a-long-password-1");
+        let bob = sign_in(&node, "bob", "a-long-password-1");
+        let wiki = "https://wiki.example.org/start?a=1&b=2";
+
+        let before = page(&node, &alice, "/auth/settings/links");
+        assert_eq!(before.status, 200, "{}", before.body);
+        assert!(
+            before.body.contains("Add a link") && before.body.contains("You have no link yet.")
+        );
+        let added = add_link(&node, &alice, "Team wiki", wiki, ICON_URI);
+        assert_eq!(added.status, 303, "{}", added.body);
+        assert_eq!(added.location(), Some("/auth/settings/links?s=link-added"));
+        let stored = node.state.store.list_user_links("alice").unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            (stored[0].id.as_str(), stored[0].href.as_str()),
+            ("ext-team-wiki", wiki)
+        );
+        assert!(stored[0].icon.is_some());
+
+        // The launcher of the owner has the tile in the group "My links", and a way to the page.
+        let launcher = page(&node, &alice, "/");
+        assert!(launcher.body.contains("Team wiki"), "{}", launcher.body);
+        assert!(launcher.body.contains("My links"));
+        assert!(launcher
+            .body
+            .contains(r#"href="https://wiki.example.org/start?a=1&amp;b=2""#));
+        assert!(launcher.body.contains("/auth/my-icon/ext-team-wiki"));
+        assert!(launcher.body.contains(r#"href="/auth/settings/links""#));
+        // Nobody else sees the link: not another account, not the superadmin.
+        for (who, session) in [("bob", &bob), ("root", &root)] {
+            let other = page(&node, session, "/");
+            assert!(!other.body.contains("Team wiki"), "{who} sees it");
+            assert!(!other.body.contains("My links"), "{who} sees the group");
+        }
+        // The page of the owner lists it. Another account has no such page.
+        assert!(page(&node, &alice, "/auth/settings/links")
+            .body
+            .contains("https://wiki.example.org/start?a=1&amp;b=2"));
+        assert_eq!(page(&node, &bob, "/auth/settings/links").status, 404);
+        assert_eq!(
+            link_post(
+                &node,
+                &bob,
+                ui::links::ADD_PATH,
+                "name=x&href=https%3A%2F%2Fx.example.org%2F&description=&icon="
+            )
+            .status,
+            403,
+            "an account without the action adds nothing"
+        );
+
+        // The icon: the owner reads it, nobody else does, and the answer of the others is the answer of an unknown path.
+        let icon = page(&node, &alice, "/auth/my-icon/ext-team-wiki");
+        assert_eq!(icon.status, 200);
+        assert_eq!(icon.header("content-type"), Some("image/svg+xml"));
+        assert_eq!(icon.header("x-content-type-options"), Some("nosniff"));
+        assert_eq!(icon.header("cache-control"), Some("private, no-cache"));
+        let unknown = page(&node, &alice, "/auth/my-icon/ext-nothing");
+        for session in [&bob, &root] {
+            let other = page(&node, session, "/auth/my-icon/ext-team-wiki");
+            assert_eq!(other.status, unknown.status);
+            assert_eq!(other.status, 404);
+            // The page of an unknown path is the same page: the portal masks the markup of each answer, so the
+            // text differs by its attributes only.
+            assert!(
+                other.body.contains("Page not found") && unknown.body.contains("Page not found"),
+                "the same answer as an unknown icon"
+            );
+        }
+        let visitor = send(node.port, "GET", "/auth/my-icon/ext-team-wiki", &[], "");
+        assert_eq!(
+            visitor.status, 302,
+            "no session: the answer of any unknown path"
+        );
+        assert!(!visitor.body.contains("<svg"), "the image never leaves");
+        assert_ne!(
+            page(&node, &alice, "/auth/ext-icon/ext-team-wiki").status,
+            200,
+            "the route of the services does not serve it"
+        );
+
+        // The superadmin who browses as alice does not read what she keeps for herself.
+        let reply = post(&node, &root, IMPERSONATE_PATH, USERS_TOKEN, "login=alice");
+        assert_eq!(reply.status, 303);
+        let as_alice = reply.cookie(&session_cookie_name(&node)).unwrap();
+        assert!(!page(&node, &as_alice, "/").body.contains("Team wiki"));
+        assert_eq!(page(&node, &as_alice, "/auth/settings/links").status, 404);
+        assert_eq!(
+            page(&node, &as_alice, "/auth/my-icon/ext-team-wiki").status,
+            404
+        );
+        assert_eq!(
+            add_link(&node, &as_alice, "Other", "https://o.example.org/", "").status,
+            403,
+            "a session of Log in as changes nothing"
+        );
+        assert_eq!(node.state.store.count_user_links("alice").unwrap(), 1);
+    });
+}
+
+#[test]
+fn an_account_that_loses_the_action_keeps_its_links_and_can_only_delete_them() {
+    each_backend(|backend| {
+        let (node, root) = node_with_alice_and_bob(backend, "");
+        let alice = sign_in(&node, "alice", "a-long-password-1");
+        assert_eq!(
+            add_link(&node, &alice, "Team wiki", "https://wiki.example.org/", "").status,
+            303
+        );
+        let took = post(
+            &node,
+            &root,
+            USERS_UPDATE_PATH,
+            USERS_TOKEN,
+            "grants=1&login=alice",
+        );
+        assert_eq!(took.status, 303);
+        node.state.users.refresh(&node.state.store).unwrap();
+        let alice = sign_in(&node, "alice", "a-long-password-1");
+
+        let launcher = page(&node, &alice, "/");
+        assert!(
+            launcher.body.contains("Team wiki"),
+            "the link stays on the launcher"
+        );
+        let links = page(&node, &alice, "/auth/settings/links");
+        assert_eq!(
+            links.status, 200,
+            "she still has a link, so she still has the page"
+        );
+        assert!(links.body.contains(ui::links::DELETE_PATH));
+        assert!(
+            !links.body.contains(ui::links::ADD_PATH),
+            "no form that adds"
+        );
+        assert!(
+            !links.body.contains(ui::links::EDIT_PATH),
+            "no form that changes"
+        );
+        assert!(links.body.contains("cannot add or change links"));
+        assert_eq!(
+            add_link(&node, &alice, "New", "https://n.example.org/", "").status,
+            403
+        );
+        let change = link_post(
+            &node,
+            &alice,
+            ui::links::EDIT_PATH,
+            "id=ext-team-wiki&name=Wiki&href=https%3A%2F%2Fw.example.org%2F&description=&icon=",
+        );
+        assert_eq!(change.status, 403);
+        assert_eq!(
+            node.state.store.list_user_links("alice").unwrap()[0].href,
+            "https://wiki.example.org/",
+            "nothing changed"
+        );
+        let deleted = link_post(&node, &alice, ui::links::DELETE_PATH, "id=ext-team-wiki");
+        assert_eq!(
+            deleted.location(),
+            Some("/auth/settings/links?s=link-deleted")
+        );
+        assert_eq!(node.state.store.count_user_links("alice").unwrap(), 0);
+        assert_eq!(
+            page(&node, &alice, "/auth/settings/links").status,
+            404,
+            "no action and no link: no page"
+        );
+        assert!(!page(&node, &alice, "/").body.contains("Team wiki"));
+    });
+}
+
+#[test]
+fn a_personal_link_follows_the_rules_of_a_link_and_the_limit() {
+    each_backend(|backend| {
+        let (node, _root) = node_with_alice_and_bob(backend, r#"ui { max_personal_links = 2 }"#);
+        let alice = sign_in(&node, "alice", "a-long-password-1");
+        let refused = |reply: Reply, code: &str| {
+            assert_eq!(reply.status, 303, "{}", reply.body);
+            assert_eq!(
+                reply.location(),
+                Some(format!("/auth/settings/links?s={code}").as_str())
+            );
+        };
+        refused(
+            add_link(&node, &alice, " ", "https://a.example.org/", ""),
+            "link-bad-name",
+        );
+        refused(
+            add_link(&node, &alice, "A", "javascript:alert(1)", ""),
+            "link-bad-link",
+        );
+        refused(
+            add_link(&node, &alice, "A", "ftp://a.example.org/", ""),
+            "link-bad-link",
+        );
+        refused(
+            add_link(
+                &node,
+                &alice,
+                "A",
+                "https://a.example.org/",
+                "data:text/html;base64,PGI+",
+            ),
+            "link-bad-icon",
+        );
+        refused(
+            link_post(
+                &node,
+                &alice,
+                ui::links::ADD_PATH,
+                &format!(
+                    "name=A&href=https%3A%2F%2Fa.example.org%2F&description={}&icon=",
+                    "d".repeat(201)
+                ),
+            ),
+            "link-bad-description",
+        );
+        assert_eq!(
+            node.state.store.count_user_links("alice").unwrap(),
+            0,
+            "nothing stored"
+        );
+        refused(
+            add_link(&node, &alice, "One", "https://1.example.org/", ICON_URI),
+            "link-added",
+        );
+        refused(
+            add_link(&node, &alice, "One", "https://again.example.org/", ""),
+            "link-exists",
+        );
+        refused(
+            add_link(&node, &alice, "Two", "https://2.example.org/", ""),
+            "link-added",
+        );
+        refused(
+            add_link(&node, &alice, "Three", "https://3.example.org/", ""),
+            "link-limit",
+        );
+        assert!(page(&node, &alice, "/auth/settings/links")
+            .body
+            .contains("the largest number"));
+        // An unknown field is a bad request, and the other fields store nothing.
+        assert_eq!(
+            link_post(&node, &alice, ui::links::DELETE_PATH, "id=ext-two&extra=1").status,
+            400
+        );
+        assert_eq!(node.state.store.count_user_links("alice").unwrap(), 2);
+
+        // A change keeps the id, keeps the icon when the field is empty, and drops it on request.
+        let change = |fields: &str| {
+            link_post(
+                &node,
+                &alice,
+                ui::links::EDIT_PATH,
+                &format!("id=ext-one&{fields}"),
+            )
+        };
+        refused(
+            change("name=First&href=https%3A%2F%2Ffirst.example.org%2F&description=Notes&icon="),
+            "link-updated",
+        );
+        let one = &node.state.store.list_user_links("alice").unwrap()[0];
+        assert_eq!(
+            (
+                one.id.as_str(),
+                one.name.as_str(),
+                one.href.as_str(),
+                one.description.as_str()
+            ),
+            ("ext-one", "First", "https://first.example.org/", "Notes")
+        );
+        assert!(one.icon.is_some(), "an empty field keeps the icon");
+        refused(
+            change("name=First&href=https%3A%2F%2Ffirst.example.org%2F&description=&icon=&remove_icon=1"),
+            "link-updated",
+        );
+        assert!(node.state.store.list_user_links("alice").unwrap()[0]
+            .icon
+            .is_none());
+        refused(
+            link_post(
+                &node,
+                &alice,
+                ui::links::EDIT_PATH,
+                "id=ext-nothing&name=X&href=https%3A%2F%2Fx.example.org%2F&description=&icon=",
+            ),
+            "link-gone",
+        );
+        refused(
+            link_post(&node, &alice, ui::links::DELETE_PATH, "id=ext-nothing"),
+            "link-gone",
+        );
+    });
+}
+
+#[test]
+fn a_link_of_one_account_is_never_changed_or_deleted_by_another() {
+    each_backend(|backend| {
+        let (node, root) = node_with_alice_and_bob(backend, "");
+        let give_bob = post(
+            &node,
+            &root,
+            USERS_UPDATE_PATH,
+            USERS_TOKEN,
+            "grants=1&login=bob&grant0=links.own.edit+on+service%3Aportal",
+        );
+        assert_eq!(give_bob.status, 303);
+        let alice = sign_in(&node, "alice", "a-long-password-1");
+        let bob = sign_in(&node, "bob", "a-long-password-1");
+        assert_eq!(
+            add_link(&node, &alice, "Mine", "https://mine.example.org/", "").status,
+            303
+        );
+        let delete = link_post(&node, &bob, ui::links::DELETE_PATH, "id=ext-mine");
+        assert_eq!(delete.location(), Some("/auth/settings/links?s=link-gone"));
+        let edit = link_post(
+            &node,
+            &bob,
+            ui::links::EDIT_PATH,
+            "id=ext-mine&name=Hers&href=https%3A%2F%2Fhers.example.org%2F&description=&icon=",
+        );
+        assert_eq!(edit.location(), Some("/auth/settings/links?s=link-gone"));
+        let kept = node.state.store.list_user_links("alice").unwrap();
+        assert_eq!((kept.len(), kept[0].name.as_str()), (1, "Mine"));
+        assert!(node.state.store.list_user_links("bob").unwrap().is_empty());
+        // A form without the token of the page is refused.
+        let origin = format!("http://127.0.0.1:{}", node.port);
+        let cookie = format!("{}={alice}", session_cookie_name(&node));
+        let forged = send(
+            node.port,
+            "POST",
+            ui::links::DELETE_PATH,
+            &[
+                ("Origin", &origin),
+                ("Content-Type", "application/x-www-form-urlencoded"),
+                ("Cookie", &cookie),
+            ],
+            "csrf=not-the-token&id=ext-mine",
+        );
+        assert_eq!(forged.status, 403);
+        assert_eq!(node.state.store.count_user_links("alice").unwrap(), 1);
+    });
 }

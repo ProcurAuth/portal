@@ -38,6 +38,10 @@ pub const MAX_HREF_BYTES: usize = 2048;
 pub const MAX_DESCRIPTION_CHARS: usize = 200;
 /// The start of the path of the icon of an external service. The id follows, percent-encoded.
 pub const ICON_PREFIX: &str = "/auth/ext-icon/";
+/// The group of the personal links of an account on the launcher.
+pub const PERSONAL_GROUP: &str = "My links";
+/// The start of the path of the icon of a personal link. The id follows, percent-encoded. Only the owner gets the image.
+pub const PERSONAL_ICON_PREFIX: &str = "/auth/my-icon/";
 
 /// One external service, as the database or the file keeps it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -292,6 +296,24 @@ pub fn icon_path(id: &str) -> String {
         "{ICON_PREFIX}{}",
         crate::util::percent_encode_query_component(id)
     )
+}
+
+/// The path of the icon of a personal link.
+pub fn personal_icon_path(id: &str) -> String {
+    format!(
+        "{PERSONAL_ICON_PREFIX}{}",
+        crate::util::percent_encode_query_component(id)
+    )
+}
+
+/// The tile of a personal link: the tile of an external service in the group of the personal links, with the icon
+/// that only its owner can read. The tile has no grant: the launcher of the owner is the only place that has it.
+pub fn personal_service(entry: &ExternalEntry) -> Service {
+    Service {
+        group: PERSONAL_GROUP.to_string(),
+        own_icon: entry.icon.as_ref().map(|_| personal_icon_path(&entry.id)),
+        ..service(entry)
+    }
 }
 
 /// The tile of an entry: a service with the description and the icon of the entry, no health probe and no actions.
@@ -641,6 +663,27 @@ mod tests {
             .filter(|e| e.id == "ext-wiki")
             .all(|e| e.from_file));
         assert_eq!(effective(&[], &[]), Vec::new());
+    }
+
+    #[test]
+    fn the_tile_of_a_personal_link_has_its_own_group_and_the_icon_that_only_the_owner_reads() {
+        let mut e = entry("Team wiki", "https://x.example.org/");
+        let tile = personal_service(&e);
+        assert_eq!(tile.group, PERSONAL_GROUP);
+        assert_eq!(tile.own_icon, None);
+        assert!(tile.external && tile.health_url.is_none() && tile.actions_url.is_none());
+        e.icon = Some(Arc::new(
+            Image::from_bytes(
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec(),
+                None,
+            )
+            .unwrap(),
+        ));
+        assert_eq!(
+            personal_service(&e).own_icon.as_deref(),
+            Some("/auth/my-icon/ext-team-wiki"),
+            "not the path of the icons of the services: the route knows the owner"
+        );
     }
 
     #[test]

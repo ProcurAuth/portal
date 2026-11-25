@@ -24,6 +24,7 @@ pub mod grant_editor;
 pub mod inbox;
 pub mod items;
 pub mod keys;
+pub mod links;
 pub mod markdown_html;
 pub mod mask;
 pub mod mfa;
@@ -822,6 +823,7 @@ fn demo_features() -> ServiceActions {
     use crate::keys::KeyKind;
     use crate::portal_actions::{document, Features};
     let features = Features {
+        links: false,
         inbox_groups: Some(vec![
             ("infra".into(), "Infra".into()),
             ("database".into(), "Database".into()),
@@ -1112,6 +1114,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
         superadmin: true,
         notify: None,
         security: false,
+        links: false,
         tab: TabLook::DEFAULT,
     };
     let holders = |users: &Accounts| -> Vec<Holder> {

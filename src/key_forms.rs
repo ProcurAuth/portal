@@ -566,6 +566,7 @@ mod tests {
     fn run_api(pairs: &[(&str, &str)], owner: Option<&[Grant]>) -> Result<KeyForm, &'static str> {
         let raw = read(fields(pairs), false).expect("good fields");
         let portal = crate::portal_actions::document(&crate::portal_actions::Features {
+            links: false,
             inbox_groups: Some(vec![("infra".to_string(), "Infra".to_string())]),
             kinds: vec![KeyKind::Api],
         });

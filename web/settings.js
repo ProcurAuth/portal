@@ -1748,6 +1748,7 @@
     // (`key_kind`) and actions on a group of the inbox (`inbox_group`). Only what the document
     // holds is drawn: a feature that the file turns off has no row and no column.
     var KEY_ROWS = ["keys.own.read", "keys.own.edit", "keys.own.revoke", "users.read", "keys.all.read", "keys.all.revoke"];
+    var LINK_ROWS = ["links.own.edit"];
     var DIRECT_ROWS = ["alert.send_user"];
     var PHONE_ROWS = ["phone.read", "phone.revoke", "phone.log"];
     var APPROVAL_ROWS = ["approval.read", "approval.cancel"];
@@ -2090,6 +2091,7 @@
         var again = focus && focus.dataset ? [focus.dataset.cellAction, focus.dataset.cellPath, focus.dataset.columnAction] : null;
         ui.textContent = "";
         flatSection("key", "Keys", KEY_ROWS);
+        flatSection("arrow-up-right", "Links", LINK_ROWS);
         kindMatrix();
         inboxMatrix();
         // The row of the direct alerts exists only when the document of the portal has the action.

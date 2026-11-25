@@ -270,6 +270,15 @@ pub struct ExternalRow {
 }
 
 impl ExternalRow {
+    /// The same conversion for a row of the table `user_links`: the error names this table.
+    pub fn into_personal_entry(self) -> Result<ExternalEntry, String> {
+        self.into_entry().map_err(|error| {
+            error
+                .replace("an external service", "a personal link")
+                .replace("external_services", "user_links")
+        })
+    }
+
     pub fn into_entry(self) -> Result<ExternalEntry, String> {
         let icon = match (self.icon_type, self.icon) {
             (None, None) => None,
@@ -585,6 +594,8 @@ pub struct Dump {
     pub key_history: Vec<KeyHistoryRow>,
     /// The external services.
     pub externals: Vec<ExternalEntry>,
+    /// The personal links of the accounts, each with the login of its owner.
+    pub user_links: Vec<(String, ExternalEntry)>,
     /// The second factor of the accounts, with its recovery codes, and the check value of its key.
     pub totp: Vec<TotpDump>,
     pub totp_check: Option<Vec<u8>>,
@@ -611,6 +622,7 @@ pub struct ImportReport {
     pub keys: usize,
     pub key_history: usize,
     pub externals: usize,
+    pub user_links: usize,
     pub totp: usize,
 }
 
@@ -749,6 +761,40 @@ impl Store {
     /// their counters. The change runs in one transaction. `false`: no such service.
     pub fn remove_external(&self, id: &str) -> Result<bool, String> {
         backend!(self.remove_external(id))
+    }
+
+    // Personal links ---------------------------------------------------------------------------
+
+    /// The personal links of an account, sorted by id.
+    pub fn list_user_links(&self, login: &str) -> Result<Vec<ExternalEntry>, String> {
+        backend!(self.list_user_links(login))
+    }
+
+    /// The number of personal links of an account.
+    pub fn count_user_links(&self, login: &str) -> Result<usize, String> {
+        backend!(self.count_user_links(login))
+    }
+
+    /// Adds a personal link. It fails with `Exists` when the account has a link with this id, and with `Full` when
+    /// the account already holds `max` links.
+    pub fn insert_user_link(
+        &self,
+        login: &str,
+        entry: &ExternalEntry,
+        max: usize,
+    ) -> Result<(), ExternalError> {
+        backend!(self.insert_user_link(login, entry, max))
+    }
+
+    /// Changes the name, the link, the description and the icon of a personal link. The id stays. `false`: the
+    /// account has no link with this id.
+    pub fn update_user_link(&self, login: &str, entry: &ExternalEntry) -> Result<bool, String> {
+        backend!(self.update_user_link(login, entry))
+    }
+
+    /// Removes a personal link. `false`: the account has no link with this id.
+    pub fn remove_user_link(&self, login: &str, id: &str) -> Result<bool, String> {
+        backend!(self.remove_user_link(login, id))
     }
 
     // Directory and keys ------------------------------------------------------------------------
@@ -1344,6 +1390,63 @@ mod tests {
             created_at: NOW,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn personal_links_belong_to_one_account_and_go_with_it() {
+        each_backend(|backend| {
+            let store = backend.fresh();
+            let wiki = external("Team wiki", "https://wiki.example.org/");
+            let docs = external("Docs", "https://docs.example.org/x?y=1#z");
+            assert!(store.list_user_links("alice").unwrap().is_empty());
+            store.insert_user_link("alice", &wiki, 2).unwrap();
+            store.insert_user_link("alice", &docs, 2).unwrap();
+            // The same name is allowed for another account: the key is the login and the id.
+            store.insert_user_link("bob", &wiki, 2).unwrap();
+            assert_eq!(
+                store.insert_user_link("alice", &wiki, 5),
+                Err(ExternalError::Exists),
+                "an account has one link for each id"
+            );
+            assert_eq!(
+                store.insert_user_link("alice", &external("Third", "https://t.example.org/"), 2),
+                Err(ExternalError::Full),
+                "the account holds the most that the caller allows"
+            );
+            assert_eq!(store.count_user_links("alice").unwrap(), 2);
+            assert_eq!(store.count_user_links("bob").unwrap(), 1);
+            assert_eq!(
+                store.list_user_links("alice").unwrap(),
+                [docs.clone(), wiki.clone()],
+                "sorted by id, and only the links of this account"
+            );
+            // A change keeps the id and the date, and changes the other fields.
+            let mut changed = wiki.clone();
+            changed.name = "The wiki".into();
+            changed.href = "https://wiki2.example.org/".into();
+            changed.description = "Notes".into();
+            assert!(store.update_user_link("alice", &changed).unwrap());
+            assert!(
+                !store.update_user_link("carol", &changed).unwrap(),
+                "not her link"
+            );
+            assert_eq!(
+                store.list_user_links("bob").unwrap(),
+                std::slice::from_ref(&wiki),
+                "the link of another account stays as it was"
+            );
+            assert_eq!(store.list_user_links("alice").unwrap()[1], changed);
+            assert!(store.remove_user_link("alice", &docs.id).unwrap());
+            assert!(!store.remove_user_link("alice", &docs.id).unwrap());
+            // The links go with the account that the code deletes.
+            store.insert_user(&user("alice", &[])).unwrap();
+            assert!(store.remove_user("alice").unwrap());
+            assert!(store.list_user_links("alice").unwrap().is_empty());
+            assert_eq!(
+                store.list_user_links("bob").unwrap(),
+                std::slice::from_ref(&wiki)
+            );
+        });
     }
 
     #[test]
@@ -3515,6 +3618,7 @@ mod tests {
                 keys: 2,
                 key_history: 1,
                 externals: 0,
+                user_links: 0,
                 totp: 2,
             }
         );

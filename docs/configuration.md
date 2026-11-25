@@ -382,6 +382,7 @@ The pages.
 | `icons_dir` | text: an absolute path without '..' | `"/icons"` | V | The directory of the offline icon library. If the directory does not exist, the pages show initials. |
 | `favicon` | `default`, `none` | `"default"` | V | The icon of the browser tab. With `default`, the tab shows the built-in logo on the pages after sign-in only, and the server sends the icon to a signed-in browser only. With `none`, no page after sign-in links an icon, and the icon route gives the answer of an unknown path. A page before sign-in never has an icon: it has the empty icon. |
 | `services_new_tab` | `true` or `false` | `true` | V | `true`: a tile of the launcher opens its service in a new browser tab. `false`: the tile opens the service in the same tab. The value applies to every service. A service cannot choose. |
+| `max_personal_links` | number, 1 to 256 | `32` | V | The largest number of personal links that one account can hold. A personal link is a tile that an account adds for itself in the page Links, with the action `links.own.edit`. Only its owner sees it. An account that holds this number gets a refusal for a new link. |
 
 ### Block `logging`
 

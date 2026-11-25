@@ -176,3 +176,31 @@ user "carol" {
 ```
 
 See [Configuration](configuration.md) for each key of the blocks `discovery`, `ui` and `external_service`.
+
+## Personal links
+
+A personal link is a tile that an account adds to its own launcher. It has a name, a link, a description and an icon. Only its owner sees it.
+
+### Who can add and who sees
+
+- **Permission.** The action `links.own.edit` of the service `portal` lets an account add, change and delete its links. The superadmin gives it in the part **Links** of **Server permissions**. The superadmin holds it already.
+- **Loss of the permission.** An account that loses the action keeps its links. The links stay on its launcher, and it opens them. It cannot add or change a link. It can still delete a link.
+- **Only the owner.** The launcher shows the links of the signed-in account in the group **My links**. This group is the last row. No other account sees these links. No list of the superadmin shows them.
+- **Browse as an account.** A session that the superadmin opens with the button `Log in as` shows no personal link of the account and changes none. The page Links does not exist in this session.
+- **No grant.** A personal link has no id of a service and no grant `access`. It owns no path of the gate. It is never a client of the portal.
+- **No protection.** The portal does not protect the link. Anyone who knows the address can open it.
+
+### Page and forms
+
+- **Page.** The tab **Links** (`/auth/settings/links`) lists the links of the account. It shows for an account that holds the action, and for an account that still has links. The gear of the launcher opens the first tab of the account.
+- **Add and change.** The forms have the fields Name, Link, Description and Icon. The rules are the rules of an external service: see [External services](#link-name-id-and-description). An empty field of the icon keeps the icon when you change a link. The box **Remove the icon** removes it.
+- **Id.** The id is `ext-` and the slug of the name. Two links of one account cannot have the same id. Only the account that owns the link uses the id.
+- **Limit.** An account holds `ui.max_personal_links` links at most. The default is 32. The portal refuses a new link above the limit.
+- **Checks.** The forms have the anti-CSRF token and the origin check. They read a body of `server.max_body_bytes` plus 144 KiB for the icon. An unknown field gives `400`. A value that breaks a rule gives a notice, and the portal stores nothing.
+- **Icon route.** The route `GET /auth/my-icon/<id>` serves the icon to the owner only. Any other request gets the answer of an unknown path. The headers are the headers of the icon of an external service.
+
+### Data
+
+- **Table.** The table `user_links` holds one row for each link: the login, the id, the name, the link, the description and the icon. The portal removes the links of an account that it deletes. An account of the file that leaves the file keeps its rows, and nobody reads them.
+- **Several instances.** An instance reads the rows from the database when it draws the launcher. A change shows at once on each instance.
+- **Metrics.** The metric `portal_user_admin_total` counts the actions `link_add`, `link_edit` and `link_delete`.

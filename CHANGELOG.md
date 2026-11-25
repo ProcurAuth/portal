@@ -4,9 +4,23 @@ This file lists the notable changes of each release of portal. The layout follow
 
 ## [Unreleased]
 
+## [5.7.0] - 2026-11-25
+
+This version adds one table to the base schema, one key to the configuration file and one action to the service `portal`. It changes no frame of the phone. Read the notes of [Upgrades](docs/operations.md#570) before you start it on a database that you made with an earlier version.
+
 ### Added
 
+- Personal links. An account that holds the action `links.own.edit` adds tiles to its own launcher: a name, a link, a description and an icon. Only the owner sees them, in the group "My links". The tab Links of the settings has the forms that add, change and delete them. See [Launcher](docs/launcher.md#personal-links).
+- The action `links.own.edit` of the service `portal`. The editor of grants shows it in the part Links of Server permissions. An account that loses it keeps its links and can still delete them.
+- The key `ui.max_personal_links` (default 32, range 1 to 256) sets the largest number of personal links of one account.
+- The route `GET /auth/my-icon/<id>` serves the icon of a personal link to its owner only. The routes `POST /auth/links/add`, `/auth/links/edit` and `/auth/links/delete` are the forms. The metric `portal_user_admin_total` counts the actions `link_add`, `link_edit` and `link_delete`.
+- A session of `Log in as` shows no personal link of the account and changes none.
 - The last job of the release workflow and the script `tools/release/local-release.sh` start the conformance bench of ProcurAuth for the new release. They never block a release.
+
+### Changed
+
+- The schema has the new table `user_links`, with no migration step. A database that an earlier build made lacks it: the portal stops at start and names the table. See Upgrades in [Operations](docs/operations.md#570). The command `portal import-sqlite` copies the table too.
+- The part Server permissions of the editor of grants always shows, because the service `portal` always has the action `links.own.edit`.
 
 ## [5.6.1] - 2026-11-24
 
@@ -205,7 +219,8 @@ The first version of the merged product. One program now holds the launcher, the
 - A key of an earlier version becomes an MCP key.
 - A phone of the earlier standalone alert server (protocol 3) cannot connect. It gets the close code 4426. Each phone enrolls again with a code.
 
-[Unreleased]: https://github.com/ProcurAuth/portal/compare/v5.6.1...HEAD
+[Unreleased]: https://github.com/ProcurAuth/portal/compare/v5.7.0...HEAD
+[5.7.0]: https://github.com/ProcurAuth/portal/compare/v5.6.1...v5.7.0
 [5.6.1]: https://github.com/ProcurAuth/portal/compare/v5.6.0...v5.6.1
 [5.6.0]: https://github.com/ProcurAuth/portal/compare/v5.5.1...v5.6.0
 [5.5.1]: https://github.com/ProcurAuth/portal/compare/v5.5.0...v5.5.1

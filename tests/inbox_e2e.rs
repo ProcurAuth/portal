@@ -4424,7 +4424,7 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     // The superadmin sees four tabs at most and the permission editor shows the groups by name.
     // The tab Keys does not exist: the list of the keys is in the tab Access.
     let (_, page) = inbox_page(&s, "/auth/settings/inbox");
-    for tab in ["Access", "Services", "Activity", "Inbox"] {
+    for tab in ["Access", "Services", "Activity", "Inbox", "Links"] {
         // The tab Inbox has its badge after the name.
         let name = if tab == "Inbox" { ">Inbox<span " } else { tab };
         assert!(
@@ -4435,8 +4435,8 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     assert!(!has(&page, ">Keys</a>"), "the tab Keys is gone");
     assert_eq!(
         page.matches(r#"class="contentTabs__tab"#).count(),
-        4,
-        "four tabs"
+        5,
+        "four tabs and the tab Links"
     );
     // The inbox is a feature of the portal, as the keys are: the Services page does not list it, and
     // it has no page of a service. The editor of permissions shows it in the group "Server permissions".

@@ -683,6 +683,7 @@ async fn render(
         superadmin: is_superadmin(viewer),
         notify: inbox_page::notify_header(state, viewer).await,
         security: true,
+        links: links_page::tab_visible(state, viewer),
         tab: state.tab_look(),
     };
     let picked = pick(row.as_ref());
@@ -784,7 +785,8 @@ async fn security_request(
     action: &'static str,
 ) -> Result<(Viewer, std::collections::HashMap<String, String>, HeaderMap), HttpResponse> {
     let headers = request.headers().clone();
-    let (viewer, form) = form_request(state, request, client, action, SECURITY_TOKEN, 0).await?;
+    let (viewer, form) =
+        form_request(state, request, client, action, SECURITY_TOKEN, 0, false).await?;
     if !tab_visible(state, &viewer) {
         state.metrics.user_admin(action, "forbidden");
         return Err(text_response(StatusCode::FORBIDDEN, "Forbidden\n"));

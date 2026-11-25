@@ -223,6 +223,28 @@ impl Catalog {
         next
     }
 
+    /// The same catalogue with one more group at the end: the personal links of one account. The gate does not
+    /// change: a personal link owns no path. The caller gives the links of the viewer only, and the launcher of the
+    /// viewer is the only page that shows them.
+    pub fn with_personal_links(&self, entries: &[external::ExternalEntry]) -> Catalog {
+        let mut next = self.clone();
+        if entries.is_empty() {
+            return next;
+        }
+        let mut sorted: Vec<&external::ExternalEntry> = entries.iter().collect();
+        sorted.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then(a.id.cmp(&b.id))
+        });
+        next.groups.push(Group {
+            name: external::PERSONAL_GROUP.to_string(),
+            services: sorted.into_iter().map(external::personal_service).collect(),
+        });
+        next
+    }
+
     /// The service with this id.
     pub fn service(&self, id: &str) -> Option<&Service> {
         self.groups
@@ -743,6 +765,40 @@ mod tests {
         assert!(merged.is_complete() == base.is_complete());
         // No entry gives the same catalogue.
         assert_eq!(base.with_externals(&[]), base);
+    }
+
+    #[test]
+    fn personal_links_are_the_last_group_and_change_nothing_else() {
+        let base = Catalog::build(
+            vec![bound("Grafana", "/grafana/")],
+            vec!["a problem".into()],
+        );
+        let merged = base.with_personal_links(&[
+            entry("wiki", "https://wiki.example.org/"),
+            entry("Docs", "https://docs.example.org/"),
+        ]);
+        assert_eq!(base.service_count(), 1, "the original is untouched");
+        let last = merged.groups().last().expect("a group");
+        assert_eq!(last.name, external::PERSONAL_GROUP);
+        assert_eq!(
+            last.services
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Docs", "wiki"],
+            "sorted by name, whatever the case"
+        );
+        assert!(last
+            .services
+            .iter()
+            .all(|s| s.external && s.health_url.is_none()));
+        assert_eq!(merged.problems(), ["a problem"]);
+        assert!(
+            merged.gate().len() == base.gate().len(),
+            "a personal link owns no path of the gate"
+        );
+        // No link gives the same catalogue: no empty group.
+        assert_eq!(base.with_personal_links(&[]), base);
     }
 
     #[test]

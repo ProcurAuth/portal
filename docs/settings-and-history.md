@@ -128,15 +128,20 @@ The tab Activity (`/auth/settings/activity`) has one list with two views, with t
 
 The tab Inbox (`/auth/settings/inbox`) shows only when the file has the block `inbox` and the account has a permission of the Inbox. See [Inbox](inbox/README.md).
 
+### Links
+
+The page Links (`/auth/settings/links`) is the page of one account. It lists the personal links of the account and has the forms that add, change and delete them. See [Launcher: personal links](launcher.md#personal-links).
+
 ### Security
 
 The page Security (`/auth/settings/security`) is the page of one account. It has the second factor of the account. See [Authentication and sessions](authentication.md#second-factor-totp).
 
 ## Who sees which tab
 
-An account that is not the superadmin sees the tabs Access and Inbox only, and only the ones that it may open.
+An account that is not the superadmin sees the tabs Access, Inbox, Links and Security only, and only the ones that it may open.
 
 - The tab Access needs a right to read keys.
+- The tab Links needs the action `links.own.edit`, or at least one personal link. A session of `Log in as` has no tab Links.
 - The code builds the list of tabs from three facts. The viewer is the superadmin, or not. The viewer may read keys, or not. The viewer has a permission of the Inbox, or not.
 - The launcher has no tile for the Inbox: the Inbox is a feature of the portal, as the keys are.
 - The superadmin opens the pages with the gear. An account that may read keys, or that has a permission of the Inbox, gets the gear too. The gear links to the first tab of the account.
@@ -280,6 +285,7 @@ The service lists its own resources. The editor shows the nodes of the member `r
 The group **Server permissions** is not a tree. It shows plain rows and compact matrices.
 
 - The part **Keys** is a plain row. The part **Key kinds** has the longest lifetime of each kind.
+- The part **Links** is a plain row. It has the action `links.own.edit`, which lets an account add and change its personal links.
 - The part **Inbox** has one row for each group, with the columns Receive, Send and Read, and the budget of the alerts. The part **Phones** is a plain row.
 - A feature that the file disables has no row.
 - A critical group has a mark, because a limit never stops its alerts.

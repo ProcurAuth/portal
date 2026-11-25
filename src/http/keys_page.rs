@@ -815,6 +815,7 @@ async fn draw(
         superadmin: is_superadmin(viewer),
         notify: inbox_page::notify_header(state, viewer).await,
         security: mfa_page::tab_visible(state, viewer),
+        links: links_page::tab_visible(state, viewer),
         tab: state.tab_look(),
     };
     let status = if view.needs_access.is_some() {

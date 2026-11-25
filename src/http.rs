@@ -891,6 +891,10 @@ async fn handle_request(
         handle_icon(&state, &path)
     } else if method == Method::GET && path.starts_with(crate::catalog::external::ICON_PREFIX) {
         handle_external_icon(&state, &path, &uri, request.headers(), &client)
+    } else if method == Method::GET
+        && path.starts_with(crate::catalog::external::PERSONAL_ICON_PREFIX)
+    {
+        links_page::handle_icon(&state, &path, &uri, request.headers(), &client)
     } else if method == Method::GET && path == SETTINGS_STYLE_PATH {
         static_response("text/css; charset=utf-8", ui::SETTINGS_CSS)
     } else if method == Method::GET && path == THEME_JS_PATH {
@@ -915,6 +919,12 @@ async fn handle_request(
         handle_external_add(&state, request, &client).await
     } else if method == Method::POST && path == EXTERNAL_DELETE_PATH {
         handle_external_delete(&state, request, &client).await
+    } else if method == Method::POST && path == ui::links::ADD_PATH {
+        links_page::handle_add(&state, request, &client).await
+    } else if method == Method::POST && path == ui::links::EDIT_PATH {
+        links_page::handle_edit(&state, request, &client).await
+    } else if method == Method::POST && path == ui::links::DELETE_PATH {
+        links_page::handle_delete(&state, request, &client).await
     } else if method == Method::POST && path == IMPERSONATE_PATH {
         handle_impersonate(&state, request, &client).await
     } else if method == Method::POST && path == IMPERSONATE_END_PATH {
@@ -1376,6 +1386,12 @@ fn handle_external_icon(
     let Some(image) = image else {
         return not_found_response(state, &Method::GET, uri, || true);
     };
+    icon_response(&image, headers)
+}
+
+/// The answer that serves the image of an icon: its type, the strong validator, and the headers that keep an image
+/// inert. An external service and a personal link use it.
+fn icon_response(image: &crate::catalog::image::Image, headers: &HeaderMap) -> HttpResponse {
     let etag = image.etag();
     let matches = headers
         .get(hyper::header::IF_NONE_MATCH)
@@ -1442,10 +1458,20 @@ async fn handle_home(state: &Arc<AppState>, headers: &HeaderMap, client: &Client
         None if superadmin => Arc::clone(&catalog),
         None => Arc::new(catalog.filtered(|_| true, false)),
     };
+    let hidden_services = catalog.service_count() - shown.service_count();
+    // The personal links of the account are one more group, the last one. Nobody else gets them.
+    let personal = links_page::links_of(state, &viewer);
+    let shown = if personal.is_empty() {
+        shown
+    } else {
+        Arc::new(shown.with_personal_links(&personal))
+    };
     let gear = if superadmin || keys_page::list_visible(state, &viewer) {
         Some(ui::settings::ACCESS_PATH)
     } else if inbox_page::tab_visible(state, &viewer) {
         Some(ui::settings::INBOX_PATH)
+    } else if links_page::tab_visible(state, &viewer) {
+        Some(ui::links::PATH)
     } else if mfa_page::tab_visible(state, &viewer) {
         Some(ui::mfa::SECURITY_PATH)
     } else {
@@ -1469,7 +1495,7 @@ async fn handle_home(state: &Arc<AppState>, headers: &HeaderMap, client: &Client
             impersonating: viewer.session.impersonated,
             logout_token: &logout_token,
             users_token: &users_token,
-            hidden_services: catalog.service_count() - shown.service_count(),
+            hidden_services,
             settings: gear,
             tab: state.tab_look(),
             services_new_tab: state.config.ui.services_new_tab,
@@ -1492,6 +1518,7 @@ fn is_settings_path(path: &str) -> bool {
             | ui::settings::NEW_USER_PATH
             | ui::settings::GIVE_PATH
             | ui::mfa::SECURITY_PATH
+            | ui::links::PATH
     ) || path.starts_with(ui::settings::USER_PATH_PREFIX)
 }
 
@@ -1521,6 +1548,13 @@ async fn handle_settings(
         }
         return mfa_page::handle_security_get(state, uri, &viewer).await;
     }
+    if path == ui::links::PATH {
+        // The page of the personal links is the account's own page. A session of "Log in as" has none.
+        if !links_page::tab_visible(state, &viewer) {
+            return handle_not_found(state, &Method::GET, uri, headers, client);
+        }
+        return links_page::handle_get(state, uri, &viewer).await;
+    }
     if !superadmin
         && !(path == ui::settings::ACCESS_PATH && keys_page::list_visible(state, &viewer))
     {
@@ -1549,6 +1583,7 @@ async fn handle_settings(
         superadmin,
         notify: inbox_page::notify_header(state, &viewer).await,
         security: mfa_page::tab_visible(state, &viewer),
+        links: links_page::tab_visible(state, &viewer),
         tab: state.tab_look(),
     };
     // A service that another instance added a moment ago is not in the directory yet: with a shared database,
@@ -2155,7 +2190,7 @@ fn holders_of(state: &AppState) -> Vec<ui::Holder> {
 /// document of the features that the file turns on. `None`: the file turns none on.
 fn features_service(state: &AppState) -> Option<ui::ServiceActions> {
     let features = state.config.portal_features();
-    if !features.has_keys() && !features.has_inbox() {
+    if !features.has_keys() && !features.has_inbox() && !features.has_links() {
         return None;
     }
     Some(feature_actions(
@@ -3492,12 +3527,13 @@ async fn admin_request(
     client: &Client,
     action: &'static str,
 ) -> Result<(Viewer, std::collections::HashMap<String, String>), HttpResponse> {
-    form_request(state, request, client, action, USERS_TOKEN, 0).await
+    form_request(state, request, client, action, USERS_TOKEN, 0, false).await
 }
 
 /// The most that the form of an external service reads for its icon: a data URI of the largest image (about 44 KB),
 /// with each `+`, `/`, `=`, `:`, `;` and `,` in the percent form, so 3 bytes each. Only the superadmin in its own right
-/// gets this addition to `server.max_body_bytes`: the check of the session comes before the body.
+/// gets this addition to `server.max_body_bytes`, and so does an account on the forms of its personal links: the check
+/// of the session comes before the body.
 const EXTERNAL_ICON_FORM_BYTES: usize = 144 * 1024;
 
 /// The same checks for a form whose anti-CSRF token has the purpose `purpose`.
@@ -3508,7 +3544,8 @@ async fn form_request(
     client: &Client,
     action: &'static str,
     purpose: &'static str,
-    superadmin_extra_bytes: usize,
+    extra_bytes: usize,
+    extra_for_all: bool,
 ) -> Result<(Viewer, std::collections::HashMap<String, String>), HttpResponse> {
     if !validate_post_origin(request.headers()) {
         state.metrics.users_origin_failure();
@@ -3535,8 +3572,8 @@ async fn form_request(
         return Err(redirect_response(StatusCode::SEE_OTHER, LOGIN_PATH));
     };
     let limit = state.config.server.max_body_bytes
-        + if is_superadmin(&first) {
-            superadmin_extra_bytes
+        + if is_superadmin(&first) || extra_for_all {
+            extra_bytes
         } else {
             0
         };
@@ -3645,6 +3682,7 @@ async fn new_user_refused(
         superadmin: is_superadmin(viewer),
         notify: inbox_page::notify_header(state, viewer).await,
         security: mfa_page::tab_visible(state, viewer),
+        links: links_page::tab_visible(state, viewer),
         tab: state.tab_look(),
     };
     let workloads = current_catalog(state);
@@ -4099,6 +4137,7 @@ async fn handle_external_add(
         "external_add",
         USERS_TOKEN,
         EXTERNAL_ICON_FORM_BYTES,
+        false,
     )
     .await
     {
@@ -5293,6 +5332,7 @@ mod edge;
 mod inbox_page;
 mod inbox_rights;
 mod keys_page;
+mod links_page;
 mod mfa_page;
 mod options_page;
 mod pdp;

@@ -279,6 +279,7 @@ impl Context<'_> {
             superadmin: is_superadmin(&self.viewer),
             notify: None,
             security: super::mfa_page::tab_visible(state, &self.viewer),
+            links: super::links_page::tab_visible(state, &self.viewer),
             tab: state.tab_look(),
         }
     }

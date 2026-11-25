@@ -1848,6 +1848,7 @@ mod tests {
         assert_eq!(registry.action_names("portal")[0], "access");
         // The document of the code follows the features that the file turns on.
         let features = crate::portal_actions::Features {
+            links: false,
             inbox_groups: Some(vec![("infra".into(), "Infra".into())]),
             kinds: crate::keys::KeyKind::ALL.to_vec(),
         };

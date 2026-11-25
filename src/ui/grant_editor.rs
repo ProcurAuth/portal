@@ -798,6 +798,7 @@ mod tests {
     /// The service `portal` for an editor, with a critical group and both kinds of key.
     fn portal_service() -> ServiceActions {
         let features = crate::portal_actions::Features {
+            links: false,
             inbox_groups: Some(vec![
                 ("infra".into(), "Infra".into()),
                 ("crit".into(), "Critical".into()),
@@ -893,6 +894,7 @@ mod tests {
     fn a_feature_that_the_file_turns_off_has_no_action_and_no_node() {
         let mut service = portal_service();
         let features = crate::portal_actions::Features {
+            links: false,
             inbox_groups: None,
             kinds: vec![crate::keys::KeyKind::Mcp],
         };
@@ -1226,6 +1228,7 @@ mod tests {
         let own = editor_service(&service(
             crate::portal_actions::SERVICE,
             (*crate::portal_actions::document(&crate::portal_actions::Features {
+                links: false,
                 inbox_groups: Some(Vec::new()),
                 kinds: vec![crate::keys::KeyKind::Mcp],
             }))
